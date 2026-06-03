@@ -94,26 +94,28 @@ async def admin_login(body: AdminLoginRequest, db: AsyncSession = Depends(get_db
     )
     employee = result.scalar_one_or_none()
 
-    # A user may sign in if they are active, have a password set, and hold a
-    # dashboard role — either a new RBAC role_id or a legacy admin/manager role.
-    has_dashboard_role = employee is not None and (
-        employee.role_id is not None or employee.role in ("admin", "manager")
-    )
+    # Step 1 — basic credential check (don't reveal whether the account exists).
     if (
         not employee
         or not employee.is_active
         or not employee.password_hash
-        or not has_dashboard_role
         or not verify_password(body.password, employee.password_hash)
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-    # Account exists and password is correct — check approval gate.
-    if not employee.is_approved:
+    # Step 2 — approval gate (password was correct but account is still pending).
+    if not getattr(employee, "is_approved", True):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account pending admin approval",
         )
+
+    # Step 3 — require a dashboard role.
+    has_dashboard_role = (
+        employee.role_id is not None or employee.role in ("admin", "manager")
+    )
+    if not has_dashboard_role:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     role_name = employee.role_obj.name if employee.role_obj else employee.role
     token = create_admin_token(str(employee.id), employee.role, str(employee.company_id))

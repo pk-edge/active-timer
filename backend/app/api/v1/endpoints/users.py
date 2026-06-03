@@ -210,6 +210,8 @@ async def approve_user(
                        {"email": emp.email, "role": role.name})
     await db.commit()
 
+    # Expire the object so lazy="joined" re-fetches role_obj on next access.
+    await db.refresh(emp)
     fresh = await db.execute(
         select(Employee).options(selectinload(Employee.role_obj)).where(Employee.id == emp.id)
     )
