@@ -1,4 +1,8 @@
-import type { Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent } from "@/types";
+import type {
+  Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
+  Me, Role, ModuleDef, User, Group, GroupDetail, GroupMember, Installer,
+  OverviewStats, RealtimeDevice, WebUsage,
+} from "@/types";
 
 export const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -101,6 +105,102 @@ export const getLogs = (opts?: { since?: number; until?: number; device_id?: str
   const qs = params.toString();
   return request<LogEvent[]>(`/v1/logs${qs ? `?${qs}` : ""}`);
 };
+
+// ── Me / RBAC ───────────────────────────────────────────────────────────────
+
+export const getMe = () => request<Me>("/v1/auth/me");
+
+export const getModules = () => request<ModuleDef[]>("/v1/roles/modules");
+export const getRoles   = () => request<Role[]>("/v1/roles");
+export const createRole = (body: Partial<Role>) =>
+  request<Role>("/v1/roles", { method: "POST", body: JSON.stringify(body) });
+export const updateRole = (id: string, body: Partial<Role>) =>
+  request<Role>(`/v1/roles/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+export const deleteRole = (id: string) =>
+  request<void>(`/v1/roles/${id}`, { method: "DELETE" });
+
+// ── Users ─────────────────────────────────────────────────────────────────────
+
+export const getUsers = (search?: string) =>
+  request<User[]>(`/v1/users${search ? `?search=${encodeURIComponent(search)}` : ""}`);
+export const createUser = (body: Record<string, unknown>) =>
+  request<User>("/v1/users", { method: "POST", body: JSON.stringify(body) });
+export const updateUser = (id: string, body: Record<string, unknown>) =>
+  request<User>(`/v1/users/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+export const deleteUser = (id: string) =>
+  request<void>(`/v1/users/${id}`, { method: "DELETE" });
+
+// ── Groups ──────────────────────────────────────────────────────────────────
+
+export const getGroups  = () => request<Group[]>("/v1/groups");
+export const getGroup   = (id: string) => request<GroupDetail>(`/v1/groups/${id}`);
+export const createGroup = (body: { name: string; description?: string }) =>
+  request<Group>("/v1/groups", { method: "POST", body: JSON.stringify(body) });
+export const updateGroup = (id: string, body: { name: string; description?: string }) =>
+  request<Group>(`/v1/groups/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+export const deleteGroup = (id: string) =>
+  request<void>(`/v1/groups/${id}`, { method: "DELETE" });
+export const addGroupMember = (id: string, body: { member_type: string; employee_id?: string; device_id?: string }) =>
+  request<GroupMember>(`/v1/groups/${id}/members`, { method: "POST", body: JSON.stringify(body) });
+export const removeGroupMember = (id: string, memberId: string) =>
+  request<void>(`/v1/groups/${id}/members/${memberId}`, { method: "DELETE" });
+
+export async function importGroupsCsv(file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`${BASE}/v1/groups/import`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${getToken()}` },
+    body: fd,
+  });
+  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+// ── Installers / agents ───────────────────────────────────────────────────────
+
+export const getInstallers = () => request<Installer[]>("/v1/installers");
+export const activateInstaller = (id: string) =>
+  request<Installer>(`/v1/installers/${id}/activate`, { method: "POST" });
+export const getInstallerDownload = (id: string) =>
+  request<{ download_url: string; version: string; platform: string }>(`/v1/installers/${id}/download`);
+
+export async function uploadInstaller(form: {
+  platform: string; installer_type: string; version: string; notes?: string; file: File;
+}) {
+  const fd = new FormData();
+  fd.append("platform", form.platform);
+  fd.append("installer_type", form.installer_type);
+  fd.append("version", form.version);
+  if (form.notes) fd.append("notes", form.notes);
+  fd.append("file", form.file);
+  const res = await fetch(`${BASE}/v1/installers`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${getToken()}` },
+    body: fd,
+  });
+  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  return res.json() as Promise<Installer>;
+}
+
+// ── Home dashboards ─────────────────────────────────────────────────────────
+
+const gq = (group_id?: string, extra?: Record<string, string | number>) => {
+  const p = new URLSearchParams();
+  if (group_id) p.set("group_id", group_id);
+  for (const [k, v] of Object.entries(extra ?? {})) p.set(k, String(v));
+  const s = p.toString();
+  return s ? `?${s}` : "";
+};
+
+export const getOverview = (group_id?: string, days = 7) =>
+  request<OverviewStats>(`/v1/home/overview${gq(group_id, { days })}`);
+export const getRealtime = (group_id?: string) =>
+  request<RealtimeDevice[]>(`/v1/home/realtime${gq(group_id)}`);
+export const getHomeAppUsage = (group_id?: string, days = 1) =>
+  request<AppUsage[]>(`/v1/home/app-usage${gq(group_id, { days })}`);
+export const getHomeWebUsage = (group_id?: string, days = 1) =>
+  request<WebUsage[]>(`/v1/home/web-usage${gq(group_id, { days })}`);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
