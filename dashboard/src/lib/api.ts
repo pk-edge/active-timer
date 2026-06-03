@@ -33,8 +33,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`${res.status}: ${text}`);
+    // Surface detail message from FastAPI JSON errors so callers can inspect them.
+    const body = await res.text();
+    let msg = `${res.status}: ${body}`;
+    try {
+      const j = JSON.parse(body);
+      if (j.detail) msg = j.detail;
+    } catch { /* non-JSON body */ }
+    throw new Error(msg);
   }
 
   return res.json() as Promise<T>;
@@ -123,12 +129,29 @@ export const deleteRole = (id: string) =>
 
 export const getUsers = (search?: string) =>
   request<User[]>(`/v1/users${search ? `?search=${encodeURIComponent(search)}` : ""}`);
+export const getPendingUsers = () =>
+  request<User[]>("/v1/users?pending=true");
 export const createUser = (body: Record<string, unknown>) =>
   request<User>("/v1/users", { method: "POST", body: JSON.stringify(body) });
 export const updateUser = (id: string, body: Record<string, unknown>) =>
   request<User>(`/v1/users/${id}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deleteUser = (id: string) =>
   request<void>(`/v1/users/${id}`, { method: "DELETE" });
+export const approveUser = (id: string, body: { role_id: string; group_ids: string[] }) =>
+  request<User>(`/v1/users/${id}/approve`, { method: "POST", body: JSON.stringify(body) });
+
+export async function registerUser(body: { name: string; email: string; password: string }) {
+  const res = await fetch(`${BASE}/v1/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({ detail: "Registration failed" }));
+    throw new Error(data.detail ?? "Registration failed");
+  }
+  return res.json() as Promise<{ message: string }>;
+}
 
 // ── Groups ──────────────────────────────────────────────────────────────────
 

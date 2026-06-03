@@ -91,6 +91,7 @@ export interface User {
   role_name:    string | null;
   scope_type:   string | null;
   is_active:    boolean;
+  is_approved:  boolean;
   group_ids:    string[];
   device_count: number;
 }
