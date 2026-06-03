@@ -14,8 +14,11 @@ desktop.ini
 .env
 .env.local
 .env.*.local
-*.env
+**/.env
+**/.env.local
+**/.env.*.local
 !.env.example
+!**/.env.example
 agent/enrollment_token.txt
 agent/identity.json
 
@@ -77,4 +80,3 @@ agent/*.db
 agent/*.db-wal
 agent/*.db-shm
 agent/screenshots/
-installer
