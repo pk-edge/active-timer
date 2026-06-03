@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TimeTracker Windows MSI — WiX Toolset v4
+  =========================================
+
+  Build (on Windows):
+    cd installer\windows
+    .\build_msi.ps1 -CompanyToken "your-token" -ApiBase "https://api.example.com"
+    Output: installer\windows\output\TimeTracker.msi
+
+  Employee install:  double-click TimeTracker.msi
+  IT silent deploy:  msiexec /i TimeTracker.msi /quiet /qn /norestart
+
+  After install the agent starts immediately AND auto-starts on every login.
+  Nothing needs to be pre-installed on the target machine.
+-->
+
+<?define AppVersion = "1.0.0" ?>
+<!-- ApiBase is passed at build time: wix build -d ApiBase=http://host:8000 -->
+<?ifndef ApiBase ?>
+  <?define ApiBase = "http://localhost:8000" ?>
+<?endif ?>
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="TimeTracker"
+           Version="$(var.AppVersion)"
+           Manufacturer="TimeTracker Inc."
+           UpgradeCode="A9B4C3D2-E5F6-7890-ABCD-EF1234567891"
+           Compressed="yes"
+           Scope="perUser">
+
+    <SummaryInformation Description="TimeTracker Desktop Agent" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of TimeTracker is already installed." />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- ── Install locations ──────────────────────────────────────────────── -->
+
+    <!-- Agent binary: %LOCALAPPDATA%\Programs\TimeTracker\ -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="TimeTracker" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Config / token: %APPDATA%\TimeTracker\ (matches Config.BASE_DIR in agent) -->
+    <StandardDirectory Id="AppDataFolder">
+      <Directory Id="TTDATADIR" Name="TimeTracker" />
+    </StandardDirectory>
+
+    <!-- ── Files ──────────────────────────────────────────────────────────── -->
+
+    <!-- All PyInstaller output: exe + _internal/ with all DLLs and PYDs -->
+    <ComponentGroup Id="AgentFiles" Directory="INSTALLFOLDER">
+      <Files Include="..\..\agent\dist\timetracker\**\*" />
+    </ComponentGroup>
+
+    <!-- Enrollment token — written by build_msi.ps1 at build time -->
+    <Component Id="EnrollmentToken" Directory="TTDATADIR" Guid="*">
+      <File Id="enrollment_token_txt"
+            Source="enrollment_token.txt"
+            KeyPath="yes" />
+    </Component>
+
+    <!-- ── Registry / environment ─────────────────────────────────────────── -->
+
+    <!-- TT_API_BASE user environment variable (read by config.py at runtime) -->
+    <Component Id="EnvApiBase" Directory="INSTALLFOLDER" Guid="*">
+      <Environment Id="EnvTT_API_BASE"
+                   Name="TT_API_BASE"
+                   Value="$(var.ApiBase)"
+                   Part="all"
+                   Action="set"
+                   System="no" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\TimeTracker"
+                     Name="ApiBase"
+                     Type="string"
+                     Value="$(var.ApiBase)"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- HKCU Run key — agent restarts automatically on every login -->
+    <Component Id="AutoStart" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="TimeTracker"
+                     Type="string"
+                     Value='"[INSTALLFOLDER]timetracker.exe"'
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- ── Custom actions ─────────────────────────────────────────────────── -->
+
+    <!-- Kill agent process before uninstall (ignore error if not running) -->
+    <CustomAction Id="KillAgent"
+                  Directory="SystemFolder"
+                  ExeCommand='cmd.exe /C taskkill /F /IM timetracker.exe'
+                  Execute="immediate"
+                  Return="ignore" />
+
+    <!-- Remove watchdog scheduled task on uninstall -->
+    <CustomAction Id="RemoveWatchdog"
+                  Directory="SystemFolder"
+                  ExeCommand='cmd.exe /C schtasks /delete /f /tn TimeTrackerWatchdog'
+                  Execute="immediate"
+                  Return="ignore" />
+
+    <!-- Start agent immediately after install -->
+    <CustomAction Id="LaunchAgent"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand='"[INSTALLFOLDER]timetracker.exe"'
+                  Execute="immediate"
+                  Return="asyncNoWait" />
+
+    <!-- ── Feature ────────────────────────────────────────────────────────── -->
+
+    <Feature Id="Main" Level="1">
+      <ComponentGroupRef Id="AgentFiles" />
+      <ComponentRef Id="EnrollmentToken" />
+      <ComponentRef Id="EnvApiBase" />
+      <ComponentRef Id="AutoStart" />
+    </Feature>
+
+    <!-- ── Sequences ──────────────────────────────────────────────────────── -->
+
+    <InstallExecuteSequence>
+      <Custom Action="RemoveWatchdog"
+              Before="KillAgent"
+              Condition='REMOVE="ALL"' />
+      <Custom Action="KillAgent"
+              Before="RemoveFiles"
+              Condition='REMOVE="ALL"' />
+      <Custom Action="LaunchAgent"
+              After="InstallFinalize"
+              Condition="NOT Installed AND NOT REMOVE" />
+    </InstallExecuteSequence>
+
+  </Package>
+</Wix>
