@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from app.api.deps import get_db, get_current_admin, require
+from app.core.scoping import visible_device_ids, ALL
 from app.db.models import Employee
 
 router = APIRouter()
@@ -28,6 +29,12 @@ async def get_logs(
 ):
     params: dict = {"company_id": str(admin.company_id), "limit": limit}
     where_clauses = ["d.company_id = :company_id", "d.is_active = TRUE"]
+
+    # Data scope: restrict to devices the user may see (bound param, not interpolated).
+    vids = await visible_device_ids(admin, db)
+    if vids is not ALL:
+        where_clauses.append("ae.device_id = ANY(:vids)")
+        params["vids"] = [str(i) for i in vids]
 
     if since is not None:
         where_clauses.append("ae.timestamp >= to_timestamp(:since)")

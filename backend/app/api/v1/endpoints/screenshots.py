@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from app.api.deps import get_db, get_current_device, get_current_admin, require
 from app.core.config import get_settings
+from app.core.scoping import visible_device_ids, ALL
 from app.db.models import Screenshot, Device, Employee
 from app.schemas.screenshot import UploadRequest, UploadResponse, ScreenshotOut
 
@@ -93,6 +94,10 @@ async def list_screenshots(
     dev = await db.execute(select(Device).where(Device.id == device_uuid))
     device = dev.scalar_one_or_none()
     if not device or device.company_id != admin.company_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+
+    ids = await visible_device_ids(admin, db)
+    if ids is not ALL and device.id not in set(ids):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
 
     result = await db.execute(

@@ -13,6 +13,7 @@ from app.api.deps import get_db, get_current_admin, require
 from app.core import broadcaster
 from app.core.config import get_settings
 from app.core.security import decode_token
+from app.core.scoping import visible_device_ids, ALL
 from app.db.models import Device, ActivityEvent, Employee
 from app.schemas.device import DeviceOut, TimelineEventOut, DailyStatOut
 
@@ -30,6 +31,11 @@ async def _get_device_for_admin(device_id: str, admin: Employee, db: AsyncSessio
     device = result.scalar_one_or_none()
     if not device or device.company_id != admin.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+
+    # Enforce data scope: a non-'all' user may only reach devices in their scope.
+    ids = await visible_device_ids(admin, db)
+    if ids is not ALL and device.id not in set(ids):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return device
 
 
@@ -38,12 +44,18 @@ async def list_devices(
     admin: Employee = Depends(require("devices", "view")),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
+    ids = await visible_device_ids(admin, db)
+    if ids is not ALL and not ids:
+        return []
+    q = (
         select(Device)
         .options(selectinload(Device.employee))
         .where(Device.company_id == admin.company_id, Device.is_active == True)
         .order_by(Device.last_seen.desc().nullslast())
     )
+    if ids is not ALL:
+        q = q.where(Device.id.in_(ids))
+    result = await db.execute(q)
     devices = result.scalars().all()
     cutoff  = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
     return [
