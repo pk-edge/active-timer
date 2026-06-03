@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # ── Online detection ──────────────────────────────────────────────────────
     ONLINE_CUTOFF_SECS: int = 60
 
+    # ── Agent installer storage ─────────────────────────────────────────────────
+    MAX_INSTALLER_MB: int = 600
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Default "*" allows any origin — restrict to your dashboard URL in production
     # via CORS_ORIGINS env var (comma-separated or JSON array).
