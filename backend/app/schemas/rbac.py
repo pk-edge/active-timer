@@ -1,6 +1,6 @@
 """Pydantic schemas for RBAC, users, groups, and installers."""
 from typing import Optional
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 
 
 # ── Permissions / roles ─────────────────────────────────────────────────────
@@ -62,8 +62,31 @@ class UserOut(BaseModel):
     role_name: Optional[str] = None
     scope_type: Optional[str] = None
     is_active: bool
+    is_approved: bool = True
     group_ids: list[str] = []
     device_count: int = 0
+
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+
+    @field_validator("password")
+    @classmethod
+    def _pw_len(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v
+
+
+class RegisterResponse(BaseModel):
+    message: str
+
+
+class ApproveRequest(BaseModel):
+    role_id: str
+    group_ids: list[str] = []
 
 
 # ── Groups ──────────────────────────────────────────────────────────────────
