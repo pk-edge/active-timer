@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, ingest, devices, screenshots, reports, logs, roles, groups, users, installers, home
+from app.api.v1.endpoints import auth, ingest, devices, screenshots, reports, logs, roles, groups, users, installers, home, audit
 
 api_router = APIRouter()
 
@@ -16,3 +16,4 @@ api_router.include_router(users.router,       prefix="/users",       tags=["user
 api_router.include_router(installers.router,         prefix="/installers", tags=["installers"])
 api_router.include_router(installers.updates_router, prefix="/updates",    tags=["updates"])
 api_router.include_router(home.router,        prefix="/home",        tags=["home"])
+api_router.include_router(audit.router,       prefix="/audit",       tags=["audit"])

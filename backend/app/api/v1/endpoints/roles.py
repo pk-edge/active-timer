@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_current_user, require
 from app.core import permissions as perms_catalog
+from app.core import audit
 from app.db.models import Employee, Role, RolePermission
 from app.schemas.rbac import RoleIn, RoleOut, PermissionItem
 
@@ -71,6 +72,7 @@ async def create_role(
     await db.flush()
     for p in body.permissions:
         db.add(RolePermission(role_id=role.id, module=p.module, action=p.action))
+    await audit.record(db, user, "role.create", "role", str(role.id), {"name": role.name})
     await db.commit()
     await db.refresh(role, attribute_names=["permissions"])
     return _role_out(role)
@@ -141,5 +143,6 @@ async def delete_role(
     if assigned.first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail="Role is assigned to users; reassign them first")
+    await audit.record(db, user, "role.delete", "role", role_id, {"name": role.name})
     await db.delete(role)
     await db.commit()

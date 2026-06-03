@@ -8,6 +8,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require
+from app.core import audit
 from app.db.models import Employee, Device, Group, GroupMember
 from app.schemas.rbac import (
     GroupIn, GroupOut, GroupDetailOut, MemberIn, MemberOut, ImportResult,
@@ -59,6 +60,8 @@ async def create_group(
     g = Group(company_id=user.company_id, name=body.name, description=body.description,
               created_by=user.id)
     db.add(g)
+    await db.flush()
+    await audit.record(db, user, "group.create", "group", str(g.id), {"name": g.name})
     await db.commit()
     await db.refresh(g)
     return _group_out(g, 0)
@@ -137,6 +140,7 @@ async def delete_group(
     db: AsyncSession = Depends(get_db),
 ):
     g = await _get_group(group_id, user, db)
+    await audit.record(db, user, "group.delete", "group", group_id, {"name": g.name})
     await db.delete(g)
     await db.commit()
 

@@ -13,6 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, get_current_device, require
+from app.core import audit
 from app.api.v1.endpoints.screenshots import _s3_client
 from app.core.config import get_settings
 from app.db.models import Employee, Device, InstallerVersion
@@ -91,6 +92,9 @@ async def upload_installer(
         notes=notes, is_active=False, uploaded_by=user.id,
     )
     db.add(v)
+    await db.flush()
+    await audit.record(db, user, "installer.upload", "installer", str(v.id),
+                       {"platform": platform, "version": version})
     await db.commit()
     await db.refresh(v)
     return _out(v)
@@ -130,6 +134,8 @@ async def activate_installer(
     )
     await db.flush()
     v.is_active = True
+    await audit.record(db, user, "installer.activate", "installer", str(v.id),
+                       {"platform": v.platform, "version": v.version})
     await db.commit()
     await db.refresh(v)
     return _out(v)

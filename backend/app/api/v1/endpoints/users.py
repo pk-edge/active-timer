@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require
+from app.core import audit
 from app.core.security import hash_password
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group
 from app.schemas.rbac import UserIn, UserPatch, UserOut
@@ -108,6 +109,7 @@ async def create_user(
     db.add(emp)
     await db.flush()
     await _set_group_access(emp.id, user.company_id, body.group_ids, db)
+    await audit.record(db, user, "user.create", "user", str(emp.id), {"email": emp.email})
     await db.commit()
 
     fresh = await db.execute(
@@ -190,4 +192,5 @@ async def deactivate_user(
     if emp.id == user.id:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You cannot deactivate yourself")
     emp.is_active = False
+    await audit.record(db, user, "user.deactivate", "user", user_id, {"email": emp.email})
     await db.commit()
