@@ -44,3 +44,8 @@ async def init_db() -> None:
             for stmt in (s.strip() for s in sql.split(";") if s.strip()):
                 await conn.execute(text(stmt))
             log.info("Applied migration: %s", f.name)
+
+    # Seed RBAC system roles + link legacy admins (idempotent).
+    from app.db import seed_rbac
+    await seed_rbac.run()
+    log.info("RBAC seed complete")
