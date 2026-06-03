@@ -25,6 +25,7 @@ from capture.input_monitor  import InputMonitor
 from capture.url_watcher    import UrlWatcher
 from sync.sync_worker       import SyncWorker
 from lock.lock_detector     import LockDetector
+from updater                import UpdateWorker
 
 pause_event = threading.Event()
 stop_event  = threading.Event()
@@ -91,6 +92,7 @@ def main() -> None:
         InputMonitor(shared),
         UrlWatcher(shared),
         SyncWorker(shared),
+        UpdateWorker(shared),
     ]
     for w in workers:
         t = threading.Thread(target=w.run, name=w.__class__.__name__, daemon=True)

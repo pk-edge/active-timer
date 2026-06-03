@@ -25,8 +25,7 @@ import identity
 
 log = logging.getLogger("enrollment")
 
-
-__version__ = "1.0.0"
+from version import __version__
 
 
 def ensure_enrolled(max_attempts: int = 0, shared: dict | None = None) -> dict:

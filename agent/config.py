@@ -50,6 +50,11 @@ class Config:
     ENROLL_ENDPOINT: str = f"{API_BASE}/v1/auth/enroll"
     INGEST_ENDPOINT: str = f"{API_BASE}/v1/ingest"
     UPLOAD_ENDPOINT: str = f"{API_BASE}/v1/screenshots"
+    UPDATE_CHECK_ENDPOINT: str = f"{API_BASE}/v1/updates/check"
+
+    # ── Auto-update ──────────────────────────────────────────────────────────
+    AUTO_UPDATE_ENABLED: bool = os.environ.get("TT_AUTO_UPDATE", "1") != "0"
+    UPDATE_CHECK_SECS:   int  = 6 * 3600   # poll for updates every 6 hours
 
     # ── Local storage ────────────────────────────────────────────────────────
     DB_PATH:        Path = BASE_DIR / "queue.db"
