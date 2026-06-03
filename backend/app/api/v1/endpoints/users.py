@@ -15,7 +15,7 @@ from app.api.deps import get_db, require
 from app.core import audit
 from app.core.security import hash_password
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group
-from app.schemas.rbac import UserIn, UserPatch, UserOut
+from app.schemas.rbac import UserIn, UserPatch, UserOut, ApproveRequest
 
 router = APIRouter()
 
@@ -37,6 +37,7 @@ async def _user_out(emp: Employee, db: AsyncSession) -> UserOut:
         role_name=emp.role_obj.name if emp.role_obj else (emp.role or None),
         scope_type=emp.role_obj.scope_type if emp.role_obj else None,
         is_active=emp.is_active,
+        is_approved=getattr(emp, "is_approved", True),
         group_ids=await _group_ids(emp.id, db),
         device_count=await _device_count(emp.id, db),
     )
@@ -70,7 +71,8 @@ async def _set_group_access(emp_id, company_id, group_ids: list[str], db: AsyncS
 
 @router.get("", response_model=list[UserOut])
 async def list_users(
-    search: str | None = Query(default=None),
+    search:  str | None = Query(default=None),
+    pending: bool = Query(default=False),
     user: Employee = Depends(require("users", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -79,6 +81,10 @@ async def list_users(
         .where(Employee.company_id == user.company_id)
         .order_by(Employee.created_at.asc())
     )
+    if pending:
+        q = q.where(Employee.is_approved == False, Employee.is_active == True)  # noqa: E712
+    else:
+        q = q.where(Employee.is_approved == True)  # noqa: E712
     if search:
         like = f"%{search.lower()}%"
         q = q.where(func.lower(Employee.name).like(like) | func.lower(Employee.email).like(like))
@@ -180,6 +186,34 @@ async def set_user_groups(
     await _set_group_access(emp.id, user.company_id, group_ids, db)
     await db.commit()
     return await _user_out(emp, db)
+
+
+@router.post("/{user_id}/approve", response_model=UserOut)
+async def approve_user(
+    user_id: str,
+    body: ApproveRequest,
+    user: Employee = Depends(require("users", "edit")),
+    db: AsyncSession = Depends(get_db),
+):
+    emp = await _get_user(user_id, user.company_id, db)
+    if emp.is_approved:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User is already approved")
+
+    role = await _resolve_role(body.role_id, user.company_id, db)
+    if not role:
+        raise HTTPException(status_code=400, detail="role_id is required to approve a user")
+
+    emp.role_id = role.id
+    emp.is_approved = True
+    await _set_group_access(emp.id, user.company_id, body.group_ids, db)
+    await audit.record(db, user, "user.approve", "user", user_id,
+                       {"email": emp.email, "role": role.name})
+    await db.commit()
+
+    fresh = await db.execute(
+        select(Employee).options(selectinload(Employee.role_obj)).where(Employee.id == emp.id)
+    )
+    return await _user_out(fresh.scalar_one(), db)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
