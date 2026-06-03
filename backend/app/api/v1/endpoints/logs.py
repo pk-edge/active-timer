@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
-from app.api.deps import get_db, get_current_admin
+from app.api.deps import get_db, get_current_admin, require
 from app.db.models import Employee
 
 router = APIRouter()
@@ -23,7 +23,7 @@ async def get_logs(
     device_id:  Optional[str] = Query(default=None),
     event_type: Optional[str] = Query(default=None),
     limit:      int = Query(default=200, le=1000),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("logs", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     params: dict = {"company_id": str(admin.company_id), "limit": limit}

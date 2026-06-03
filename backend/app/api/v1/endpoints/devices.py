@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_db, get_current_admin
+from app.api.deps import get_db, get_current_admin, require
 from app.core import broadcaster
 from app.core.config import get_settings
 from app.core.security import decode_token
@@ -35,7 +35,7 @@ async def _get_device_for_admin(device_id: str, admin: Employee, db: AsyncSessio
 
 @router.get("", response_model=List[DeviceOut])
 async def list_devices(
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("devices", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -107,7 +107,7 @@ async def get_timeline(
     until:     Optional[int] = Query(default=None),
     limit:     int = Query(default=500, le=2000),
     offset:    int = Query(default=0, ge=0),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("devices", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     device = await _get_device_for_admin(device_id, admin, db)
@@ -136,7 +136,7 @@ async def get_timeline(
 async def get_daily_stats(
     device_id: str,
     days:      int = Query(default=7, ge=1, le=90),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("devices", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     device = await _get_device_for_admin(device_id, admin, db)

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 
-from app.api.deps import get_db, get_current_admin
+from app.api.deps import get_db, get_current_admin, require
 from app.db.models import Device, Employee
 from app.schemas.report import CompanyDayOut, AppUsageOut, UrlVisitOut
 
@@ -15,7 +15,7 @@ router = APIRouter()
 @router.get("/company/summary", response_model=List[CompanyDayOut])
 async def company_summary(
     days:  int = Query(default=7, ge=1, le=90),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -44,7 +44,7 @@ async def company_summary(
 async def top_apps(
     days:  int = Query(default=7, ge=1, le=90),
     limit: int = Query(default=20, ge=1, le=100),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -67,7 +67,7 @@ async def top_apps(
 async def top_urls(
     days:  int = Query(default=7, ge=1, le=90),
     limit: int = Query(default=20, ge=1, le=100),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -92,7 +92,7 @@ async def device_top_apps(
     device_id: str,
     days:  int = Query(default=7, ge=1, le=90),
     limit: int = Query(default=20, ge=1, le=100),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     try:
@@ -124,7 +124,7 @@ async def device_top_apps(
 async def device_summary(
     device_id: str,
     days:  int = Query(default=7, ge=1, le=90),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     try:

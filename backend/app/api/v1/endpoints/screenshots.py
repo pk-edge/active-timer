@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.api.deps import get_db, get_current_device, get_current_admin
+from app.api.deps import get_db, get_current_device, get_current_admin, require
 from app.core.config import get_settings
 from app.db.models import Screenshot, Device, Employee
 from app.schemas.screenshot import UploadRequest, UploadResponse, ScreenshotOut
@@ -82,7 +82,7 @@ async def list_screenshots(
     device_id: str,
     limit:     int = Query(default=48, ge=1, le=200),
     offset:    int = Query(default=0, ge=0),
-    admin: Employee = Depends(get_current_admin),
+    admin: Employee = Depends(require("screenshots", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     try:
