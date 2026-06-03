@@ -183,6 +183,15 @@ export async function uploadInstaller(form: {
   return res.json() as Promise<Installer>;
 }
 
+// ── Audit ─────────────────────────────────────────────────────────────────────
+
+export interface AuditEntry {
+  id: string; action: string; target_type: string | null; target_id: string | null;
+  metadata: Record<string, unknown> | null; actor_name: string | null; actor_email: string | null;
+  created_at: string | null; created_at_unix: number | null;
+}
+export const getAudit = (limit = 100) => request<AuditEntry[]>(`/v1/audit?limit=${limit}`);
+
 // ── Home dashboards ─────────────────────────────────────────────────────────
 
 const gq = (group_id?: string, extra?: Record<string, string | number>) => {
