@@ -30,9 +30,18 @@ async def run() -> None:
                 )
                 db.add(sa)
                 await db.flush()
-                for module, action in all_permissions():
-                    db.add(RolePermission(role_id=sa.id, module=module, action=action))
                 log.info("Seeded Super Admin role for company %s", company.name)
+
+            # Backfill any permissions missing from Super Admin (covers newly added
+            # modules on upgrade — the role already exists but lacks new perms).
+            existing_perms = {
+                (p.module, p.action) for p in (await db.execute(
+                    select(RolePermission).where(RolePermission.role_id == sa.id)
+                )).scalars().all()
+            }
+            for module, action in all_permissions():
+                if (module, action) not in existing_perms:
+                    db.add(RolePermission(role_id=sa.id, module=module, action=action))
 
             # ── Viewer (group-scoped, read-only starter role) ────────────────
             viewer = (await db.execute(
