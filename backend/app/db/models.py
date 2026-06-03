@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,10 +30,12 @@ class Employee(Base):
     role:          Mapped[str]        = mapped_column(String, default="employee")
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     is_active:     Mapped[bool]       = mapped_column(Boolean, default=True)
+    role_id:       Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("roles.id"), nullable=True)
     created_at:    Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
-    company: Mapped["Company"]        = relationship(back_populates="employees")
-    devices: Mapped[list["Device"]]   = relationship(back_populates="employee")
+    company:  Mapped["Company"]        = relationship(back_populates="employees")
+    devices:  Mapped[list["Device"]]   = relationship(back_populates="employee")
+    role_obj: Mapped["Role | None"]    = relationship(lazy="joined")
 
 
 class Device(Base):
@@ -96,3 +98,98 @@ class DailySummary(Base):
     top_apps:       Mapped[dict | None]  = mapped_column(JSON, nullable=True)
     top_urls:       Mapped[dict | None]  = mapped_column(JSON, nullable=True)
     session_count:  Mapped[int]          = mapped_column(Integer, default=0)
+
+
+# ── RBAC ──────────────────────────────────────────────────────────────────────
+
+class Role(Base):
+    __tablename__ = "roles"
+
+    id:          Mapped[uuid.UUID]      = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    company_id:  Mapped[uuid.UUID]      = mapped_column(UUID, ForeignKey("companies.id"))
+    name:        Mapped[str]            = mapped_column(String, nullable=False)
+    description: Mapped[str | None]     = mapped_column(Text, nullable=True)
+    scope_type:  Mapped[str]            = mapped_column(String, default="all")
+    is_system:   Mapped[bool]           = mapped_column(Boolean, default=False)
+    created_at:  Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    permissions: Mapped[list["RolePermission"]] = relationship(
+        back_populates="role", cascade="all, delete-orphan"
+    )
+
+
+class RolePermission(Base):
+    __tablename__ = "role_permissions"
+
+    id:      Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    role_id: Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("roles.id"))
+    module:  Mapped[str]       = mapped_column(String, nullable=False)
+    action:  Mapped[str]       = mapped_column(String, nullable=False)
+
+    role:    Mapped["Role"]    = relationship(back_populates="permissions")
+
+
+class Group(Base):
+    __tablename__ = "groups"
+
+    id:          Mapped[uuid.UUID]        = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    company_id:  Mapped[uuid.UUID]        = mapped_column(UUID, ForeignKey("companies.id"))
+    name:        Mapped[str]              = mapped_column(String, nullable=False)
+    description: Mapped[str | None]       = mapped_column(Text, nullable=True)
+    created_by:  Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
+    created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    members:     Mapped[list["GroupMember"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+
+    id:          Mapped[uuid.UUID]        = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    group_id:    Mapped[uuid.UUID]        = mapped_column(UUID, ForeignKey("groups.id"))
+    member_type: Mapped[str]              = mapped_column(String, nullable=False)
+    employee_id: Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
+    device_id:   Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("devices.id"), nullable=True)
+    added_at:    Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    group:       Mapped["Group"]          = relationship(back_populates="members")
+
+
+class EmployeeGroupAccess(Base):
+    __tablename__ = "employee_group_access"
+
+    id:          Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    employee_id: Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("employees.id"))
+    group_id:    Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("groups.id"))
+
+
+class InstallerVersion(Base):
+    __tablename__ = "installer_versions"
+
+    id:             Mapped[uuid.UUID]        = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    company_id:     Mapped[uuid.UUID]        = mapped_column(UUID, ForeignKey("companies.id"))
+    platform:       Mapped[str]              = mapped_column(String, nullable=False)
+    installer_type: Mapped[str]              = mapped_column(String, nullable=False)
+    version:        Mapped[str]              = mapped_column(String, nullable=False)
+    s3_key:         Mapped[str]              = mapped_column(Text, nullable=False)
+    file_size:      Mapped[int]              = mapped_column(BigInteger, default=0)
+    sha256:         Mapped[str | None]       = mapped_column(String, nullable=True)
+    notes:          Mapped[str | None]       = mapped_column(Text, nullable=True)
+    is_active:      Mapped[bool]             = mapped_column(Boolean, default=False)
+    uploaded_by:    Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
+    uploaded_at:    Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+
+    id:                Mapped[uuid.UUID]        = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    company_id:        Mapped[uuid.UUID | None] = mapped_column(UUID, nullable=True)
+    actor_employee_id: Mapped[uuid.UUID | None] = mapped_column(UUID, nullable=True)
+    action:            Mapped[str]              = mapped_column(String, nullable=False)
+    target_type:       Mapped[str | None]       = mapped_column(String, nullable=True)
+    target_id:         Mapped[str | None]       = mapped_column(String, nullable=True)
+    audit_metadata:    Mapped[dict | None]      = mapped_column("metadata", JSON, nullable=True)
+    created_at:        Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
