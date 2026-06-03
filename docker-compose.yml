@@ -1,0 +1,119 @@
+version: "3.9"
+# ── TimeTracker — local Docker deployment ─────────────────────────────────────
+#
+# Services:
+#   db        — PostgreSQL 16          → localhost:15432
+#   minio     — S3-compatible storage  → localhost:9000  (console: localhost:9001)
+#   backend   — FastAPI                → localhost:8000
+#   dashboard — Next.js                → localhost:3002
+#
+# Quick start:
+#   cp .env.example .env
+#   docker compose up --build -d
+#   docker compose exec backend python -m app.scripts.seedAdmin \
+#     --company "Demo Co" --email admin@demo.com --name "Admin"
+#   open http://localhost:3002
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       timetracker
+      POSTGRES_USER:     timetracker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-timetracker_dev} 
+    ports:
+      - "15432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U timetracker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  # ── MinIO (local S3 for screenshots) ───────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9002:9000"   # S3 API
+      - "9003:9001"   # MinIO web console → http://localhost:9003
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      retries: 5
+  # MinIO bucket setup (runs once then exits)
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin} &&
+        mc mb --ignore-existing local/${S3_BUCKET:-timetracker-screenshots} &&
+        mc anonymous set download local/${S3_BUCKET:-timetracker-screenshots}
+      "
+  # ── FastAPI backend ─────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:          postgresql+asyncpg://timetracker:${POSTGRES_PASSWORD:-timetracker_dev}@db:5432/timetracker
+      JWT_SECRET:            ${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      JWT_ALGORITHM:         HS256
+      JWT_DEVICE_EXPIRE_DAYS: 365
+      JWT_ADMIN_EXPIRE_HOURS: 12
+      # Screenshot storage — MinIO (S3-compatible)
+      AWS_REGION:            us-east-1
+      AWS_ACCESS_KEY_ID:     ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET:             ${S3_BUCKET:-timetracker-screenshots}
+      S3_ENDPOINT_URL:        http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:9002
+      PRESIGNED_URL_EXPIRY:   3600
+      ONLINE_CUTOFF_SECS:    90
+      CORS_ORIGINS:          '["http://localhost:3000","http://localhost:3002","http://10.10.21.230:3002"]'
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+  # ── Next.js dashboard ───────────────────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://10.10.21.230:8000
+    environment:
+      NEXT_PUBLIC_API_URL: http://10.10.21.230:8000
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3002:3000"
+volumes:
+  pg_data:
+  minio_data:
+
+
+
+
