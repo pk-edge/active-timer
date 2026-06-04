@@ -1,7 +1,8 @@
 import type {
   Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
   Me, Role, ModuleDef, User, Group, GroupDetail, GroupMember, Installer,
-  OverviewStats, RealtimeDevice, WebUsage,
+  OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
+  AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
 } from "@/types";
 
 export const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -43,6 +44,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(msg);
   }
 
+  if (res.status === 204 || res.headers.get("content-length") === "0") {
+    return undefined as unknown as T;
+  }
   return res.json() as Promise<T>;
 }
 
@@ -137,6 +141,10 @@ export const updateUser = (id: string, body: Record<string, unknown>) =>
   request<User>(`/v1/users/${id}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deleteUser = (id: string) =>
   request<void>(`/v1/users/${id}`, { method: "DELETE" });
+export const deactivateUser = (id: string) =>
+  request<User>(`/v1/users/${id}/deactivate`, { method: "POST" });
+export const activateUser = (id: string) =>
+  request<User>(`/v1/users/${id}/activate`, { method: "POST" });
 export const approveUser = (id: string, body: { role_id: string; group_ids: string[] }) =>
   request<User>(`/v1/users/${id}/approve`, { method: "POST", body: JSON.stringify(body) });
 
@@ -233,6 +241,61 @@ export const getHomeAppUsage = (group_id?: string, days = 1) =>
   request<AppUsage[]>(`/v1/home/app-usage${gq(group_id, { days })}`);
 export const getHomeWebUsage = (group_id?: string, days = 1) =>
   request<WebUsage[]>(`/v1/home/web-usage${gq(group_id, { days })}`);
+export const getMyStats = () => request<MyStats>("/v1/home/my-stats");
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export const getNotifications = () => request<Notification[]>("/v1/notifications");
+export const markNotificationsRead = (keys: string[]) =>
+  request<void>("/v1/notifications/mark-read", {
+    method: "POST",
+    body: JSON.stringify({ keys }),
+  });
+
+// ── Technology & AI Usage ─────────────────────────────────────────────────────
+
+export const getTechCategories = () =>
+  request<AppCategory[]>("/v1/tech/categories");
+
+export const createTechCategory = (body: { name: string; color: string; description?: string }) =>
+  request<AppCategory>("/v1/tech/categories", { method: "POST", body: JSON.stringify(body) });
+
+export const updateTechCategory = (id: string, body: { name?: string; color?: string; description?: string }) =>
+  request<AppCategory>(`/v1/tech/categories/${id}`, { method: "PUT", body: JSON.stringify(body) });
+
+export const deleteTechCategory = (id: string) =>
+  request<void>(`/v1/tech/categories/${id}`, { method: "DELETE" });
+
+export const addCategoryRule = (catId: string, app_pattern: string) =>
+  request<AppCategory>(`/v1/tech/categories/${catId}/rules`, {
+    method: "POST",
+    body: JSON.stringify({ app_pattern }),
+  });
+
+export const deleteCategoryRule = (ruleId: string) =>
+  request<void>(`/v1/tech/categories/rules/${ruleId}`, { method: "DELETE" });
+
+export const getTechSummary = (days = 30) =>
+  request<TechSummary>(`/v1/tech/utilization/summary?days=${days}`);
+
+export const getCategoryAllocation = (days = 30, compare_days = 30) =>
+  request<CategoryAllocationItem[]>(
+    `/v1/tech/utilization/category-allocation?days=${days}&compare_days=${compare_days}`
+  );
+
+export const getAppTrends = (days = 30, compare_days = 30, limit = 10) =>
+  request<AppTrends>(
+    `/v1/tech/utilization/app-trends?days=${days}&compare_days=${compare_days}&limit=${limit}`
+  );
+
+export const getAppList = (days = 30, category_id?: string, limit = 50) => {
+  const params = new URLSearchParams({ days: String(days), limit: String(limit) });
+  if (category_id) params.set("category_id", category_id);
+  return request<AppDetailItem[]>(`/v1/tech/utilization/apps?${params}`);
+};
+
+export const getAdoptionData = (days = 30, top_n = 5) =>
+  request<AdoptionData>(`/v1/tech/utilization/adoption?days=${days}&top_n=${top_n}`);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

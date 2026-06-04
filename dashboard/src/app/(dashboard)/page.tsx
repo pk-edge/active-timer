@@ -11,15 +11,9 @@ export default function RootPage() {
 
   useEffect(() => {
     if (loading) return;
-    for (const group of NAV_GROUPS) {
-      for (const item of group.items) {
-        if (can(item.module, "view")) {
-          router.replace(item.href);
-          return;
-        }
-      }
-    }
-  }, [loading, can, router]);
+    // Always land on /home first (it adapts per role)
+    router.replace("/home");
+  }, [loading, router]);
 
   return (
     <div className="flex items-center justify-center h-full text-gray-400 text-sm">

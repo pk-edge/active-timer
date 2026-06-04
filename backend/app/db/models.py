@@ -31,6 +31,7 @@ class Employee(Base):
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     is_active:     Mapped[bool]       = mapped_column(Boolean, default=True)
     is_approved:   Mapped[bool]       = mapped_column(Boolean, default=True)
+    is_deleted:    Mapped[bool]       = mapped_column(Boolean, default=False)
     role_id:       Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("roles.id"), nullable=True)
     created_at:    Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
@@ -183,6 +184,15 @@ class InstallerVersion(Base):
     uploaded_at:    Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
+class NotificationRead(Base):
+    __tablename__ = "notification_reads"
+
+    id:               Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    employee_id:      Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False)
+    notification_key: Mapped[str]       = mapped_column(String, nullable=False)
+    read_at:          Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
 
@@ -194,3 +204,33 @@ class AuditLog(Base):
     target_id:         Mapped[str | None]       = mapped_column(String, nullable=True)
     audit_metadata:    Mapped[dict | None]      = mapped_column("metadata", JSON, nullable=True)
     created_at:        Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# ── Technology Utilization ────────────────────────────────────────────────────
+
+class AppCategory(Base):
+    __tablename__ = "app_categories"
+
+    id:          Mapped[uuid.UUID]        = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    company_id:  Mapped[uuid.UUID]        = mapped_column(UUID, ForeignKey("companies.id"))
+    name:        Mapped[str]              = mapped_column(String, nullable=False)
+    color:       Mapped[str]              = mapped_column(String, default="#6366f1")
+    description: Mapped[str | None]       = mapped_column(Text, nullable=True)
+    is_system:   Mapped[bool]             = mapped_column(Boolean, default=False)
+    created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    rules: Mapped[list["AppCategoryRule"]] = relationship(
+        back_populates="category", cascade="all, delete-orphan"
+    )
+
+
+class AppCategoryRule(Base):
+    __tablename__ = "app_category_rules"
+
+    id:          Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    category_id: Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("app_categories.id", ondelete="CASCADE"))
+    company_id:  Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("companies.id"))
+    app_pattern: Mapped[str]       = mapped_column(String, nullable=False)
+    created_at:  Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    category: Mapped["AppCategory"] = relationship(back_populates="rules")

@@ -149,3 +149,103 @@ export interface RealtimeDevice {
 }
 
 export interface WebUsage { host: string; visits: number; }
+
+export interface MyStatsEvent {
+  event_type:   string;
+  app_name:     string | null;
+  window_title: string | null;
+  url:          string | null;
+  duration:     number;
+  timestamp_unix: number | null;
+}
+
+export interface Notification {
+  key:        string;
+  type:       string;
+  title:      string;
+  body:       string;
+  created_at: string | null;
+  is_read:    boolean;
+  metadata:   Record<string, string>;
+}
+
+export interface MyStats {
+  active_seconds_today: number;
+  top_apps:             AppUsage[];
+  recent_events:        MyStatsEvent[];
+  device_count:         number;
+}
+
+// ── Technology & AI Usage ─────────────────────────────────────────────────────
+
+export interface CategoryRule {
+  id:          string;
+  app_pattern: string;
+  created_at:  string;
+}
+
+export interface AppCategory {
+  id:          string;
+  name:        string;
+  color:       string;
+  description: string | null;
+  is_system:   boolean;
+  rule_count:  number;
+  rules:       CategoryRule[];
+}
+
+export interface TechSummary {
+  total_hours:        number;
+  total_apps:         number;
+  total_users:        number;
+  top_category:       string | null;
+  top_category_color: string;
+  top_app:            string | null;
+}
+
+export interface CategoryAllocationItem {
+  category_id:   string | null;
+  category_name: string;
+  color:         string;
+  seconds:       number;
+  pct:           number;
+  prev_seconds:  number;
+  prev_pct:      number;
+  pct_change:    number;
+  hours:         number;
+  user_change:   number;
+}
+
+export interface AppTrendItem {
+  app_name:      string;
+  category_name: string;
+  color:         string;
+  seconds:       number;
+  prev_seconds:  number;
+  pct:           number;
+  prev_pct:      number;
+  pct_change:    number;
+  hours:         number;
+  user_change:   number;
+}
+
+export interface AppTrends {
+  trending_up:   AppTrendItem[];
+  trending_down: AppTrendItem[];
+}
+
+export interface AppDetailItem {
+  app_name:      string;
+  category_id:   string | null;
+  category_name: string;
+  color:         string;
+  seconds:       number;
+  hours:         number;
+  pct:           number;
+  user_count:    number;
+}
+
+export interface AdoptionData {
+  apps:   string[];
+  series: Record<string, number | string>[];
+}

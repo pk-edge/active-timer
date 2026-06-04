@@ -1,10 +1,11 @@
 "use client";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
-import { Plus, Pencil, UserX, Search, X, UserCheck } from "lucide-react";
+import { Plus, Pencil, UserX, Search, X, UserCheck, Trash2, UserCheck2 } from "lucide-react";
 import {
-  getUsers, getPendingUsers, createUser, updateUser, deleteUser, approveUser,
-  getRoles, getGroups,
+  getUsers, getPendingUsers, createUser, updateUser, deleteUser,
+  deactivateUser, activateUser, approveUser, getRoles, getGroups,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
@@ -188,9 +189,16 @@ function ApproveModal({ user: pending, roles, groups, onClose, onSaved }: {
 
 type Tab = "active" | "pending";
 
-export default function UsersPage() {
+function UsersPageInner() {
   const { loading, can } = useUser();
-  const [tab,     setTab]     = useState<Tab>("active");
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState<Tab>(() =>
+    searchParams.get("tab") === "pending" ? "pending" : "active"
+  );
+
+  useEffect(() => {
+    if (searchParams.get("tab") === "pending") setTab("pending");
+  }, [searchParams]);
   const [search,  setSearch]  = useState("");
   const [editing, setEditing] = useState<User | null | "new">(null);
   const [approving, setApproving] = useState<User | null>(null);
@@ -213,7 +221,17 @@ export default function UsersPage() {
   if (!can("users", "view")) return <AccessDenied label="Users" />;
 
   async function onDeactivate(u: User) {
-    if (!confirm(`Deactivate ${u.name}?`)) return;
+    if (!confirm(`Deactivate ${u.name}? They will lose dashboard access but remain in the system.`)) return;
+    try { await deactivateUser(u.id); refresh(); }
+    catch (e) { alert(String(e instanceof Error ? e.message : e)); }
+  }
+  async function onActivate(u: User) {
+    if (!confirm(`Re-activate ${u.name}?`)) return;
+    try { await activateUser(u.id); refresh(); }
+    catch (e) { alert(String(e instanceof Error ? e.message : e)); }
+  }
+  async function onDelete(u: User) {
+    if (!confirm(`Delete ${u.name} permanently? This cannot be undone.`)) return;
     try { await deleteUser(u.id); refresh(); }
     catch (e) { alert(String(e instanceof Error ? e.message : e)); }
   }
@@ -297,8 +315,26 @@ export default function UsersPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
-                    {can("users", "edit") && <button onClick={() => setEditing(u)} className="text-gray-400 hover:text-blue-600 p-1"><Pencil size={15} /></button>}
-                    {can("users", "delete") && u.is_active && <button onClick={() => onDeactivate(u)} className="text-gray-400 hover:text-red-600 p-1"><UserX size={15} /></button>}
+                    {can("users", "edit") && (
+                      <button onClick={() => setEditing(u)} className="text-gray-400 hover:text-blue-600 p-1" title="Edit">
+                        <Pencil size={15} />
+                      </button>
+                    )}
+                    {can("users", "edit") && u.is_active && (
+                      <button onClick={() => onDeactivate(u)} className="text-gray-400 hover:text-amber-600 p-1" title="Deactivate (temporary)">
+                        <UserX size={15} />
+                      </button>
+                    )}
+                    {can("users", "edit") && !u.is_active && (
+                      <button onClick={() => onActivate(u)} className="text-gray-400 hover:text-green-600 p-1" title="Re-activate">
+                        <UserCheck2 size={15} />
+                      </button>
+                    )}
+                    {can("users", "delete") && (
+                      <button onClick={() => onDelete(u)} className="text-gray-400 hover:text-red-600 p-1" title="Delete permanently">
+                        <Trash2 size={15} />
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -363,5 +399,13 @@ export default function UsersPage() {
                       onClose={() => setApproving(null)} onSaved={() => { setApproving(null); refresh(); }} />
       )}
     </div>
+  );
+}
+
+export default function UsersPage() {
+  return (
+    <Suspense fallback={null}>
+      <UsersPageInner />
+    </Suspense>
   );
 }
