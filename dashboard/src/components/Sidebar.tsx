@@ -4,7 +4,8 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Building2, Users2,
   Monitor, BarChart2, Settings, Timer, LogOut, ScrollText,
-  UserCog, FolderKanban, Shield, DownloadCloud, ClipboardList,
+  UserCog, FolderKanban, Shield, DownloadCloud, ClipboardList, Home,
+  Cpu, Tag,
 } from "lucide-react";
 import clsx from "clsx";
 import { adminLogout } from "@/lib/api";
@@ -17,7 +18,8 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     title: "Home",
     items: [
-      { href: "/overview", label: "Organization Overview", icon: Building2,       module: "home" },
+      { href: "/home",     label: "Home",                   icon: Home,            module: "home" },
+      { href: "/overview", label: "Organization Overview",  icon: Building2,       module: "home" },
       { href: "/team",     label: "Team Management",        icon: Users2,          module: "home" },
       { href: "/activity", label: "Activity Dashboard",     icon: LayoutDashboard, module: "home" },
     ],
@@ -28,6 +30,13 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/devices", label: "Devices",       icon: Monitor,    module: "devices" },
       { href: "/logs",    label: "Activity Logs", icon: ScrollText, module: "logs" },
       { href: "/reports", label: "Reports",       icon: BarChart2,  module: "reports" },
+    ],
+  },
+  {
+    title: "Technology & AI",
+    items: [
+      { href: "/tech",       label: "Tech Utilization", icon: Cpu,  module: "tech" },
+      { href: "/categories", label: "App Categories",   icon: Tag,  module: "tech" },
     ],
   },
   {

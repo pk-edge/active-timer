@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, require
+from app.api.deps import get_db, require, get_current_user
 from app.core.config import get_settings
 from app.core.scoping import visible_device_ids, ALL
 from app.db.models import Device, Employee, GroupMember, Group
@@ -245,3 +245,69 @@ async def web_usage(
         params,
     )
     return [{"host": r.host, "visits": int(r.visits or 0)} for r in res.fetchall()]
+
+
+@router.get("/my-stats")
+async def my_stats(
+    user: Employee = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Personal stats for the logged-in user — scoped to their own devices."""
+    device_rows = await db.execute(
+        select(Device.id).where(Device.employee_id == user.id, Device.is_active == True)  # noqa: E712
+    )
+    device_ids = [str(r[0]) for r in device_rows.all()]
+
+    if not device_ids:
+        return {"active_seconds_today": 0, "top_apps": [], "recent_events": [], "device_count": 0}
+
+    active_result = await db.execute(
+        text("""
+            SELECT COALESCE(SUM(
+                CASE WHEN event_type NOT IN ('idle_start','lock') THEN duration ELSE 0 END
+            ), 0) AS active
+            FROM activity_events
+            WHERE device_id = ANY(:ids) AND timestamp >= date_trunc('day', NOW())
+        """),
+        {"ids": device_ids},
+    )
+    active_seconds = int(active_result.scalar() or 0)
+
+    apps_result = await db.execute(
+        text("""
+            SELECT app_name, SUM(duration) AS seconds
+            FROM activity_events
+            WHERE device_id = ANY(:ids)
+              AND event_type = 'window_change' AND app_name IS NOT NULL
+              AND timestamp >= date_trunc('day', NOW())
+            GROUP BY app_name ORDER BY seconds DESC LIMIT 5
+        """),
+        {"ids": device_ids},
+    )
+    top_apps = [{"app_name": r.app_name, "seconds": int(r.seconds or 0)} for r in apps_result.fetchall()]
+
+    events_result = await db.execute(
+        text("""
+            SELECT event_type, app_name, window_title, url, duration,
+                   EXTRACT(EPOCH FROM timestamp)::bigint AS ts_unix
+            FROM activity_events WHERE device_id = ANY(:ids)
+            ORDER BY timestamp DESC LIMIT 10
+        """),
+        {"ids": device_ids},
+    )
+    recent_events = [
+        {
+            "event_type": r.event_type, "app_name": r.app_name,
+            "window_title": r.window_title, "url": r.url,
+            "duration": r.duration,
+            "timestamp_unix": int(r.ts_unix) if r.ts_unix else None,
+        }
+        for r in events_result.fetchall()
+    ]
+
+    return {
+        "active_seconds_today": active_seconds,
+        "top_apps": top_apps,
+        "recent_events": recent_events,
+        "device_count": len(device_ids),
+    }

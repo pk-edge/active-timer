@@ -7,7 +7,7 @@ controls which groups a 'groups'-scoped user may VIEW (employee_group_access).
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,7 +78,7 @@ async def list_users(
 ):
     q = (
         select(Employee).options(selectinload(Employee.role_obj))
-        .where(Employee.company_id == user.company_id)
+        .where(Employee.company_id == user.company_id, Employee.is_deleted == False)  # noqa: E712
         .order_by(Employee.created_at.asc())
     )
     if pending:
@@ -219,14 +219,52 @@ async def approve_user(
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def deactivate_user(
+async def soft_delete_user(
     user_id: str,
     user: Employee = Depends(require("users", "delete")),
     db: AsyncSession = Depends(get_db),
 ):
+    """Soft-delete: flags is_deleted=True. User disappears from all listings."""
+    emp = await _get_user(user_id, user.company_id, db)
+    if emp.id == user.id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You cannot delete yourself")
+    emp.is_deleted = True
+    emp.is_active = False
+    await audit.record(db, user, "user.delete", "user", user_id, {"email": emp.email})
+    await db.commit()
+
+
+@router.post("/{user_id}/deactivate", response_model=UserOut)
+async def deactivate_user(
+    user_id: str,
+    user: Employee = Depends(require("users", "edit")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Temporarily deactivate — admin can re-activate later."""
     emp = await _get_user(user_id, user.company_id, db)
     if emp.id == user.id:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You cannot deactivate yourself")
     emp.is_active = False
     await audit.record(db, user, "user.deactivate", "user", user_id, {"email": emp.email})
     await db.commit()
+    fresh = await db.execute(
+        select(Employee).options(selectinload(Employee.role_obj)).where(Employee.id == emp.id)
+    )
+    return await _user_out(fresh.scalar_one(), db)
+
+
+@router.post("/{user_id}/activate", response_model=UserOut)
+async def activate_user(
+    user_id: str,
+    user: Employee = Depends(require("users", "edit")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-activate a previously deactivated user."""
+    emp = await _get_user(user_id, user.company_id, db)
+    emp.is_active = True
+    await audit.record(db, user, "user.activate", "user", user_id, {"email": emp.email})
+    await db.commit()
+    fresh = await db.execute(
+        select(Employee).options(selectinload(Employee.role_obj)).where(Employee.id == emp.id)
+    )
+    return await _user_out(fresh.scalar_one(), db)

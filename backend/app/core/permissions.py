@@ -24,6 +24,7 @@ MODULES: list[ModuleDef] = [
     {"key": "agents",      "label": "Agents",        "actions": ["view", "create", "edit", "delete"]},
     {"key": "settings",    "label": "Settings",      "actions": ["view", "edit"]},
     {"key": "audit",       "label": "Audit Log",     "actions": ["view"]},
+    {"key": "tech",        "label": "Technology & AI", "actions": ["view", "edit"]},
 ]
 
 _VALID: set[tuple[str, str]] = {(m["key"], a) for m in MODULES for a in m["actions"]}
