@@ -41,6 +41,7 @@ async def get_policy_for_device(
         select(BlockedUrl).where(
             BlockedUrl.company_id == device.company_id,
             BlockedUrl.is_active  == True,
+            BlockedUrl.is_deleted == False,
         ).where(
             # all-company OR this device OR this employee
             (BlockedUrl.target_type == "all") |
@@ -111,7 +112,10 @@ async def list_blocked_urls(
     admin: Employee = Depends(require("policy", "view")),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(BlockedUrl).where(BlockedUrl.company_id == admin.company_id)
+    q = select(BlockedUrl).where(
+        BlockedUrl.company_id == admin.company_id,
+        BlockedUrl.is_deleted == False,  # noqa: E712
+    )
     if is_active is not None:
         q = q.where(BlockedUrl.is_active == is_active)
     result = await db.execute(q.order_by(BlockedUrl.created_at.desc()))
@@ -181,5 +185,5 @@ async def delete_blocked_url(
     rule = result.scalar_one_or_none()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
-    await db.delete(rule)
+    rule.is_deleted = True
     await db.commit()

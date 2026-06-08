@@ -52,6 +52,7 @@ class Config:
     UPLOAD_ENDPOINT:        str = f"{API_BASE}/v1/screenshots"
     UPDATE_CHECK_ENDPOINT:  str = f"{API_BASE}/v1/updates/check"
     POLICY_ENDPOINT:        str = f"{API_BASE}/v1/policy/blocked-urls"
+    DEVICE_TODAY_ENDPOINT:  str = f"{API_BASE}/v1/home/device-today-active"
 
     # ── Auto-update ──────────────────────────────────────────────────────────
     AUTO_UPDATE_ENABLED: bool = os.environ.get("TT_AUTO_UPDATE", "1") != "0"

@@ -115,7 +115,7 @@ async def list_categories(
     await _ensure_default_categories(admin.company_id, db)
     result = await db.execute(
         select(AppCategory)
-        .where(AppCategory.company_id == admin.company_id)
+        .where(AppCategory.company_id == admin.company_id, AppCategory.is_deleted == False)  # noqa: E712
         .order_by(AppCategory.is_system.desc(), AppCategory.name)
     )
     cats = result.scalars().all()
@@ -218,7 +218,8 @@ async def delete_category(
         raise HTTPException(status_code=404, detail="Category not found")
     if cat.is_system:
         raise HTTPException(status_code=400, detail="Cannot delete system category")
-    await db.delete(cat)
+    # Soft-delete so category rules and analytics history are preserved
+    cat.is_deleted = True
     await db.commit()
 
 

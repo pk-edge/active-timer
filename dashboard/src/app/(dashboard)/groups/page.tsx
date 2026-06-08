@@ -3,6 +3,7 @@ import { useState, useRef } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import { FolderKanban, Plus, Upload, X, Trash2, ChevronRight } from "lucide-react";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import { getGroups, createGroup, deleteGroup, importGroupsCsv } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
@@ -44,7 +45,7 @@ function CreateModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
         <div className="flex border-b border-gray-100">
           {(["new", "csv"] as const).map(t => (
             <button key={t} onClick={() => setTab(t)}
-                    className={`flex-1 py-2.5 text-sm font-medium transition ${tab === t ? "text-blue-600 border-b-2 border-blue-600" : "text-gray-500"}`}>
+                    className={`flex-1 py-2.5 text-sm font-medium transition ${tab === t ? "text-brand-600 border-b-2 border-brand-600" : "text-gray-500"}`}>
               {t === "new" ? "New group" : "Upload CSV"}
             </button>
           ))}
@@ -55,18 +56,18 @@ function CreateModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">Group name</label>
                 <input value={name} onChange={e => setName(e.target.value)} autoFocus
-                       className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                       className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
               </div>
               <div>
                 <label className="block text-xs font-medium text-gray-500 mb-1">Description (optional)</label>
                 <input value={desc} onChange={e => setDesc(e.target.value)}
-                       className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                       className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
               </div>
             </>
           ) : (
             <>
               <p className="text-xs text-gray-500">CSV columns: <code className="bg-gray-100 px-1 rounded">group,identifier,type</code> — type is <code className="bg-gray-100 px-1 rounded">employee</code> (email) or <code className="bg-gray-100 px-1 rounded">device</code> (hostname).</p>
-              <input ref={fileRef} type="file" accept=".csv" className="block w-full text-sm text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-600" />
+              <input ref={fileRef} type="file" accept=".csv" className="block w-full text-sm text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-brand-50 file:text-brand-600" />
               {result && <p className="text-green-600 text-sm">{result}</p>}
             </>
           )}
@@ -75,11 +76,11 @@ function CreateModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
         <div className="flex justify-end gap-2 px-5 py-4 border-t border-gray-100">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900">Close</button>
           {tab === "new" ? (
-            <button onClick={createNew} disabled={busy || !name} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+            <button onClick={createNew} disabled={busy || !name} className="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50">
               {busy ? "Creating…" : "Create"}
             </button>
           ) : (
-            <button onClick={uploadCsv} disabled={busy} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+            <button onClick={uploadCsv} disabled={busy} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50">
               <Upload size={14} /> {busy ? "Uploading…" : "Import"}
             </button>
           )}
@@ -92,15 +93,19 @@ function CreateModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
 export default function GroupsPage() {
   const { loading, can } = useUser();
   const { data: groups, mutate } = useSWR<Group[]>("groups", getGroups);
-  const [creating, setCreating] = useState(false);
+  const [creating,       setCreating]      = useState(false);
+  const [pendingDelete,  setPendingDelete]  = useState<Group | null>(null);
+  const [deleting,       setDeleting]       = useState(false);
 
   if (loading) return null;
   if (!can("groups", "view")) return <AccessDenied label="Groups" />;
 
-  async function onDelete(g: Group) {
-    if (!confirm(`Delete group "${g.name}"?`)) return;
-    try { await deleteGroup(g.id); mutate(); }
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try { await deleteGroup(pendingDelete.id); mutate(); setPendingDelete(null); }
     catch (e) { alert(String(e instanceof Error ? e.message : e)); }
+    finally { setDeleting(false); }
   }
 
   return (
@@ -111,7 +116,7 @@ export default function GroupsPage() {
           <p className="text-gray-500 text-sm mt-0.5">{groups?.length ?? 0} groups</p>
         </div>
         {can("groups", "create") && (
-          <button onClick={() => setCreating(true)} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
+          <button onClick={() => setCreating(true)} className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-700">
             <Plus size={15} /> Create group
           </button>
         )}
@@ -133,14 +138,14 @@ export default function GroupsPage() {
                 <td className="px-4 py-3">
                   <Link href={`/groups/${g.id}`} className="flex items-center gap-2 group">
                     <FolderKanban size={15} className="text-gray-400" />
-                    <span className="font-medium text-gray-800 group-hover:text-blue-600">{g.name}</span>
+                    <span className="font-medium text-gray-800 group-hover:text-brand-600">{g.name}</span>
                   </Link>
                   {g.description && <p className="text-xs text-gray-400 mt-0.5 ml-6">{g.description}</p>}
                 </td>
                 <td className="px-4 py-3 text-gray-500">{g.member_count}</td>
                 <td className="px-4 py-3 text-right whitespace-nowrap">
-                  {can("groups", "delete") && <button onClick={() => onDelete(g)} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={15} /></button>}
-                  <Link href={`/groups/${g.id}`} className="text-gray-400 hover:text-blue-600 p-1 inline-flex"><ChevronRight size={16} /></Link>
+                  {can("groups", "delete") && <button onClick={() => setPendingDelete(g)} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={15} /></button>}
+                  <Link href={`/groups/${g.id}`} className="text-gray-400 hover:text-brand-600 p-1 inline-flex"><ChevronRight size={16} /></Link>
                 </td>
               </tr>
             ))}
@@ -151,6 +156,16 @@ export default function GroupsPage() {
       </div>
 
       {creating && <CreateModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); mutate(); }} />}
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title={`Delete "${pendingDelete?.name}"?`}
+        message="This group will be removed. Members won't be deleted but will lose group access."
+        confirmLabel="Delete Group"
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

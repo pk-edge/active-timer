@@ -21,7 +21,7 @@ const STATUS_STYLE: Record<string, string> = {
 function DeviceTile({ d }: { d: RealtimeDevice }) {
   return (
     <Link href={`/devices/${d.device_id}`}
-          className="bg-white border border-gray-200 rounded-xl p-3 hover:border-blue-300 hover:shadow-sm transition block">
+          className="bg-white border border-gray-200 rounded-xl p-3 hover:border-brand-300 hover:shadow-sm transition block">
       <div className="flex items-start justify-between gap-2">
         <p className="text-sm font-medium text-gray-900 truncate">{d.employee_name ?? d.hostname}</p>
         <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full border shrink-0 capitalize ${STATUS_STYLE[d.status]}`}>
@@ -31,7 +31,7 @@ function DeviceTile({ d }: { d: RealtimeDevice }) {
       <p className="text-xs text-gray-400 truncate mt-0.5">{d.hostname}</p>
       <p className="text-xs mt-2 truncate">
         {d.current_app
-          ? <span className="text-blue-600 font-medium">{d.current_app}</span>
+          ? <span className="text-brand-600 font-medium">{d.current_app}</span>
           : <span className="text-gray-400">{d.last_seen_unix ? `Last seen ${fmtTime(d.last_seen_unix)}` : "Never seen"}</span>}
       </p>
     </Link>
@@ -94,7 +94,7 @@ export default function ActivityPage() {
             <Printer size={13} /> Print
           </button>
           {can("agents", "view") && (
-            <Link href="/agents" className="flex items-center gap-1.5 text-sm text-white bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded-lg shadow-sm">
+            <Link href="/agents" className="flex items-center gap-1.5 text-sm text-white bg-brand-600 hover:bg-brand-700 px-3 py-1.5 rounded-lg shadow-sm">
               <DownloadCloud size={13} /> Agent
             </Link>
           )}
@@ -113,7 +113,7 @@ export default function ActivityPage() {
         </div>
         <div className="relative">
           <select value={groupId} onChange={e => setGroup(e.target.value)}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
             <option value="">All groups</option>
             {groups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
@@ -123,7 +123,7 @@ export default function ActivityPage() {
           <div className="relative flex-1 min-w-[180px] max-w-xs">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search user or device…"
-                   className="w-full pl-9 pr-8 py-1.5 bg-white border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                   className="w-full pl-9 pr-8 py-1.5 bg-white border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
             {search && <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"><X size={13} /></button>}
           </div>
         )}
@@ -148,7 +148,7 @@ export default function ActivityPage() {
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
             {(groups ?? []).map(g => (
-              <Link key={g.id} href="/team" className="bg-white border border-gray-200 rounded-xl p-3 hover:border-blue-300 hover:shadow-sm transition block">
+              <Link key={g.id} href="/team" className="bg-white border border-gray-200 rounded-xl p-3 hover:border-brand-300 hover:shadow-sm transition block">
                 <p className="text-sm font-medium text-gray-900 truncate">{g.name}</p>
                 <p className="text-xs text-gray-400 mt-1">{g.member_count} members</p>
               </Link>

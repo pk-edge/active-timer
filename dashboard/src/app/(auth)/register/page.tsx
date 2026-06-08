@@ -40,7 +40,7 @@ export default function RegisterPage() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center">
+          <div className="w-10 h-10 bg-brand-600 rounded-xl flex items-center justify-center">
             <Timer size={20} className="text-white" />
           </div>
           <span className="text-xl font-semibold text-gray-900">TimeTracker</span>
@@ -55,7 +55,7 @@ export default function RegisterPage() {
                 An administrator will review your account. You&apos;ll be able to sign in once approved.
               </p>
               <Link href="/login"
-                    className="block w-full text-center bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 rounded-lg text-sm transition">
+                    className="block w-full text-center bg-brand-600 hover:bg-brand-700 text-white font-medium py-2.5 rounded-lg text-sm transition">
                 Back to sign in
               </Link>
             </div>
@@ -69,7 +69,7 @@ export default function RegisterPage() {
                   <input
                     type="text" required value={name} onChange={e => setName(e.target.value)}
                     placeholder="Your name"
-                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 transition"
+                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
                   />
                 </div>
 
@@ -78,7 +78,7 @@ export default function RegisterPage() {
                   <input
                     type="email" required value={email} onChange={e => setEmail(e.target.value)}
                     placeholder="you@company.com"
-                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 transition"
+                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
                   />
                 </div>
 
@@ -87,7 +87,7 @@ export default function RegisterPage() {
                   <input
                     type="password" required value={password} onChange={e => setPassword(e.target.value)}
                     placeholder="At least 8 characters"
-                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 transition"
+                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
                   />
                 </div>
 
@@ -96,7 +96,7 @@ export default function RegisterPage() {
                   <input
                     type="password" required value={confirm} onChange={e => setConfirm(e.target.value)}
                     placeholder="••••••••"
-                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 transition"
+                    className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
                   />
                 </div>
 
@@ -104,7 +104,7 @@ export default function RegisterPage() {
 
                 <button
                   type="submit" disabled={loading}
-                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg text-sm transition"
+                  className="w-full bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg text-sm transition"
                 >
                   {loading ? "Submitting…" : "Request access"}
                 </button>
@@ -112,7 +112,7 @@ export default function RegisterPage() {
 
               <p className="text-center text-sm text-gray-500 mt-5">
                 Already have an account?{" "}
-                <Link href="/login" className="text-blue-600 hover:text-blue-700 font-medium">Sign in</Link>
+                <Link href="/login" className="text-brand-600 hover:text-brand-700 font-medium">Sign in</Link>
               </p>
             </>
           )}

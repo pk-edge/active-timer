@@ -113,6 +113,7 @@ class Role(Base):
     description: Mapped[str | None]     = mapped_column(Text, nullable=True)
     scope_type:  Mapped[str]            = mapped_column(String, default="all")
     is_system:   Mapped[bool]           = mapped_column(Boolean, default=False)
+    is_deleted:  Mapped[bool]           = mapped_column(Boolean, default=False)
     created_at:  Mapped[datetime]       = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     permissions: Mapped[list["RolePermission"]] = relationship(
@@ -140,6 +141,7 @@ class Group(Base):
     description: Mapped[str | None]       = mapped_column(Text, nullable=True)
     created_by:  Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
     created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    is_deleted:  Mapped[bool]             = mapped_column(Boolean, default=False)
 
     members:     Mapped[list["GroupMember"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
@@ -217,6 +219,7 @@ class AppCategory(Base):
     color:       Mapped[str]              = mapped_column(String, default="#6366f1")
     description: Mapped[str | None]       = mapped_column(Text, nullable=True)
     is_system:   Mapped[bool]             = mapped_column(Boolean, default=False)
+    is_deleted:  Mapped[bool]             = mapped_column(Boolean, default=False)
     created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     rules: Mapped[list["AppCategoryRule"]] = relationship(
@@ -250,5 +253,6 @@ class BlockedUrl(Base):
     employee_id: Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
     notes:       Mapped[str | None]       = mapped_column(Text, nullable=True)
     is_active:   Mapped[bool]             = mapped_column(Boolean, default=True)
+    is_deleted:  Mapped[bool]             = mapped_column(Boolean, default=False)
     created_by:  Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
     created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

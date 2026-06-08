@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, require, get_current_user
+from app.api.deps import get_db, require, get_current_user, get_current_device
 from app.core.config import get_settings
 from app.core.scoping import visible_device_ids, ALL
 from app.db.models import Device, Employee, GroupMember, Group
@@ -116,8 +116,10 @@ async def _status_rows(ids, company_id, db: AsyncSession) -> list[dict]:
 
 @router.get("/overview")
 async def overview(
-    group_id: str | None = Query(default=None),
-    days:     int = Query(default=7, ge=1, le=90),
+    group_id:   str | None = Query(default=None),
+    days:       int = Query(default=7, ge=1, le=90),
+    since_date: str | None = Query(default=None, description="YYYY-MM-DD"),
+    until_date: str | None = Query(default=None, description="YYYY-MM-DD"),
     user: Employee = Depends(require("home", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -134,31 +136,58 @@ async def overview(
 
     frag, params = _clause(ids, "ae.device_id")
     params["company_id"] = str(user.company_id)
-    params["days"] = days
 
-    # Active devices today + avg active seconds today.
-    today = await db.execute(
-        text(f"""
-            SELECT ae.device_id,
-                   SUM(CASE WHEN ae.event_type NOT IN ('idle_start','lock') THEN ae.duration ELSE 0 END) AS active
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.timestamp >= date_trunc('day', NOW()){frag}
-            GROUP BY ae.device_id
-        """),
-        params,
+    # ── Date range for stat cards ─────────────────────────────────────────────
+    # When since_date/until_date provided use that range; otherwise "today".
+    if since_date and until_date:
+        stat_filter = " AND ae.timestamp >= :stat_since::date AND ae.timestamp < (:stat_until::date + INTERVAL '1 day')"
+        params["stat_since"] = since_date
+        params["stat_until"] = until_date
+    else:
+        stat_filter = " AND ae.timestamp >= date_trunc('day', NOW())"
+
+    # Active working time = window_change events for real user apps ONLY.
+    # Excludes: System Idle Process / LockApp (Windows OS placeholders that
+    # appear as foreground window while the user is actually idle), and any
+    # event whose app_name is NULL/blank.
+    SYSTEM_IDLE_APPS = (
+        "System Idle Process", "LockApp", "LogonUI",
+        "Idle", "screensaver",
     )
-    today_rows = today.fetchall()
-    active_today = len(today_rows)
-    total_active_secs = sum(int(r.active or 0) for r in today_rows)
+    placeholders = ", ".join(f":ex{i}" for i in range(len(SYSTEM_IDLE_APPS)))
+    for i, name in enumerate(SYSTEM_IDLE_APPS):
+        params[f"ex{i}"] = name
+
+    stat_sql = f"""
+        SELECT ae.device_id,
+               SUM(CASE
+                   WHEN ae.event_type = 'window_change'
+                    AND ae.app_name IS NOT NULL
+                    AND ae.app_name NOT IN ({placeholders})
+                   THEN ae.duration ELSE 0
+               END) AS active
+        FROM activity_events ae
+        JOIN devices d ON d.id = ae.device_id
+        WHERE d.company_id = :company_id{stat_filter}{frag}
+        GROUP BY ae.device_id
+    """
+    stat_result = await db.execute(text(stat_sql), params)
+    stat_rows = stat_result.fetchall()
+    active_today = len([r for r in stat_rows if (r.active or 0) > 0])
+    total_active_secs = sum(int(r.active or 0) for r in stat_rows)
     avg_active = int(total_active_secs / active_today) if active_today else 0
 
-    # Daily active-seconds trend.
+    # ── Trend — daily active seconds (always keyed by `days` param) ──────────
+    params["days"] = days
     trend = await db.execute(
         text(f"""
             SELECT DATE(ae.timestamp) AS day,
-                   SUM(CASE WHEN ae.event_type NOT IN ('idle_start','lock') THEN ae.duration ELSE 0 END) AS active
+                   SUM(CASE
+                       WHEN ae.event_type = 'window_change'
+                        AND ae.app_name IS NOT NULL
+                        AND ae.app_name NOT IN ({placeholders})
+                       THEN ae.duration ELSE 0
+                   END) AS active
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
             WHERE d.company_id = :company_id
@@ -184,10 +213,45 @@ async def realtime(
     user: Employee = Depends(require("home", "view")),
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Returns live device status.
+
+    When the in-process ingest queue has warm cache entries for devices,
+    we merge them into the SQL result so the UI sees the very latest
+    app/event without waiting for the async DB write to land.
+    The DB query still runs (for hostname, employee, online/offline
+    logic) but it's enriched with zero-latency cache data.
+    """
+    from app.core.ingest_queue import ingest_queue
+
     ids = await _resolve_ids(user, group_id, db)
     if ids is not ALL and not ids:
         return []
-    return await _status_rows(ids, user.company_id, db)
+
+    rows = await _status_rows(ids, user.company_id, db)
+
+    # Overlay cache: if the ingest queue has a more recent state for a device,
+    # update current_app / status without an extra DB round-trip.
+    cache = ingest_queue.device_cache
+    now   = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+
+    for row in rows:
+        did = row["device_id"]
+        cached = cache.get(did)
+        if not cached:
+            continue
+        cached_ts = cached.get("last_seen")
+        if cached_ts and cached_ts > cutoff:
+            # Device is definitely online — use cached app state
+            if cached.get("current_app"):
+                row["current_app"] = cached["current_app"]
+            row["status"] = (
+                "passive" if cached.get("latest_type") in _PASSIVE_EVENTS
+                else "active"
+            )
+
+    return rows
 
 
 @router.get("/app-usage")
@@ -311,3 +375,39 @@ async def my_stats(
         "recent_events": recent_events,
         "device_count": len(device_ids),
     }
+
+
+# ── Device active-time sync — called by the agent on startup ──────────────────
+
+@router.get("/device-today-active")
+async def device_today_active(
+    device: Device = Depends(get_current_device),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns today's authoritative active-work seconds for this device,
+    calculated from stored activity_events (same formula the portal uses).
+
+    The agent calls this on startup so the widget baseline always matches
+    the portal — no drift from local daily_totals accumulation errors.
+    """
+    result = await db.execute(
+        text("""
+            SELECT COALESCE(SUM(
+                CASE
+                    WHEN ae.event_type = 'window_change'
+                     AND ae.app_name IS NOT NULL
+                     AND ae.app_name NOT IN (
+                         'System Idle Process','LockApp','LogonUI','Idle','screensaver'
+                     )
+                    THEN ae.duration ELSE 0
+                END
+            ), 0) AS active_secs
+            FROM activity_events ae
+            WHERE ae.device_id = :did
+              AND ae.timestamp >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+        """),
+        {"did": str(device.id)},
+    )
+    row = result.fetchone()
+    return {"active_seconds_today": int(row.active_secs or 0)}

@@ -64,13 +64,13 @@ export function ActivityTrend({ data }: { data: { date: string; active_seconds: 
                axisLine={false} tickLine={false} width={30} />
         <Tooltip formatter={(v: number) => [fmtSeconds(v), "Active"]}
                  contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 12 }} />
-        <Bar dataKey="active_seconds" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+        <Bar dataKey="active_seconds" fill="#4a0f70" radius={[4, 4, 0, 0]} />
       </BarChart>
     </ResponsiveContainer>
   );
 }
 
-const PIE_COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#a855f7", "#ef4444", "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1", "#14b8a6", "#eab308"];
+const PIE_COLORS = ["#4a0f70", "#22c55e", "#f59e0b", "#a855f7", "#ef4444", "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1", "#14b8a6", "#eab308"];
 
 export function UsagePie({
   items, labelKey, valueKey, format: fmt,

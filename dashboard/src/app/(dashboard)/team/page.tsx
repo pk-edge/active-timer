@@ -50,7 +50,7 @@ export default function TeamPage() {
         <div className="relative">
           <Users2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
           <select value={groupId} onChange={e => setGroupId(e.target.value)}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-9 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-9 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
             {(!groups || groups.length === 0) && <option value="">No groups yet</option>}
             {groups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
@@ -71,7 +71,7 @@ export default function TeamPage() {
               <p className="text-xs text-gray-500 mt-0.5">Active today</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-              <p className="text-2xl font-bold text-blue-600">{avgHrs}h</p>
+              <p className="text-2xl font-bold text-brand-600">{avgHrs}h</p>
               <p className="text-xs text-gray-500 mt-0.5">Avg active / device</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">

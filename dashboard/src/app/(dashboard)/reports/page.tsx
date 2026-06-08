@@ -76,7 +76,7 @@ export default function ReportsPage() {
             <select
               value={deviceId}
               onChange={e => setDeviceId(e.target.value)}
-              className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 cursor-pointer"
+              className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 cursor-pointer"
             >
               <option value="">All users / devices</option>
               {devices?.map(d => (
@@ -96,7 +96,7 @@ export default function ReportsPage() {
                 onClick={() => setDays(p.value)}
                 className={`px-3 py-2 text-sm transition ${
                   days === p.value
-                    ? "bg-blue-600 text-white font-medium"
+                    ? "bg-brand-600 text-white font-medium"
                     : "text-gray-600 hover:bg-gray-50"
                 }`}
               >
@@ -155,7 +155,7 @@ export default function ReportsPage() {
                   color: "#111827",
                 }}
               />
-              <Bar dataKey="active_seconds" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="active_seconds" fill="#4a0f70" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </SectionCard>
@@ -172,7 +172,7 @@ export default function ReportsPage() {
               placeholder="Search applications…"
               value={appSearch}
               onChange={e => setAppSearch(e.target.value)}
-              className="w-full pl-9 pr-9 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 transition"
+              className="w-full pl-9 pr-9 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
             />
             {appSearch && (
               <button
@@ -192,7 +192,7 @@ export default function ReportsPage() {
                   <span className="text-xs text-gray-400 w-5 text-right shrink-0">{i + 1}</span>
                   <span className="text-sm text-gray-700 w-36 truncate shrink-0">{app.app_name}</span>
                   <div className="flex-1 bg-gray-100 rounded-full h-2">
-                    <div className="bg-blue-500 h-2 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                    <div className="bg-brand-500 h-2 rounded-full transition-all" style={{ width: `${pct}%` }} />
                   </div>
                   <span className="text-xs text-gray-500 w-16 text-right shrink-0">{fmtSeconds(app.seconds)}</span>
                 </div>

@@ -12,6 +12,26 @@ from app.schemas.report import CompanyDayOut, AppUsageOut, UrlVisitOut
 
 router = APIRouter()
 
+# OS-level idle/lock-screen process names that must never count as active work.
+# These appear as foreground-window events on Windows/macOS when the screen is
+# idle or locked, inflating active time and polluting the top-apps list.
+_IDLE_APPS = (
+    "System Idle Process", "LockApp", "LogonUI",
+    "Idle", "screensaver",
+)
+# SQL fragment for active-time CASE expressions (window_change only, real apps)
+_ACTIVE_CASE = """CASE
+    WHEN ae.event_type = 'window_change'
+     AND ae.app_name IS NOT NULL
+     AND ae.app_name NOT IN ('System Idle Process','LockApp','LogonUI','Idle','screensaver')
+    THEN ae.duration ELSE 0
+END"""
+# SQL fragment to exclude idle app names from top-app lists
+_EXCL_IDLE = (
+    "AND ae.app_name NOT IN "
+    "('System Idle Process','LockApp','LogonUI','Idle','screensaver')"
+)
+
 
 async def _scope_clause(admin: Employee, db: AsyncSession) -> tuple[str, dict]:
     """Return an SQL fragment + params restricting ae.device_id to the user's scope.
@@ -42,7 +62,7 @@ async def company_summary(
         text(f"""
             SELECT
                 DATE(ae.timestamp) AS day,
-                SUM(CASE WHEN ae.event_type NOT IN ('idle_start','lock') THEN ae.duration ELSE 0 END) AS active,
+                SUM({_ACTIVE_CASE}) AS active,
                 SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle,
                 COUNT(DISTINCT ae.device_id) AS device_count
             FROM activity_events ae
@@ -76,7 +96,8 @@ async def top_apps(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= NOW() - make_interval(days => :days){clause}
+              AND ae.timestamp >= NOW() - make_interval(days => :days)
+              {_EXCL_IDLE}{clause}
             GROUP BY ae.app_name ORDER BY seconds DESC LIMIT :limit
         """),
         {"company_id": str(admin.company_id), "days": days, "limit": limit, **sparams},
@@ -136,6 +157,7 @@ async def device_top_apps(
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
               AND ae.timestamp >= NOW() - make_interval(days => :days)
+              AND ae.app_name NOT IN ('System Idle Process','LockApp','LogonUI','Idle','screensaver')
             GROUP BY ae.app_name ORDER BY seconds DESC LIMIT :limit
         """),
         {"device_id": str(device.id), "days": days, "limit": limit},
@@ -165,7 +187,7 @@ async def device_summary(
         text("""
             SELECT
                 DATE(ae.timestamp) AS day,
-                SUM(CASE WHEN ae.event_type NOT IN ('idle_start','lock') THEN ae.duration ELSE 0 END) AS active,
+                SUM({_ACTIVE_CASE}) AS active,
                 SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle
             FROM activity_events ae
             WHERE ae.device_id = :device_id

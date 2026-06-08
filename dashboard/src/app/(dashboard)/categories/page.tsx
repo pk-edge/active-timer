@@ -12,10 +12,11 @@ import {
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import type { AppCategory, UncategorizedItem } from "@/types";
 
 const PRESET_COLORS = [
-  "#3b82f6", "#22c55e", "#f59e0b", "#a855f7", "#ef4444",
+  "#4a0f70", "#22c55e", "#f59e0b", "#a855f7", "#ef4444",
   "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1",
   "#14b8a6", "#64748b",
 ];
@@ -67,7 +68,7 @@ function CategoryForm({ initial, onClose, onSave }: CategoryFormProps) {
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1.5">Name</label>
             <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Productivity"
-                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-2">Color</label>
@@ -88,7 +89,7 @@ function CategoryForm({ initial, onClose, onSave }: CategoryFormProps) {
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1.5">Description (optional)</label>
             <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="What apps belong here?"
-                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
           </div>
           {err && <p className="text-xs text-red-500">{err}</p>}
           <div className="flex gap-2 pt-1">
@@ -97,7 +98,7 @@ function CategoryForm({ initial, onClose, onSave }: CategoryFormProps) {
               Cancel
             </button>
             <button type="submit" disabled={saving}
-                    className="flex-1 bg-blue-600 text-white rounded-lg py-2 text-sm font-medium hover:bg-blue-700 transition disabled:opacity-60">
+                    className="flex-1 bg-brand-600 text-white rounded-lg py-2 text-sm font-medium hover:bg-brand-700 transition disabled:opacity-60">
               {saving ? "Saving…" : "Save"}
             </button>
           </div>
@@ -156,7 +157,7 @@ function AssignModal({ item, categories, onClose, onAssigned }: AssignModalProps
         <label className="block text-xs font-medium text-gray-600 mb-1.5">Category</label>
         <div className="relative mb-4">
           <select value={catId} onChange={e => setCatId(e.target.value)}
-                  className="w-full appearance-none border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  className="w-full appearance-none border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300">
             {categories.map(c => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
@@ -172,7 +173,7 @@ function AssignModal({ item, categories, onClose, onAssigned }: AssignModalProps
             Cancel
           </button>
           <button onClick={assign} disabled={saving || !catId}
-                  className="flex-1 bg-blue-600 text-white rounded-lg py-2 text-sm font-medium hover:bg-blue-700 transition disabled:opacity-60">
+                  className="flex-1 bg-brand-600 text-white rounded-lg py-2 text-sm font-medium hover:bg-brand-700 transition disabled:opacity-60">
             {saving ? "Assigning…" : "Assign"}
           </button>
         </div>
@@ -292,7 +293,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                   value={search}
                   onChange={e => setSearch(e.target.value)}
                   placeholder={`Search ${tab}…`}
-                  className="w-full pl-7 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-300"
+                  className="w-full pl-7 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-brand-300"
                 />
               </div>
 
@@ -301,7 +302,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                 <select
                   value={days}
                   onChange={e => setDays(Number(e.target.value))}
-                  className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-7 py-1.5 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                  className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-7 py-1.5 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-brand-300"
                 >
                   <option value={7}>Last 7 days</option>
                   <option value={30}>Last 30 days</option>
@@ -353,7 +354,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
 
                     <button
                       onClick={() => setAssigning(item)}
-                      className="opacity-0 group-hover:opacity-100 flex items-center gap-1.5 text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 transition shrink-0"
+                      className="opacity-0 group-hover:opacity-100 flex items-center gap-1.5 text-xs bg-brand-600 text-white px-3 py-1.5 rounded-lg hover:bg-brand-700 transition shrink-0"
                     >
                       Assign <ChevronRight size={11} />
                     </button>
@@ -392,6 +393,7 @@ function CategoryCard({
   cat: AppCategory;
   canEdit: boolean;
   onEdit: () => void;
+  /** Called when user taps delete — parent owns the confirm dialog */
   onDelete: () => void;
   onRefresh: () => void;
 }) {
@@ -426,11 +428,8 @@ function CategoryCard({
     try { await deleteCategoryRule(ruleId); onRefresh(); } catch { /* ignore */ }
   }
 
-  async function handleDelete() {
-    if (!confirm(`Delete category "${cat.name}"? All rules will be removed.`)) return;
-    setDeleting(true);
-    try { await deleteTechCategory(cat.id); onDelete(); }
-    catch { setDeleting(false); }
+  function handleDelete() {
+    onDelete();  // page-level ConfirmDialog handles actual deletion
   }
 
   return (
@@ -452,7 +451,7 @@ function CategoryCard({
           <span className="text-xs text-gray-400 mr-1">{cat.rule_count} rules</span>
           {canEdit && (
             <button onClick={onEdit}
-                    className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition">
+                    className="p-1.5 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition">
               <Edit2 size={14} />
             </button>
           )}
@@ -475,7 +474,7 @@ function CategoryCard({
             <div className="relative mb-3">
               <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
               <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter apps / URLs…"
-                     className="w-full pl-7 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                     className="w-full pl-7 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-brand-300" />
             </div>
           )}
           <div className="flex flex-wrap gap-2">
@@ -502,9 +501,9 @@ function CategoryCard({
             <form onSubmit={handleAddRule} className="mt-3 flex gap-2">
               <input value={newRule} onChange={e => { setNewRule(e.target.value); setAddErr(""); }}
                      placeholder="Add app name or website…"
-                     className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                     className="flex-1 border border-gray-200 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-300" />
               <button type="submit" disabled={adding || !newRule.trim()}
-                      className="flex items-center gap-1 bg-blue-600 text-white text-xs px-3 py-1.5 rounded-lg hover:bg-blue-700 transition disabled:opacity-50">
+                      className="flex items-center gap-1 bg-brand-600 text-white text-xs px-3 py-1.5 rounded-lg hover:bg-brand-700 transition disabled:opacity-50">
                 <Plus size={12} /> Add
               </button>
             </form>
@@ -520,9 +519,18 @@ function CategoryCard({
 
 export default function CategoriesPage() {
   const { loading, can } = useUser();
-  const [showForm, setShowForm] = useState(false);
-  const [editing, setEditing]   = useState<AppCategory | undefined>(undefined);
-  const [search, setSearch]     = useState("");
+  const [showForm,       setShowForm]       = useState(false);
+  const [editing,        setEditing]        = useState<AppCategory | undefined>(undefined);
+  const [search,         setSearch]         = useState("");
+  const [pendingDelete,  setPendingDelete]  = useState<AppCategory | null>(null);
+  const [deleting,       setDeleting]       = useState(false);
+
+  async function confirmCatDelete() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try { await deleteTechCategory(pendingDelete.id); mutate(); setPendingDelete(null); }
+    finally { setDeleting(false); }
+  }
 
   const { data: categories, mutate } = useSWR<AppCategory[]>("tech-categories", getTechCategories);
 
@@ -551,7 +559,7 @@ export default function CategoriesPage() {
         {canEdit && (
           <button
             onClick={() => { setEditing(undefined); setShowForm(true); }}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-2 rounded-lg shadow-sm transition"
+            className="flex items-center gap-2 bg-brand-600 hover:bg-brand-700 text-white text-sm px-4 py-2 rounded-lg shadow-sm transition"
           >
             <Plus size={15} /> New Category
           </button>
@@ -561,7 +569,7 @@ export default function CategoriesPage() {
       {/* Stats */}
       <div className="flex flex-wrap gap-3 mb-6">
         {[
-          { label: "Total Categories", value: (categories ?? []).length, color: "bg-blue-50 text-blue-600" },
+          { label: "Total Categories", value: (categories ?? []).length, color: "bg-brand-50 text-brand-600" },
           { label: "System",           value: (categories ?? []).filter(c => c.is_system).length, color: "bg-gray-50 text-gray-600" },
           { label: "Custom",           value: (categories ?? []).filter(c => !c.is_system).length, color: "bg-purple-50 text-purple-600" },
           { label: "Total Rules",      value: totalRules, color: "bg-green-50 text-green-600" },
@@ -588,7 +596,7 @@ export default function CategoriesPage() {
       <div className="relative mb-4 max-w-sm">
         <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search categories…"
-               className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white shadow-sm" />
+               className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-300 bg-white shadow-sm" />
       </div>
 
       {/* System categories */}
@@ -602,7 +610,7 @@ export default function CategoriesPage() {
                 cat={cat}
                 canEdit={canEdit}
                 onEdit={() => { setEditing(cat); setShowForm(true); }}
-                onDelete={() => mutate()}
+                onDelete={() => setPendingDelete(cat)}
                 onRefresh={() => mutate()}
               />
             ))}
@@ -621,7 +629,7 @@ export default function CategoriesPage() {
                 cat={cat}
                 canEdit={canEdit}
                 onEdit={() => { setEditing(cat); setShowForm(true); }}
-                onDelete={() => mutate()}
+                onDelete={() => setPendingDelete(cat)}
                 onRefresh={() => mutate()}
               />
             ))}
@@ -646,6 +654,16 @@ export default function CategoriesPage() {
           onSave={() => mutate()}
         />
       )}
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title={`Delete category "${pendingDelete?.name}"?`}
+        message="This category and all its app rules will be removed. Historical analytics that referenced this category will show as Uncategorized."
+        confirmLabel="Delete Category"
+        loading={deleting}
+        onConfirm={confirmCatDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

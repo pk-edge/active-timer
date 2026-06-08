@@ -94,11 +94,11 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
             <p className="text-xs text-amber-400 mt-0.5">Idle</p>
           </div>
           {/* App switches */}
-          <div className="bg-blue-50 rounded-lg px-3 py-2 flex items-center gap-2">
-            <ArrowLeftRight size={13} className="text-blue-400 shrink-0" />
+          <div className="bg-brand-50 rounded-lg px-3 py-2 flex items-center gap-2">
+            <ArrowLeftRight size={13} className="text-brand-400 shrink-0" />
             <div>
-              <p className="text-base font-bold text-blue-600 leading-tight">{insights.appSwitches}</p>
-              <p className="text-xs text-blue-400">Switches</p>
+              <p className="text-base font-bold text-brand-600 leading-tight">{insights.appSwitches}</p>
+              <p className="text-xs text-brand-400">Switches</p>
             </div>
           </div>
           {/* URL visits */}
@@ -131,8 +131,8 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
         <div className="space-y-2">
           {insights.peakHour !== null && (
             <div className="flex items-center gap-2.5">
-              <div className="w-6 h-6 rounded-md bg-blue-50 flex items-center justify-center shrink-0">
-                <Clock size={12} className="text-blue-500" />
+              <div className="w-6 h-6 rounded-md bg-brand-50 flex items-center justify-center shrink-0">
+                <Clock size={12} className="text-brand-500" />
               </div>
               <div className="min-w-0">
                 <p className="text-xs font-semibold text-gray-800">
@@ -186,7 +186,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
             {insights.topApps.length > 5 && (
               <button
                 onClick={() => setShowAllApps(v => !v)}
-                className="flex items-center gap-1 text-xs text-blue-500 hover:text-blue-700 font-medium transition"
+                className="flex items-center gap-1 text-xs text-brand-500 hover:text-brand-700 font-medium transition"
               >
                 {showAllApps ? (
                   <><ChevronUp size={12} /> Show less</>
@@ -210,7 +210,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
                     <span className="text-xs text-gray-400 shrink-0 ml-1">{fmtSeconds(secs)}</span>
                   </div>
                   <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                    <div className="h-full rounded-full bg-blue-400 transition-all" style={{ width: `${pct}%` }} />
+                    <div className="h-full rounded-full bg-brand-400 transition-all" style={{ width: `${pct}%` }} />
                   </div>
                 </div>
               );

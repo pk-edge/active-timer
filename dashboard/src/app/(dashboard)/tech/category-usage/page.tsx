@@ -56,7 +56,7 @@ function DetailPanel({
         <DetailTabs tabs={DETAIL_TABS} active={tab} onSelect={setTab} />
         {item.cat_id && (
           <Link href="/categories"
-                className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 font-medium shrink-0 pb-2">
+                className="flex items-center gap-1 text-xs text-brand-600 hover:text-brand-700 font-medium shrink-0 pb-2">
             Manage Rules <ArrowUpRight size={11} />
           </Link>
         )}
@@ -132,7 +132,7 @@ export default function CategoryUsagePage() {
   if (!can("tech", "view")) return <AccessDenied label="Category Usage" />;
 
   const stats = [
-    { label: "Total Duration",   value: fmtDur(data?.total_secs ?? 0),         color: "text-blue-600" },
+    { label: "Total Duration",   value: fmtDur(data?.total_secs ?? 0),         color: "text-brand-600" },
     { label: "Categories",       value: String(data?.items.length ?? 0) },
     { label: "Uncategorized",    value: fmtDur(data?.items.find(i => i.name === "Uncategorized")?.duration_secs ?? 0), color: "text-amber-500" },
     { label: "Top Category",     value: data?.items[0]?.name ?? "—" },
@@ -198,8 +198,8 @@ export default function CategoryUsagePage() {
               <button
                 key={item.name}
                 onClick={() => setSelected(prev => prev?.name === item.name ? null : item)}
-                className={`w-full grid grid-cols-[16px_1fr_110px_52px] sm:grid-cols-[16px_1fr_120px_60px] gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 hover:bg-blue-50/40 transition text-left ${
-                  selected?.name === item.name ? "bg-blue-50" : ""
+                className={`w-full grid grid-cols-[16px_1fr_110px_52px] sm:grid-cols-[16px_1fr_120px_60px] gap-3 px-4 sm:px-5 py-3.5 border-b border-gray-100 hover:bg-brand-50/40 transition text-left ${
+                  selected?.name === item.name ? "bg-brand-50" : ""
                 }`}
               >
                 <div className="w-3 h-3 rounded-full mt-0.5 shrink-0" style={{ background: item.color }} />
@@ -219,7 +219,7 @@ export default function CategoryUsagePage() {
           <div className="flex flex-col min-h-0 w-full lg:flex-1 lg:min-w-0">
             <button
               onClick={() => setSelected(null)}
-              className="lg:hidden flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-blue-600 border-b border-gray-100 shrink-0"
+              className="lg:hidden flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-brand-600 border-b border-gray-100 shrink-0"
             >
               <ChevronLeft size={16} /> Back to list
             </button>

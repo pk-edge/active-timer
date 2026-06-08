@@ -13,7 +13,7 @@ const ICONS: Record<string, React.ReactNode> = {
 };
 
 const DOT_COLOR: Record<string, string> = {
-  window_change: "bg-blue-500",
+  window_change: "bg-brand-500",
   url_visit:     "bg-purple-500",
   lock:          "bg-red-400",
   unlock:        "bg-green-500",
@@ -22,7 +22,7 @@ const DOT_COLOR: Record<string, string> = {
 };
 
 const ICON_COLOR: Record<string, string> = {
-  window_change: "text-blue-500",
+  window_change: "text-brand-500",
   url_visit:     "text-purple-500",
   lock:          "text-red-500",
   unlock:        "text-green-500",
@@ -31,7 +31,7 @@ const ICON_COLOR: Record<string, string> = {
 };
 
 const BADGE_COLOR: Record<string, string> = {
-  window_change: "bg-blue-50 text-blue-700",
+  window_change: "bg-brand-50 text-brand-700",
   url_visit:     "bg-purple-50 text-purple-700",
   lock:          "bg-red-50 text-red-600",
   unlock:        "bg-green-50 text-green-700",
@@ -48,7 +48,7 @@ function EventRow({ e, isLast }: { e: TimelineEvent; isLast: boolean }) {
     <div className="flex gap-0 group">
       {/* ── Prominent time column ── */}
       <div className="w-24 shrink-0 pt-2.5 pr-3 text-right">
-        <span className="text-sm font-bold text-blue-700 font-mono tracking-tight leading-none">
+        <span className="text-sm font-bold text-brand-700 font-mono tracking-tight leading-none">
           {fmtTime(e.timestamp_unix)}
         </span>
       </div>
@@ -127,7 +127,7 @@ export default function ActivityTimeline({ events }: Props) {
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
         <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Activity Feed</p>
-        <span className="text-xs font-medium bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full">
+        <span className="text-xs font-medium bg-brand-50 text-brand-600 px-2 py-0.5 rounded-full">
           {events.length} events
         </span>
       </div>

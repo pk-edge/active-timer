@@ -36,7 +36,8 @@ async def list_roles(
 ):
     rows = await db.execute(
         select(Role).options(selectinload(Role.permissions))
-        .where(Role.company_id == user.company_id).order_by(Role.created_at.asc())
+        .where(Role.company_id == user.company_id, Role.is_deleted == False)  # noqa: E712
+        .order_by(Role.created_at.asc())
     )
     return [_role_out(r) for r in rows.scalars().all()]
 
@@ -143,6 +144,7 @@ async def delete_role(
     if assigned.first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail="Role is assigned to users; reassign them first")
+    # Soft-delete: flag instead of physical removal so audit history is preserved
+    role.is_deleted = True
     await audit.record(db, user, "role.delete", "role", role_id, {"name": role.name})
-    await db.delete(role)
     await db.commit()

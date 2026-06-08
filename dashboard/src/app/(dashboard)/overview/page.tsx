@@ -58,7 +58,7 @@ export default function OverviewPage() {
           <p className="text-xs text-gray-500 mt-0.5">Active today</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-          <p className="text-2xl font-bold text-blue-600">{avgHrs}h</p>
+          <p className="text-2xl font-bold text-brand-600">{avgHrs}h</p>
           <p className="text-xs text-gray-500 mt-0.5">Avg active / device</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
@@ -94,7 +94,7 @@ export default function OverviewPage() {
             <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
               {PERIODS.map(p => (
                 <button key={p.value} onClick={() => setDays(p.value)}
-                        className={`px-2.5 py-1 text-xs transition ${days === p.value ? "bg-blue-600 text-white" : "text-gray-600 hover:bg-gray-200"}`}>
+                        className={`px-2.5 py-1 text-xs transition ${days === p.value ? "bg-brand-600 text-white" : "text-gray-600 hover:bg-gray-200"}`}>
                   {p.label}
                 </button>
               ))}

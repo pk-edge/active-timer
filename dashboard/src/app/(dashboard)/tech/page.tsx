@@ -22,7 +22,7 @@ import type {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const LINE_COLORS = ["#3b82f6","#22c55e","#f59e0b","#a855f7","#ef4444","#06b6d4","#ec4899"];
+const LINE_COLORS = ["#4a0f70","#22c55e","#f59e0b","#a855f7","#ef4444","#06b6d4","#ec4899"];
 const RADIAN = Math.PI / 180;
 
 function PctBadge({ v }: { v: number }) {
@@ -39,7 +39,7 @@ function FilterChip({
       <select
         value={value}
         onChange={e => onChange(e.target.value)}
-        className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300 cursor-pointer"
+        className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 cursor-pointer"
       >
         {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
@@ -224,7 +224,7 @@ function TopChangesTab({ allocation, trends }: { allocation: CategoryAllocationI
               contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 12 }}
             />
             <Bar dataKey="pct_change" radius={[0, 4, 4, 0]}>
-              {sorted.map((e, i) => <Cell key={i} fill={e.pct_change >= 0 ? "#3b82f6" : "#ef4444"} />)}
+              {sorted.map((e, i) => <Cell key={i} fill={e.pct_change >= 0 ? "#4a0f70" : "#ef4444"} />)}
               <LabelList dataKey="pct_change"
                          formatter={(v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`}
                          style={{ fill: "#6b7280", fontSize: 10 }}
@@ -264,7 +264,7 @@ function TopChangesTab({ allocation, trends }: { allocation: CategoryAllocationI
                     <div className="w-20 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                       <div className="h-full rounded-full"
                            style={{ width: `${Math.min(Math.abs(item.pct_change) * 8, 100)}%`,
-                                    background: item.pct_change >= 0 ? "#3b82f6" : "#ef4444" }} />
+                                    background: item.pct_change >= 0 ? "#4a0f70" : "#ef4444" }} />
                     </div>
                   </div>
                 </td>
@@ -419,7 +419,7 @@ export default function TechUtilizationPage() {
   ];
 
   const statCards = [
-    { label: "Total Hours",    value: (summary?.total_hours ?? 0).toLocaleString() + "h", icon: Clock,   color: "bg-blue-50 text-blue-600" },
+    { label: "Total Hours",    value: (summary?.total_hours ?? 0).toLocaleString() + "h", icon: Clock,   color: "bg-brand-50 text-brand-600" },
     { label: "Applications",   value: summary?.total_apps   ?? 0,                          icon: Monitor, color: "bg-purple-50 text-purple-600" },
     { label: "Users Tracked",  value: summary?.total_users  ?? 0,                          icon: Users,   color: "bg-green-50 text-green-600" },
     { label: summary?.top_category ?? "Top Category",
@@ -447,7 +447,7 @@ export default function TechUtilizationPage() {
         {/* Team / Group */}
         <div className="relative">
           <select value={groupId} onChange={e => { setGroupId(e.target.value); setEmployeeId(""); }}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
             <option value="">All Teams</option>
             {(groups ?? []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select>
@@ -457,7 +457,7 @@ export default function TechUtilizationPage() {
         {/* User */}
         <div className="relative">
           <select value={employeeId} onChange={e => { setEmployeeId(e.target.value); setGroupId(""); }}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
             <option value="">All Users</option>
             {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
             {((users as any[]) ?? []).filter((u: any) => u.is_active).map((u: any) => (
@@ -470,7 +470,7 @@ export default function TechUtilizationPage() {
         {/* Category filter */}
         <div className="relative">
           <select value={categoryId} onChange={e => setCategoryId(e.target.value)}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
             <option value="">All Categories</option>
             {(categories ?? []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
@@ -508,7 +508,7 @@ export default function TechUtilizationPage() {
             <button key={t.key} onClick={() => setTab(t.key)}
                     className={`px-5 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
                       tab === t.key
-                        ? "border-blue-600 text-blue-600"
+                        ? "border-brand-600 text-brand-600"
                         : "border-transparent text-gray-500 hover:text-gray-800"
                     }`}>
               {t.label}

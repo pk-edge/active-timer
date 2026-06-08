@@ -240,8 +240,17 @@ const gq = (group_id?: string, extra?: Record<string, string | number>) => {
   return s ? `?${s}` : "";
 };
 
-export const getOverview = (group_id?: string, days = 7) =>
-  request<OverviewStats>(`/v1/home/overview${gq(group_id, { days })}`);
+export const getOverview = (
+  group_id?: string,
+  days = 7,
+  since_date?: string,
+  until_date?: string,
+) => {
+  const extra: Record<string, string | number> = { days };
+  if (since_date) extra.since_date = since_date;
+  if (until_date) extra.until_date = until_date;
+  return request<OverviewStats>(`/v1/home/overview${gq(group_id, extra)}`);
+};
 export const getRealtime = (group_id?: string) =>
   request<RealtimeDevice[]>(`/v1/home/realtime${gq(group_id)}`);
 export const getHomeAppUsage = (group_id?: string, days = 1) =>

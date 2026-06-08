@@ -37,7 +37,7 @@ function DetailPanel({
           </div>
           <p className="font-semibold text-gray-900 text-sm truncate">{item.host}</p>
           <a href={`https://${item.host}`} target="_blank" rel="noreferrer"
-             className="text-gray-400 hover:text-blue-500 ml-auto shrink-0">
+             className="text-gray-400 hover:text-brand-500 ml-auto shrink-0">
             <ExternalLink size={13} />
           </a>
         </div>
@@ -153,7 +153,7 @@ export default function WebsiteUsagePage() {
   if (!can("tech", "view")) return <AccessDenied label="Website Usage" />;
 
   const stats = [
-    { label: "Total Duration",    value: fmtDur(data?.total_secs ?? 0),         color: "text-blue-600" },
+    { label: "Total Duration",    value: fmtDur(data?.total_secs ?? 0),         color: "text-brand-600" },
     { label: "Total Visits",      value: (data?.total_visits ?? 0).toLocaleString() },
     { label: "Unique Websites",   value: String(data?.items.length ?? 0) },
     { label: "Productive Sites",  value: String(data?.items.filter(i => i.productivity === "productive").length ?? 0), color: "text-green-600" },
@@ -222,8 +222,8 @@ export default function WebsiteUsagePage() {
               <button
                 key={item.host}
                 onClick={() => setSelected(prev => prev?.host === item.host ? null : item)}
-                className={`w-full grid grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_110px_60px_32px] gap-2 px-3 sm:px-4 py-3 border-b border-gray-100 hover:bg-blue-50/40 transition text-left ${
-                  selected?.host === item.host ? "bg-blue-50" : ""
+                className={`w-full grid grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_110px_60px_32px] gap-2 px-3 sm:px-4 py-3 border-b border-gray-100 hover:bg-brand-50/40 transition text-left ${
+                  selected?.host === item.host ? "bg-brand-50" : ""
                 }`}
               >
                 <ProdIcon v={item.productivity} />
@@ -247,7 +247,7 @@ export default function WebsiteUsagePage() {
             {/* Mobile back bar */}
             <button
               onClick={() => setSelected(null)}
-              className="lg:hidden flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-blue-600 border-b border-gray-100 shrink-0"
+              className="lg:hidden flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-brand-600 border-b border-gray-100 shrink-0"
             >
               <ChevronLeft size={16} /> Back to list
             </button>

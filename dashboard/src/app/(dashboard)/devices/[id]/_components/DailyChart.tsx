@@ -34,7 +34,7 @@ export default function DailyChart({ stats, selDate }: Props) {
           />
           <Bar dataKey="active_seconds" radius={[3, 3, 0, 0]}>
             {[...stats].reverse().map((s, i) => (
-              <Cell key={i} fill={s.date === selDate ? "#2563eb" : "#bfdbfe"} />
+              <Cell key={i} fill={s.date === selDate ? "#4a0f70" : "#bfdbfe"} />
             ))}
           </Bar>
         </BarChart>

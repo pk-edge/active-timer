@@ -53,14 +53,48 @@ def _enroll_background(shared: dict) -> None:
     db = shared["db"]
     db.set_device_id(device_id)
 
-    # Load today's already-accumulated active seconds BEFORE starting the new session
-    # so the widget can resume the correct count.
-    shared["today_active_secs"] = db.get_today_active_secs()
+    # ── Determine today's active seconds ─────────────────────────────────────
+    # Rule: always use the LARGEST of (server, local).
+    # • Server is authoritative for events already synced to this backend.
+    # • Local accumulator covers the current session + events not yet uploaded.
+    # • On re-enrollment (new device_id) the local accumulator may belong to
+    #   the previous device_id, so scan ALL today entries regardless of id.
+    local_secs = db.get_today_active_secs_any_device()
+    server_secs = _fetch_today_active(ident.get("jwt_token", ""))
+
+    if server_secs is not None and server_secs > 0:
+        best = max(server_secs, local_secs)
+        log.info("Today active — server=%ds local=%ds → using %ds", server_secs, local_secs, best)
+    else:
+        best = local_secs
+        reason = "server returned 0" if server_secs == 0 else "server unreachable"
+        log.info("Today active — %s, using local: %ds", reason, best)
+
+    # Store authoritative value so restarts resume from the right number
+    db.flush_daily_secs_absolute(best)
+    shared["today_active_secs"] = best
 
     session_id = db.start_session()
     shared["current_session_id"] = session_id
     shared["sync_status"] = "syncing"
     log.info("Session started: %s (today so far: %ds)", session_id, shared["today_active_secs"])
+
+
+def _fetch_today_active(jwt_token: str) -> int | None:
+    """Fetch today's authoritative active-seconds from the backend (device JWT)."""
+    try:
+        import httpx
+        from config import Config
+        r = httpx.get(
+            Config.DEVICE_TODAY_ENDPOINT,
+            headers={"Authorization": f"Bearer {jwt_token}"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            return int(r.json().get("active_seconds_today", 0))
+    except Exception as e:
+        log.debug("Could not fetch today-active from server: %s", e)
+    return None
 
 
 def main() -> None:

@@ -325,6 +325,23 @@ class LocalDB:
                 f"UPDATE attendance_sessions SET synced=1 WHERE id IN ({placeholders})", ids
             )
 
+    def get_today_active_secs_any_device(self) -> int:
+        """Return today's best accumulated active seconds across ALL device IDs.
+
+        After a re-enrollment the agent gets a new device_id, so
+        daily_totals rows from the old id would be invisible to
+        get_today_active_secs().  This method returns the maximum across
+        all today rows so accumulated time is never lost on re-enrollment.
+        """
+        from datetime import date
+        today = str(date.today())
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(active_secs), 0) FROM daily_totals WHERE date = ?",
+                (today,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def get_today_active_secs(self) -> int:
         """Return today's accumulated active seconds.
         Prefers the daily_totals accumulator (updated every minute) over the
@@ -366,6 +383,24 @@ class LocalDB:
                     idle_secs   = idle_secs   + excluded.idle_secs,
                     updated_at  = excluded.updated_at
             """, (today, self._device_id, active_delta, idle_delta, int(time.time())))
+
+    def flush_daily_secs_absolute(self, active_secs: int) -> None:
+        """Overwrite (not add) today's accumulated value with an authoritative figure.
+        Called on startup after syncing with the backend so the local accumulator
+        matches the portal exactly.
+        """
+        if not self._device_id:
+            return
+        from datetime import date
+        today = str(date.today())
+        with self._lock, self._conn() as conn:
+            conn.execute("""
+                INSERT INTO daily_totals (date, device_id, active_secs, idle_secs, updated_at)
+                VALUES (?, ?, ?, 0, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    active_secs = excluded.active_secs,
+                    updated_at  = excluded.updated_at
+            """, (today, self._device_id, active_secs, int(time.time())))
 
     def get_today_accumulated_secs(self) -> int:
         """Return persisted active seconds for today — used on restart to resume timer."""

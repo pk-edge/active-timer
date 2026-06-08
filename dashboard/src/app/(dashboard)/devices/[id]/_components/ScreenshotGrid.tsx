@@ -22,7 +22,7 @@ export default function ScreenshotGrid({ screenshots }: Props) {
           href={s.s3_url}
           target="_blank"
           rel="noreferrer"
-          className="block rounded-xl overflow-hidden border border-gray-200 hover:border-blue-300 hover:shadow-md transition group"
+          className="block rounded-xl overflow-hidden border border-gray-200 hover:border-brand-300 hover:shadow-md transition group"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img

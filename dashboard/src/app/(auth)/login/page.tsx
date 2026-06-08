@@ -37,7 +37,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center">
+          <div className="w-10 h-10 bg-brand-600 rounded-xl flex items-center justify-center">
             <Timer size={20} className="text-white" />
           </div>
           <span className="text-xl font-semibold text-gray-900">TimeTracker</span>
@@ -52,7 +52,7 @@ export default function LoginPage() {
               <input
                 type="email" required value={email}
                 onChange={e => setEmail(e.target.value)}
-                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 transition"
+                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
                 placeholder="you@company.com"
               />
             </div>
@@ -62,7 +62,7 @@ export default function LoginPage() {
               <input
                 type="password" required value={password}
                 onChange={e => setPassword(e.target.value)}
-                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 transition"
+                className="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
                 placeholder="••••••••"
               />
             </div>
@@ -80,7 +80,7 @@ export default function LoginPage() {
 
             <button
               type="submit" disabled={loading}
-              className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg text-sm transition"
+              className="w-full bg-brand-600 hover:bg-brand-700 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg text-sm transition"
             >
               {loading ? "Signing in…" : "Sign in"}
             </button>
@@ -88,7 +88,7 @@ export default function LoginPage() {
 
           <p className="text-center text-sm text-gray-500 mt-5">
             Don&apos;t have an account?{" "}
-            <Link href="/register" className="text-blue-600 hover:text-blue-700 font-medium">Request access</Link>
+            <Link href="/register" className="text-brand-600 hover:text-brand-700 font-medium">Request access</Link>
           </p>
         </div>
       </div>

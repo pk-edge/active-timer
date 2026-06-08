@@ -140,7 +140,7 @@ export default function AppUsagePage() {
   if (!can("tech", "view")) return <AccessDenied label="Application Usage" />;
 
   const stats = [
-    { label: "Total Duration",        value: fmtDur(data?.total_secs ?? 0),        color: "text-blue-600" },
+    { label: "Total Duration",        value: fmtDur(data?.total_secs ?? 0),        color: "text-brand-600" },
     { label: "Total Applications",    value: String(data?.total_apps ?? 0) },
     { label: "Productive Apps",       value: String(data?.items.filter(i => i.productivity === "productive").length ?? 0), color: "text-green-600" },
     { label: "Unproductive Apps",     value: String(data?.items.filter(i => i.productivity === "unproductive").length ?? 0), color: "text-red-500" },
@@ -207,8 +207,8 @@ export default function AppUsagePage() {
               <button
                 key={item.app_name}
                 onClick={() => setSelected(prev => prev?.app_name === item.app_name ? null : item)}
-                className={`w-full grid grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_120px_60px_32px] gap-2 px-3 sm:px-4 py-3 border-b border-gray-100 hover:bg-blue-50/40 transition text-left ${
-                  selected?.app_name === item.app_name ? "bg-blue-50" : ""
+                className={`w-full grid grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_120px_60px_32px] gap-2 px-3 sm:px-4 py-3 border-b border-gray-100 hover:bg-brand-50/40 transition text-left ${
+                  selected?.app_name === item.app_name ? "bg-brand-50" : ""
                 }`}
               >
                 <ProdIcon v={item.productivity} />
@@ -231,7 +231,7 @@ export default function AppUsagePage() {
           <div className="flex flex-col min-h-0 w-full lg:flex-1 lg:min-w-0">
             <button
               onClick={() => setSelected(null)}
-              className="lg:hidden flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-blue-600 border-b border-gray-100 shrink-0"
+              className="lg:hidden flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-brand-600 border-b border-gray-100 shrink-0"
             >
               <ChevronLeft size={16} /> Back to list
             </button>
