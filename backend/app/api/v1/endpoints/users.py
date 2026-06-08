@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, require
 from app.core import audit
 from app.core.security import hash_password
-from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group
+from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
 from app.schemas.rbac import UserIn, UserPatch, UserOut, ApproveRequest
 
 router = APIRouter()
@@ -88,8 +88,64 @@ async def list_users(
     if search:
         like = f"%{search.lower()}%"
         q = q.where(func.lower(Employee.name).like(like) | func.lower(Employee.email).like(like))
+
+    # Groups-scoped users only see employees who belong to their assigned groups.
+    if getattr(user, "_scope_type", "own") == "groups":
+        gid_rows = await db.execute(
+            select(EmployeeGroupAccess.group_id)
+            .where(EmployeeGroupAccess.employee_id == user.id)
+        )
+        my_gids = [g[0] for g in gid_rows.all()]
+        if not my_gids:
+            return []
+        # Employees who are direct group members
+        q = q.where(
+            Employee.id.in_(
+                select(GroupMember.employee_id)
+                .where(
+                    GroupMember.group_id.in_(my_gids),
+                    GroupMember.member_type == "employee",
+                    GroupMember.employee_id.isnot(None),
+                )
+            )
+        )
+
     rows = await db.execute(q)
-    return [await _user_out(e, db) for e in rows.scalars().all()]
+    employees = rows.scalars().all()
+    if not employees:
+        return []
+
+    emp_ids = [e.id for e in employees]
+
+    # Batch device counts + group access in 2 queries total (was 2 per user → N+1).
+    dc_rows = await db.execute(
+        select(Device.employee_id, func.count())
+        .where(Device.employee_id.in_(emp_ids))
+        .group_by(Device.employee_id)
+    )
+    device_counts = {eid: int(c) for eid, c in dc_rows.all()}
+
+    ga_rows = await db.execute(
+        select(EmployeeGroupAccess.employee_id, EmployeeGroupAccess.group_id)
+        .where(EmployeeGroupAccess.employee_id.in_(emp_ids))
+    )
+    groups_by_emp: dict = {}
+    for eid, gid in ga_rows.all():
+        groups_by_emp.setdefault(eid, []).append(str(gid))
+
+    return [
+        UserOut(
+            id=str(e.id), name=e.name, email=e.email,
+            role_id=str(e.role_id) if e.role_id else None,
+            role_name=e.role_obj.name if e.role_obj else (e.role or None),
+            scope_type=e.role_obj.scope_type if e.role_obj else None,
+            is_active=e.is_active,
+            is_approved=getattr(e, "is_approved", True),
+            group_ids=groups_by_emp.get(e.id, []),
+            device_count=device_counts.get(e.id, 0),
+        )
+        for e in employees
+    ]
 
 
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)

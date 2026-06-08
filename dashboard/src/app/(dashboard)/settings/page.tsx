@@ -99,9 +99,9 @@ export default function SettingsPage() {
 
   return (
     <div>
-      <div className="flex items-start justify-between mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900 mb-1">Settings</h1>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 mb-1">Settings</h1>
           <p className="text-gray-500 text-sm">Configure tracking, screenshots, and notifications</p>
         </div>
         <button

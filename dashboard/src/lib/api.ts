@@ -3,6 +3,10 @@ import type {
   Me, Role, ModuleDef, User, Group, GroupDetail, GroupMember, Installer,
   OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
   AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
+  UncategorizedData,
+  WebsiteListOut, WebsiteDetailOut,
+  AppUsageListOut, AppUsageDetailOut,
+  CategoryUsageListOut, CategoryUsageDetailOut,
 } from "@/types";
 
 export const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -21,6 +25,9 @@ function authHeaders(): HeadersInit {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
+    // Always hit the network — analytics data must never be served stale from
+    // the browser/HTTP cache when the user (or SWR) explicitly refetches.
+    cache: "no-store",
     ...init,
     headers: { ...authHeaders(), ...init?.headers },
   });
@@ -275,27 +282,131 @@ export const addCategoryRule = (catId: string, app_pattern: string) =>
 export const deleteCategoryRule = (ruleId: string) =>
   request<void>(`/v1/tech/categories/rules/${ruleId}`, { method: "DELETE" });
 
-export const getTechSummary = (days = 30) =>
-  request<TechSummary>(`/v1/tech/utilization/summary?days=${days}`);
+// ── date helpers used by tech pages ──────────────────────────────────────────
 
-export const getCategoryAllocation = (days = 30, compare_days = 30) =>
-  request<CategoryAllocationItem[]>(
-    `/v1/tech/utilization/category-allocation?days=${days}&compare_days=${compare_days}`
-  );
+export function techDateParams(since: string, until: string): URLSearchParams {
+  return new URLSearchParams({ since_date: since, until_date: until });
+}
 
-export const getAppTrends = (days = 30, compare_days = 30, limit = 10) =>
-  request<AppTrends>(
-    `/v1/tech/utilization/app-trends?days=${days}&compare_days=${compare_days}&limit=${limit}`
-  );
+// ── Tech Utilization ──────────────────────────────────────────────────────────
 
-export const getAppList = (days = 30, category_id?: string, limit = 50) => {
-  const params = new URLSearchParams({ days: String(days), limit: String(limit) });
-  if (category_id) params.set("category_id", category_id);
-  return request<AppDetailItem[]>(`/v1/tech/utilization/apps?${params}`);
+export const getTechSummary = (since: string, until: string, group_id?: string, employee_id?: string) => {
+  const p = techDateParams(since, until);
+  if (group_id)    p.set("group_id",    group_id);
+  if (employee_id) p.set("employee_id", employee_id);
+  return request<TechSummary>(`/v1/tech/utilization/summary?${p}`);
 };
 
-export const getAdoptionData = (days = 30, top_n = 5) =>
-  request<AdoptionData>(`/v1/tech/utilization/adoption?days=${days}&top_n=${top_n}`);
+export const getCategoryAllocation = (since: string, until: string, group_id?: string, employee_id?: string) => {
+  const p = techDateParams(since, until);
+  if (group_id)    p.set("group_id",    group_id);
+  if (employee_id) p.set("employee_id", employee_id);
+  return request<CategoryAllocationItem[]>(`/v1/tech/utilization/category-allocation?${p}`);
+};
+
+export const getAppTrends = (since: string, until: string, limit = 10) => {
+  const p = techDateParams(since, until);
+  p.set("limit", String(limit));
+  return request<AppTrends>(`/v1/tech/utilization/app-trends?${p}`);
+};
+
+export const getAppList = (since: string, until: string, category_id?: string, limit = 50, group_id?: string, employee_id?: string) => {
+  const p = techDateParams(since, until);
+  p.set("limit", String(limit));
+  if (category_id) p.set("category_id", category_id);
+  if (group_id)    p.set("group_id",    group_id);
+  if (employee_id) p.set("employee_id", employee_id);
+  return request<AppDetailItem[]>(`/v1/tech/utilization/apps?${p}`);
+};
+
+export const getAdoptionData = (since: string, until: string, top_n = 5) => {
+  const p = techDateParams(since, until);
+  p.set("top_n", String(top_n));
+  return request<AdoptionData>(`/v1/tech/utilization/adoption?${p}`);
+};
+
+export const getUncategorized = (since: string, until: string) => {
+  const p = techDateParams(since, until);
+  return request<UncategorizedData>(`/v1/tech/uncategorized?${p}`);
+};
+
+// ── Website Usage ─────────────────────────────────────────────────────────────
+
+export const getWebsites = (since: string, until: string, productivity?: string, group_id?: string, employee_id?: string) => {
+  const p = techDateParams(since, until);
+  if (productivity) p.set("productivity", productivity);
+  if (group_id)     p.set("group_id",     group_id);
+  if (employee_id)  p.set("employee_id",  employee_id);
+  return request<WebsiteListOut>(`/v1/tech/websites?${p}`);
+};
+
+export const getWebsiteDetail = (host: string, tab: string, since: string, until: string, group_id?: string, employee_id?: string) => {
+  const p = techDateParams(since, until);
+  p.set("host", host); p.set("tab", tab);
+  if (group_id)    p.set("group_id",    group_id);
+  if (employee_id) p.set("employee_id", employee_id);
+  return request<WebsiteDetailOut>(`/v1/tech/websites/detail?${p}`);
+};
+
+// ── Application Usage ─────────────────────────────────────────────────────────
+
+export const getAppUsage = (since: string, until: string, productivity?: string, group_id?: string, employee_id?: string) => {
+  const p = techDateParams(since, until);
+  if (productivity) p.set("productivity", productivity);
+  if (group_id)     p.set("group_id",     group_id);
+  if (employee_id)  p.set("employee_id",  employee_id);
+  return request<AppUsageListOut>(`/v1/tech/apps?${p}`);
+};
+
+export const getAppUsageDetail = (app_name: string, tab: string, since: string, until: string, group_id?: string, employee_id?: string) => {
+  const p = techDateParams(since, until);
+  p.set("app_name", app_name); p.set("tab", tab);
+  if (group_id)    p.set("group_id",    group_id);
+  if (employee_id) p.set("employee_id", employee_id);
+  return request<AppUsageDetailOut>(`/v1/tech/apps/detail?${p}`);
+};
+
+// ── Category Usage ────────────────────────────────────────────────────────────
+
+export const getCategoryUsage = (since: string, until: string, group_id?: string) => {
+  const p = techDateParams(since, until);
+  if (group_id) p.set("group_id", group_id);
+  return request<CategoryUsageListOut>(`/v1/tech/category-usage?${p}`);
+};
+
+export const getCategoryUsageDetail = (cat_id: string | null, tab: string, since: string, until: string, group_id?: string) => {
+  const p = techDateParams(since, until);
+  p.set("tab", tab);
+  if (cat_id)   p.set("cat_id", cat_id);
+  if (group_id) p.set("group_id", group_id);
+  return request<CategoryUsageDetailOut>(`/v1/tech/category-usage/detail?${p}`);
+};
+
+// ── URL Policies ─────────────────────────────────────────────────────────────
+
+import type { BlockedUrl } from "@/types";
+
+export const getDetectedUrls = () =>
+  request<{ host: string; visits: number }[]>("/v1/policy/detected-urls");
+
+export const getBlockedUrls = (is_active?: boolean) => {
+  const p = new URLSearchParams();
+  if (is_active !== undefined) p.set("is_active", String(is_active));
+  return request<BlockedUrl[]>(`/v1/policy/blocked-urls/admin${p.toString() ? `?${p}` : ""}`);
+};
+
+export const createBlockedUrl = (body: {
+  pattern: string; target_type: string;
+  device_id?: string; employee_id?: string; notes?: string;
+}) => request<BlockedUrl>("/v1/policy/blocked-urls", { method: "POST", body: JSON.stringify(body) });
+
+export const updateBlockedUrl = (id: string, body: Partial<{
+  pattern: string; target_type: string; device_id: string | null;
+  employee_id: string | null; notes: string | null; is_active: boolean;
+}>) => request<BlockedUrl>(`/v1/policy/blocked-urls/${id}`, { method: "PATCH", body: JSON.stringify(body) });
+
+export const deleteBlockedUrl = (id: string) =>
+  request<void>(`/v1/policy/blocked-urls/${id}`, { method: "DELETE" });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

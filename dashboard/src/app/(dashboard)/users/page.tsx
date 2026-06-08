@@ -245,9 +245,9 @@ function UsersPageInner() {
 
   return (
     <div className="overflow-y-auto pr-1">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Users</h1>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Users</h1>
           <p className="text-gray-500 text-sm mt-0.5">{users?.length ?? 0} active</p>
         </div>
         {tab === "active" && can("users", "create") && (
@@ -287,7 +287,8 @@ function UsersPageInner() {
       {/* Active users table */}
       {tab === "active" && (
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[720px]">
             <thead>
               <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
                 <th className="text-left px-4 py-3 font-semibold">Name</th>
@@ -341,6 +342,7 @@ function UsersPageInner() {
               {filteredActive.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-gray-400 text-sm">No users found.</td></tr>}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -353,7 +355,8 @@ function UsersPageInner() {
               <p className="text-sm text-gray-400">No pending registrations.</p>
             </div>
           ) : (
-            <table className="w-full text-sm">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[720px]">
               <thead>
                 <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
                   <th className="text-left px-4 py-3 font-semibold">Name</th>
@@ -385,6 +388,7 @@ function UsersPageInner() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       )}

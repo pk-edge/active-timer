@@ -30,13 +30,14 @@ export default function AuditPage() {
     <div className="overflow-y-auto pr-1">
       <div className="flex items-center gap-2 mb-5">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Audit Log</h1>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Audit Log</h1>
           <p className="text-gray-500 text-sm mt-0.5">Administrative actions across the organization</p>
         </div>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full text-sm min-w-[680px]">
           <thead>
             <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
               <th className="text-left px-4 py-3 font-semibold">When</th>
@@ -70,6 +71,7 @@ export default function AuditPage() {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

@@ -1,11 +1,12 @@
 "use client";
 import { useState } from "react";
 import useSWR from "swr";
-import { RefreshCw, Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon } from "lucide-react";
+import { Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon } from "lucide-react";
 import { getOverview, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, StatusDonut, ActivityTrend } from "@/components/charts";
 import type { OverviewStats } from "@/types";
+import RefreshButton from "@/components/RefreshButton";
 
 const PERIODS = [{ label: "7 days", value: 7 }, { label: "14 days", value: 14 }, { label: "30 days", value: 30 }];
 
@@ -39,11 +40,8 @@ export default function OverviewPage() {
   return (
     <div className="overflow-y-auto pr-1">
       <div className="flex items-center justify-between mb-1">
-        <h1 className="text-2xl font-semibold text-gray-900">Organization Overview</h1>
-        <button onClick={() => mutate()}
-                className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm">
-          <RefreshCw size={13} /> Refresh
-        </button>
+        <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Organization Overview</h1>
+        <RefreshButton onRefresh={() => mutate()} />
       </div>
       <p className="text-gray-500 text-sm mb-6">
         Live activity across all devices · <span className="text-gray-700 font-medium">{avgHrs} avg active hours today</span>
@@ -88,7 +86,7 @@ export default function OverviewPage() {
 
         {/* Active hours trend */}
         <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
               <Clock size={15} className="text-gray-400" />
               <p className="text-sm font-semibold text-gray-800">Active Hours Trend</p>

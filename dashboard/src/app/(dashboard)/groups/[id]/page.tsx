@@ -1,5 +1,5 @@
 "use client";
-import { useState, useMemo } from "react";
+import { use, useState, useMemo } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import { ArrowLeft, UserPlus, X, Trash2, User as UserIcon, Monitor, Search } from "lucide-react";
@@ -84,16 +84,17 @@ function AddMemberModal({ groupId, existing, onClose, onSaved }: {
   );
 }
 
-export default function GroupDetailPage({ params }: { params: { id: string } }) {
+export default function GroupDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params);
   const { loading, can } = useUser();
-  const { data: group, mutate } = useSWR<GroupDetail>(["group", params.id], () => getGroup(params.id));
+  const { data: group, mutate } = useSWR<GroupDetail>(["group", id], () => getGroup(id));
   const [adding, setAdding] = useState(false);
 
   if (loading) return null;
   if (!can("groups", "view")) return <AccessDenied label="Groups" />;
 
   async function removeMember(memberId: string) {
-    try { await removeGroupMember(params.id, memberId); mutate(); }
+    try { await removeGroupMember(id, memberId); mutate(); }
     catch (e) { alert(String(e instanceof Error ? e.message : e)); }
   }
 
@@ -103,9 +104,9 @@ export default function GroupDetailPage({ params }: { params: { id: string } }) 
         <ArrowLeft size={13} /> All groups
       </Link>
 
-      <div className="flex items-start justify-between mb-5">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">{group?.name ?? "…"}</h1>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">{group?.name ?? "…"}</h1>
           <p className="text-gray-500 text-sm mt-0.5">{group?.member_count ?? 0} members{group?.description ? ` · ${group.description}` : ""}</p>
         </div>
         {can("groups", "edit") && group && (
@@ -116,7 +117,8 @@ export default function GroupDetailPage({ params }: { params: { id: string } }) 
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[600px]">
           <thead>
             <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
               <th className="text-left px-4 py-3 font-semibold">Member</th>
@@ -142,9 +144,10 @@ export default function GroupDetailPage({ params }: { params: { id: string } }) 
             {group?.members.length === 0 && <tr><td colSpan={3} className="px-4 py-10 text-center text-gray-400 text-sm">No members yet. Add users or devices.</td></tr>}
           </tbody>
         </table>
+        </div>
       </div>
 
-      {adding && group && <AddMemberModal groupId={params.id} existing={group} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); mutate(); }} />}
+      {adding && group && <AddMemberModal groupId={id} existing={group} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); mutate(); }} />}
     </div>
   );
 }

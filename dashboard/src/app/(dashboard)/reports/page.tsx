@@ -61,7 +61,7 @@ export default function ReportsPage() {
       {/* Header + filters */}
       <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900 mb-1">Reports</h1>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 mb-1">Reports</h1>
           <p className="text-gray-500 text-sm">
             {selectedDevice
               ? `${selectedDevice.hostname}${selectedDevice.employee_name ? ` · ${selectedDevice.employee_name}` : ""}`
@@ -112,13 +112,13 @@ export default function ReportsPage() {
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
           <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
             <p className="text-xs text-gray-500 mb-1">Total active time</p>
-            <p className="text-2xl font-semibold text-gray-900">{fmtSeconds(totalActive)}</p>
+            <p className="text-xl sm:text-2xl font-semibold text-gray-900">{fmtSeconds(totalActive)}</p>
             <p className="text-xs text-gray-400 mt-0.5">over {days} days</p>
           </div>
           {summary && summary.length > 0 && (
             <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
               <p className="text-xs text-gray-500 mb-1">Avg per day</p>
-              <p className="text-2xl font-semibold text-gray-900">
+              <p className="text-xl sm:text-2xl font-semibold text-gray-900">
                 {fmtSeconds(Math.round(totalActive / summary.length))}
               </p>
               <p className="text-xs text-gray-400 mt-0.5">{summary.length} active days</p>

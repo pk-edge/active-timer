@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.api.deps import get_db, get_current_device
 from app.core import broadcaster
-from app.db.models import Device
+from app.db.models import Device, ActivityEvent
 from app.schemas.event import IngestRequest, IngestResponse
 
 log = logging.getLogger(__name__)
@@ -46,18 +47,15 @@ async def ingest_events(
     if not rows:
         return IngestResponse(received=0, skipped=len(payload.events))
 
-    inserted = 0
-    for row in rows:
-        result = await db.execute(
-            text("""
-                INSERT INTO activity_events
-                    (id, device_id, event_type, app_name, window_title, url, duration, timestamp)
-                VALUES (:id, :device_id, :event_type, :app_name, :window_title, :url, :duration, :timestamp)
-                ON CONFLICT (id) DO NOTHING
-            """),
-            row,
-        )
-        inserted += result.rowcount or 0
+    # Single multi-row INSERT … ON CONFLICT DO NOTHING — one DB round-trip for
+    # the whole batch instead of one INSERT per event (was N round-trips/sync).
+    stmt = (
+        pg_insert(ActivityEvent)
+        .values(rows)
+        .on_conflict_do_nothing(index_elements=["id"])
+    )
+    result = await db.execute(stmt)
+    inserted = result.rowcount if (result.rowcount or 0) >= 0 else len(rows)
 
     await db.execute(
         text("UPDATE devices SET last_seen = NOW() WHERE id = :id"),

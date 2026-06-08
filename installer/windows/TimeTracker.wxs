@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TimeTracker Windows Installer — WiX v3
+  Built by: build_windows.ps1
+  Version is passed via -dVersion="X.Y.Z" at candle compile time.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+
+  <Product
+    Id="*"
+    Name="TimeTracker"
+    Language="1033"
+    Version="$(var.Version)"
+    Manufacturer="EDGE"
+    UpgradeCode="B4F8A1C2-3D7E-4F0A-8B2C-9E1D5F6A7B3C">
+
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perUser"
+      Description="TimeTracker Agent v$(var.Version)"
+      Comments="Activity tracking agent for the TimeTracker platform" />
+
+    <!-- Always upgrade: remove older version before installing new one -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of TimeTracker is already installed."
+      Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- UI: minimal wizard -->
+    <UIRef Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" Overridable="yes" />
+
+    <!-- ── Directory structure ─────────────────────────────────────────── -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="INSTALLDIR" Name="TimeTracker">
+        </Directory>
+      </Directory>
+      <!-- Start-menu shortcut folder -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="TimeTracker" />
+      </Directory>
+    </Directory>
+
+    <!-- ── Components ─────────────────────────────────────────────────── -->
+    <DirectoryRef Id="INSTALLDIR">
+      <!-- Main executable -->
+      <Component Id="TimeTrackerExe" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+        <File Id="TimeTrackerEXE"
+              Source="$(var.DistDir)\timetracker.exe"
+              KeyPath="yes" />
+        <!-- Registry: run at login -->
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="TimeTracker"
+          Type="string"
+          Value="&quot;[INSTALLDIR]timetracker.exe&quot;"
+          KeyPath="no" />
+        <!-- Remove the Run key on uninstall -->
+        <RemoveRegistryValue
+          Root="HKCU"
+          Key="Software\Microsoft\Windows\CurrentVersion\Run"
+          Name="TimeTracker" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Start-menu shortcut -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="B2C3D4E5-F6A7-8901-BCDE-F12345678901">
+        <Shortcut Id="ApplicationStartMenuShortcut"
+                  Name="TimeTracker"
+                  Description="TimeTracker Activity Monitor"
+                  Target="[INSTALLDIR]timetracker.exe"
+                  WorkingDirectory="INSTALLDIR" />
+        <RemoveFolder Id="CleanUpShortcut" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKCU"
+          Key="Software\TimeTracker"
+          Name="installed"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- ── Feature: full install ──────────────────────────────────────── -->
+    <Feature Id="ProductFeature" Title="TimeTracker" Level="1">
+      <ComponentRef Id="TimeTrackerExe" />
+      <ComponentRef Id="ApplicationShortcut" />
+      <!-- Heat-generated file components are referenced in AgentFiles.wxs -->
+      <ComponentGroupRef Id="AgentFiles" />
+    </Feature>
+
+    <!-- ── Launch on finish ───────────────────────────────────────────── -->
+    <CustomAction
+      Id="LaunchAgent"
+      FileKey="TimeTrackerEXE"
+      ExeCommand=""
+      Execute="immediate"
+      Impersonate="yes"
+      Return="asyncNoWait" />
+
+    <InstallExecuteSequence>
+      <Custom Action="LaunchAgent" After="InstallFinalize">
+        NOT Installed AND NOT REMOVE
+      </Custom>
+    </InstallExecuteSequence>
+
+  </Product>
+</Wix>

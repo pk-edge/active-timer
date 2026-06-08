@@ -1,5 +1,5 @@
 "use client";
-import { useState, useMemo } from "react";
+import { use, useState, useMemo } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import { format } from "date-fns";
@@ -11,7 +11,8 @@ import ActivityTimeline from "./_components/ActivityTimeline";
 import InsightsPanel    from "./_components/InsightsPanel";
 import type { TimelineEvent, DailyStat, Device } from "@/types";
 
-export default function DevicePage({ params }: { params: { id: string } }) {
+export default function DevicePage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params);
   useAuth();
   const today = format(new Date(), "yyyy-MM-dd");
   const [selDate, setSelDate] = useState(today);
@@ -22,19 +23,19 @@ export default function DevicePage({ params }: { params: { id: string } }) {
   const timelineUntil = timelineSince ? timelineSince + 86400 : undefined;
 
   const { data: events } = useSWR<TimelineEvent[]>(
-    ["timeline", params.id, selDate],
-    () => getTimeline(params.id, timelineSince, timelineUntil),
+    ["timeline", id, selDate],
+    () => getTimeline(id, timelineSince, timelineUntil),
     { refreshInterval: 30_000 },
   );
 
   const { data: stats } = useSWR<DailyStat[]>(
-    ["stats", params.id],
-    () => getDailyStats(params.id, 7),
+    ["stats", id],
+    () => getDailyStats(id, 7),
   );
 
   // Fetch device info for hostname / employee name
   const { data: devices } = useSWR<Device[]>("devices", getDevices);
-  const device = devices?.find(d => d.id === params.id);
+  const device = devices?.find(d => d.id === id);
 
   // Compute active time directly from events (avoids UTC/local date mismatch in stats)
   const activeSecsToday = useMemo(() => {
@@ -63,11 +64,11 @@ export default function DevicePage({ params }: { params: { id: string } }) {
       </Link>
 
       {/* ── Page header ── */}
-      <div className="flex items-start justify-between mb-4">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
         <div>
           <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <Laptop size={20} className="text-blue-500 shrink-0" />
-            {device ? device.hostname : `Device — ${params.id.slice(0, 8)}`}
+            {device ? device.hostname : `Device — ${id.slice(0, 8)}`}
           </h1>
           <div className="flex items-center gap-3 mt-1 flex-wrap">
             {device?.employee_name && (
@@ -110,24 +111,22 @@ export default function DevicePage({ params }: { params: { id: string } }) {
         </div>
       </div>
 
-      {/* ── Two-column layout ── */}
-      <div className="flex gap-5 flex-1 min-h-0">
+      {/* ── Two-column layout — stacks on mobile, side-by-side on desktop ── */}
+      <div className="flex flex-col lg:flex-row gap-4 lg:gap-5 flex-1 min-h-0 overflow-y-auto lg:overflow-hidden">
 
-        {/* LEFT — scrollable activity feed */}
-        <div className="flex-1 min-w-0 overflow-y-auto">
-          <ActivityTimeline events={events} />
+        {/* Insights + chart — first on mobile, right column on desktop */}
+        <div className="w-full lg:w-72 lg:order-2 shrink-0 flex flex-col gap-3 lg:overflow-y-auto">
+          {stats && <DailyChart stats={stats} selDate={selDate} />}
+          <InsightsPanel
+            events={events}
+            activeSecsToday={activeSecsToday}
+            idleSecsToday={idleSecsToday}
+          />
         </div>
 
-        {/* RIGHT — chart + insights, fits in one view */}
-        <div className="w-72 shrink-0 flex flex-col gap-3 overflow-hidden">
-          {stats && <DailyChart stats={stats} selDate={selDate} />}
-          <div className="flex-1 overflow-hidden">
-            <InsightsPanel
-              events={events}
-              activeSecsToday={activeSecsToday}
-              idleSecsToday={idleSecsToday}
-            />
-          </div>
+        {/* Activity feed — below on mobile, left column on desktop */}
+        <div className="flex-1 min-w-0 lg:order-1 lg:overflow-y-auto">
+          <ActivityTimeline events={events} />
         </div>
 
       </div>

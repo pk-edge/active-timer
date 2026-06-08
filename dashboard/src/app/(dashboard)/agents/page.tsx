@@ -89,7 +89,7 @@ export default function AgentsPage() {
   return (
     <div className="overflow-y-auto pr-1 space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-gray-900">Agents</h1>
+        <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Agents</h1>
         <p className="text-gray-500 text-sm mt-0.5">Distribute and update the desktop agent. The active version is what devices auto-update to.</p>
       </div>
 
@@ -122,7 +122,8 @@ export default function AgentsPage() {
           <DownloadCloud size={15} className="text-gray-400" />
           <p className="text-sm font-semibold text-gray-700">Version history</p>
         </div>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[720px]">
           <thead>
             <tr className="text-gray-500 text-xs uppercase tracking-wide border-b border-gray-100">
               <th className="text-left px-4 py-2.5 font-semibold">Platform</th>
@@ -156,6 +157,7 @@ export default function AgentsPage() {
             {installers?.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-gray-400 text-sm">No agent builds uploaded yet.</td></tr>}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );

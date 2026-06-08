@@ -249,3 +249,123 @@ export interface AdoptionData {
   apps:   string[];
   series: Record<string, number | string>[];
 }
+
+export interface UncategorizedItem {
+  pattern:    string;
+  kind:       "app" | "url";
+  seconds:    number;
+  user_count: number;
+  last_seen:  string | null;
+}
+
+export interface UncategorizedData {
+  apps: UncategorizedItem[];
+  urls: UncategorizedItem[];
+}
+
+// ── Website Usage ─────────────────────────────────────────────────────────────
+
+export type Productivity = "productive" | "unproductive" | "neutral";
+
+export interface WebsiteItem {
+  host:          string;
+  duration_secs: number;
+  visits:        number;
+  user_count:    number;
+  pct:           number;
+  productivity:  Productivity;
+  category_name: string | null;
+  color:         string;
+}
+
+export interface WebsiteListOut {
+  items:        WebsiteItem[];
+  total_secs:   number;
+  total_visits: number;
+  total_users:  number;
+}
+
+export interface WebsiteDetailTitle   { title: string; visits: number; pct: number; }
+export interface WebsiteDetailSubpage { path: string;  visits: number; pct: number; }
+export interface WebsiteDetailUser    { name: string;  visits: number; duration_secs: number; pct: number; }
+export interface WebsiteDetailUsage   { date: string;  visits: number; }
+
+export interface WebsiteDetailOut {
+  host:     string;
+  titles:   WebsiteDetailTitle[];
+  subpages: WebsiteDetailSubpage[];
+  users:    WebsiteDetailUser[];
+  usage:    WebsiteDetailUsage[];
+}
+
+// ── Application Usage ─────────────────────────────────────────────────────────
+
+export interface AppUsageItem {
+  app_name:      string;
+  duration_secs: number;
+  user_count:    number;
+  pct:           number;
+  productivity:  Productivity;
+  category_name: string | null;
+  color:         string;
+}
+
+export interface AppUsageListOut {
+  items:       AppUsageItem[];
+  total_secs:  number;
+  total_apps:  number;
+  total_users: number;
+}
+
+export interface AppDetailTitle { title: string; duration_secs: number; pct: number; }
+export interface AppDetailUser  { name: string;  duration_secs: number; pct: number; }
+export interface AppDetailUsage { date: string;  duration_secs: number; }
+
+export interface AppUsageDetailOut {
+  app_name: string;
+  titles:   AppDetailTitle[];
+  users:    AppDetailUser[];
+  usage:    AppDetailUsage[];
+}
+
+// ── Category Usage ────────────────────────────────────────────────────────────
+
+export interface CategoryUsageItem {
+  cat_id:        string | null;
+  name:          string;
+  color:         string;
+  duration_secs: number;
+  user_count:    number;
+  pct:           number;
+}
+
+export interface CategoryUsageListOut {
+  items:       CategoryUsageItem[];
+  total_secs:  number;
+  total_users: number;
+}
+
+export interface CategoryDetailActivity { app_name: string; duration_secs: number; pct: number; }
+export interface CategoryDetailUser     { name: string; email: string; duration_secs: number; pct: number; }
+
+// ── URL Policies ──────────────────────────────────────────────────────────────
+
+export interface BlockedUrl {
+  id:          string;
+  pattern:     string;
+  target_type: "all" | "device" | "employee";
+  device_id:   string | null;
+  employee_id: string | null;
+  notes:       string | null;
+  is_active:   boolean;
+  created_at:  string;
+}
+
+export interface CategoryUsageDetailOut {
+  cat_id:     string | null;
+  name:       string;
+  color:      string;
+  total_secs: number;
+  activities: CategoryDetailActivity[];
+  users:      CategoryDetailUser[];
+}

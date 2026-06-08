@@ -130,7 +130,7 @@ export default function NotificationBell() {
 
       {/* Dropdown panel */}
       <div
-        className={`absolute right-0 top-full mt-3 w-[380px] bg-white rounded-2xl shadow-2xl border border-gray-200/80 z-50 overflow-hidden transition-all duration-200 origin-top-right ${
+        className={`absolute right-0 top-full mt-3 w-[calc(100vw-1.5rem)] max-w-[380px] bg-white rounded-2xl shadow-2xl border border-gray-200/80 z-50 overflow-hidden transition-all duration-200 origin-top-right ${
           open ? "opacity-100 scale-100 translate-y-0" : "opacity-0 scale-95 -translate-y-2 pointer-events-none"
         }`}
       >

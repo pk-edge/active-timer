@@ -2,7 +2,7 @@
 import Link from "next/link";
 import useSWR from "swr";
 import {
-  Monitor, BarChart2, Users2, DownloadCloud, RefreshCw,
+  Monitor, BarChart2, Users2, DownloadCloud,
   Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon,
   Laptop, AppWindow, Globe,
 } from "lucide-react";
@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, StatusDonut, UsagePie } from "@/components/charts";
+import RefreshButton from "@/components/RefreshButton";
 import type { Me, OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
 
 const STATUS_STYLE: Record<string, string> = {
@@ -76,21 +77,16 @@ function AdminHome({ me }: { me: Me }) {
   return (
     <div className="overflow-y-auto pr-1">
       {/* Welcome header */}
-      <div className="flex items-start justify-between mb-6">
+      <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">
             Welcome back, {me.name}!
           </h1>
           <p className="text-sm text-gray-500 mt-0.5">
             <span className="font-medium text-blue-600">{me.role_name}</span> · {today}
           </p>
         </div>
-        <button
-          onClick={() => mutate()}
-          className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm"
-        >
-          <RefreshCw size={13} /> Refresh
-        </button>
+        <RefreshButton onRefresh={() => mutate()} />
       </div>
 
       {/* Quick actions */}
@@ -157,7 +153,8 @@ function AdminHome({ me }: { me: Me }) {
           <p className="text-sm font-semibold text-gray-800">Live Device Feed</p>
           <span className="ml-auto text-xs text-gray-400">{realtime?.length ?? 0} devices</span>
         </div>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[640px]">
           <thead>
             <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide">
               <th className="text-left px-5 py-2.5 font-semibold">Employee</th>
@@ -194,6 +191,7 @@ function AdminHome({ me }: { me: Me }) {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   );
@@ -215,7 +213,7 @@ function EmployeeHome({ me }: { me: Me }) {
     <div className="overflow-y-auto pr-1">
       {/* Welcome header */}
       <div className="mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900">
+        <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">
           Welcome back, {me.name}!
         </h1>
         <p className="text-sm text-gray-500 mt-0.5">

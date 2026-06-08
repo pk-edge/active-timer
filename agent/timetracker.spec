@@ -24,6 +24,7 @@ a = Analysis(
         "PySide6.QtGui",
         "protection.win_guard",
         "protection.win_admin",
+        "policy.policy_manager",
         # Cross-platform
         "psutil",
         "mss",
@@ -92,8 +93,8 @@ if sys.platform == "darwin":
         icon=None,          # replace with "assets/icon.icns" when available
         bundle_identifier="com.timetracker.agent",
         info_plist={
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion":            "1.0.0",
+            "CFBundleShortVersionString": "1.0.2",
+            "CFBundleVersion":            "1.0.2",
             "NSHighResolutionCapable":    True,
             "NSAppleEventsUsageDescription":
                 "TimeTracker reads the active window to track application usage.",

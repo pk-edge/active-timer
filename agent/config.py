@@ -47,10 +47,11 @@ class Config:
 
     # ── Server (resolved once at startup) ────────────────────────────────────
     API_BASE: str = _resolve_api_base()
-    ENROLL_ENDPOINT: str = f"{API_BASE}/v1/auth/enroll"
-    INGEST_ENDPOINT: str = f"{API_BASE}/v1/ingest"
-    UPLOAD_ENDPOINT: str = f"{API_BASE}/v1/screenshots"
-    UPDATE_CHECK_ENDPOINT: str = f"{API_BASE}/v1/updates/check"
+    ENROLL_ENDPOINT:        str = f"{API_BASE}/v1/auth/enroll"
+    INGEST_ENDPOINT:        str = f"{API_BASE}/v1/ingest"
+    UPLOAD_ENDPOINT:        str = f"{API_BASE}/v1/screenshots"
+    UPDATE_CHECK_ENDPOINT:  str = f"{API_BASE}/v1/updates/check"
+    POLICY_ENDPOINT:        str = f"{API_BASE}/v1/policy/blocked-urls"
 
     # ── Auto-update ──────────────────────────────────────────────────────────
     AUTO_UPDATE_ENABLED: bool = os.environ.get("TT_AUTO_UPDATE", "1") != "0"
@@ -66,8 +67,29 @@ class Config:
     # ── Capture tuning ───────────────────────────────────────────────────────
     WINDOW_POLL_SECS:    int = 5
     SCREENSHOT_INTERVAL: int = 300
-    IDLE_THRESHOLD_SECS: int = 60
-    URL_POLL_SECS:       int = 120
+    IDLE_THRESHOLD_SECS: int = 300  # 5 minutes — stop timer if no input for 5 min
+    URL_POLL_SECS:       int = 30   # poll browser history every 30s for sub-link fidelity
+
+    # ── Policy / URL blocking ─────────────────────────────────────────────────
+    POLICY_SYNC_SECS:    int = 300  # re-fetch blocked URL list every 5 minutes
+    POLICY_PATH:         Path = BASE_DIR / "policy.json"
+
+    # Media/meeting apps — never emit idle when these are the active window
+    MEDIA_APPS: frozenset = frozenset({
+        "zoom", "zoom.us", "us.zoom.videomeetings",
+        "microsoft teams", "teams",
+        "google meet",
+        "webex", "cisco webex meetings",
+        "facetime",
+        "loom",
+        "discord",
+        "skype",
+    })
+    MEDIA_BROWSER_TITLES: frozenset = frozenset({
+        "youtube", "netflix", "spotify", "amazon prime video",
+        "disney+", "twitch", "hulu", "apple tv",
+        "meet.google.com", "zoom.us",
+    })
 
     # ── Sync tuning ──────────────────────────────────────────────────────────
     SYNC_INTERVAL_SECS:       int   = 5     # max wait before a sync (even with no trigger)

@@ -3,12 +3,13 @@ import { useState, useMemo } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
-  RefreshCw, DownloadCloud, FileDown, Printer, ChevronDown,
+  DownloadCloud, FileDown, Printer, ChevronDown,
   Monitor, Globe, Search, X,
 } from "lucide-react";
 import { getRealtime, getGroups, getHomeAppUsage, getHomeWebUsage, fmtSeconds, fmtTime } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, UsagePie } from "@/components/charts";
+import RefreshButton from "@/components/RefreshButton";
 import type { RealtimeDevice, Group, AppUsage, WebUsage } from "@/types";
 
 const STATUS_STYLE: Record<string, string> = {
@@ -83,11 +84,9 @@ export default function ActivityPage() {
     <div className="overflow-y-auto pr-1">
       {/* Header + actions */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-        <h1 className="text-2xl font-semibold text-gray-900">Activity Dashboard</h1>
+        <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Activity Dashboard</h1>
         <div className="flex items-center gap-2">
-          <button onClick={() => mutate()} className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm">
-            <RefreshCw size={13} /> Refresh
-          </button>
+          <RefreshButton onRefresh={() => mutate()} />
           <button onClick={() => exportCsv(filtered)} className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm">
             <FileDown size={13} /> Export
           </button>

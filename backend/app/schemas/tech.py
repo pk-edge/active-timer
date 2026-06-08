@@ -104,3 +104,150 @@ class AdoptionPoint(BaseModel):
 class AdoptionOut(BaseModel):
     apps:   list[str]
     series: list[dict]
+
+
+class UncategorizedItem(BaseModel):
+    pattern:    str
+    kind:       str          # "app" | "url"
+    seconds:    int
+    user_count: int
+    last_seen:  Optional[str]
+
+
+class UncategorizedOut(BaseModel):
+    apps: list[UncategorizedItem]
+    urls: list[UncategorizedItem]
+
+
+# ── Website Usage ─────────────────────────────────────────────────────────────
+
+class WebsiteItem(BaseModel):
+    host:          str
+    duration_secs: int
+    visits:        int
+    user_count:    int
+    pct:           float
+    productivity:  str          # "productive" | "unproductive" | "neutral"
+    category_name: Optional[str]
+    color:         str
+
+
+class WebsiteDetailTitle(BaseModel):
+    title:    str
+    visits:   int
+    pct:      float
+
+
+class WebsiteDetailSubpage(BaseModel):
+    path:     str
+    visits:   int
+    pct:      float
+
+
+class WebsiteDetailUser(BaseModel):
+    name:          str
+    visits:        int
+    duration_secs: int
+    pct:           float
+
+
+class WebsiteDetailUsagePoint(BaseModel):
+    date:   str
+    visits: int
+
+
+class WebsiteDetailOut(BaseModel):
+    host:      str
+    titles:    list[WebsiteDetailTitle]    = []
+    subpages:  list[WebsiteDetailSubpage]  = []
+    users:     list[WebsiteDetailUser]     = []
+    usage:     list[WebsiteDetailUsagePoint] = []
+
+
+class WebsiteListOut(BaseModel):
+    items:        list[WebsiteItem]
+    total_secs:   int
+    total_visits: int
+    total_users:  int
+
+
+# ── Application Usage ─────────────────────────────────────────────────────────
+
+class AppUsageItem(BaseModel):
+    app_name:      str
+    duration_secs: int
+    user_count:    int
+    pct:           float
+    productivity:  str          # "productive" | "unproductive" | "neutral"
+    category_name: Optional[str]
+    color:         str
+
+
+class AppUsageDetailTitle(BaseModel):
+    title:         str
+    duration_secs: int
+    pct:           float
+
+
+class AppUsageDetailUser(BaseModel):
+    name:          str
+    duration_secs: int
+    pct:           float
+
+
+class AppUsageDetailPoint(BaseModel):
+    date:          str
+    duration_secs: int
+
+
+class AppUsageDetailOut(BaseModel):
+    app_name: str
+    titles:   list[AppUsageDetailTitle]  = []
+    users:    list[AppUsageDetailUser]   = []
+    usage:    list[AppUsageDetailPoint]  = []
+
+
+class AppUsageListOut(BaseModel):
+    items:       list[AppUsageItem]
+    total_secs:  int
+    total_apps:  int
+    total_users: int
+
+
+# ── Category Usage ────────────────────────────────────────────────────────────
+
+class CategoryUsageItem(BaseModel):
+    cat_id:        Optional[str]
+    name:          str
+    color:         str
+    duration_secs: int
+    user_count:    int
+    pct:           float
+
+
+class CategoryDetailActivity(BaseModel):
+    app_name:      str
+    duration_secs: int
+    pct:           float
+
+
+class CategoryDetailUser(BaseModel):
+    name:          str
+    email:         str
+    duration_secs: int
+    pct:           float
+
+
+class CategoryUsageDetailOut(BaseModel):
+    cat_id:     Optional[str]
+    name:       str
+    color:      str
+    total_secs: int
+    activities: list[CategoryDetailActivity] = []
+    users:      list[CategoryDetailUser]     = []
+
+
+class CategoryUsageListOut(BaseModel):
+    items:       list[CategoryUsageItem]
+    total_secs:  int
+    total_users: int

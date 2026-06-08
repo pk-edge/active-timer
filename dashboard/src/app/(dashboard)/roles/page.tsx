@@ -82,7 +82,8 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
           <div>
             <label className="block text-xs font-medium text-gray-500 mb-1.5">Permissions</label>
             <div className="border border-gray-200 rounded-lg overflow-hidden">
-              <table className="w-full text-sm">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[560px]">
                 <thead>
                   <tr className="bg-gray-50 text-gray-500 text-xs">
                     <th className="text-left px-3 py-2 font-medium">Module</th>
@@ -105,6 +106,7 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           </div>
 
@@ -139,9 +141,9 @@ export default function RolesPage() {
 
   return (
     <div className="overflow-y-auto pr-1">
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Roles</h1>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Roles</h1>
           <p className="text-gray-500 text-sm mt-0.5">Define what each role can do and see</p>
         </div>
         {can("roles", "create") && (
@@ -152,7 +154,8 @@ export default function RolesPage() {
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[560px]">
           <thead>
             <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
               <th className="text-left px-4 py-3 font-semibold">Role</th>
@@ -187,6 +190,7 @@ export default function RolesPage() {
             {roles?.length === 0 && <tr><td colSpan={4} className="px-4 py-10 text-center text-gray-400 text-sm">No roles yet.</td></tr>}
           </tbody>
         </table>
+        </div>
       </div>
 
       {editing !== null && modules && (

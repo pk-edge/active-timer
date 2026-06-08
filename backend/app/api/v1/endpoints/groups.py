@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require
 from app.core import audit
-from app.db.models import Employee, Device, Group, GroupMember
+from app.db.models import Employee, Device, Group, GroupMember, EmployeeGroupAccess
 from app.schemas.rbac import (
     GroupIn, GroupOut, GroupDetailOut, MemberIn, MemberOut, ImportResult,
 )
@@ -36,13 +36,22 @@ async def list_groups(
     user: Employee = Depends(require("groups", "view")),
     db: AsyncSession = Depends(get_db),
 ):
-    rows = await db.execute(
+    q = (
         select(Group, func.count(GroupMember.id))
         .outerjoin(GroupMember, GroupMember.group_id == Group.id)
         .where(Group.company_id == user.company_id)
         .group_by(Group.id)
         .order_by(Group.name.asc())
     )
+
+    # Groups-scoped users only see the groups they are explicitly assigned to.
+    if getattr(user, "_scope_type", "own") == "groups":
+        my_group_ids = select(EmployeeGroupAccess.group_id).where(
+            EmployeeGroupAccess.employee_id == user.id
+        )
+        q = q.where(Group.id.in_(my_group_ids))
+
+    rows = await db.execute(q)
     return [_group_out(g, int(c or 0)) for g, c in rows.all()]
 
 
@@ -86,15 +95,31 @@ async def _members_with_labels(group_id, db: AsyncSession) -> list[MemberOut]:
         select(GroupMember).where(GroupMember.group_id == group_id).order_by(GroupMember.added_at.asc())
     )
     members = rows.scalars().all()
+    if not members:
+        return []
+
+    # Resolve all employee names + device hostnames in 2 queries total
+    # (was one query per member → N+1 on large groups).
+    emp_ids = [m.employee_id for m in members if m.member_type == "employee" and m.employee_id]
+    dev_ids = [m.device_id   for m in members if m.member_type == "device"   and m.device_id]
+
+    emp_names: dict = {}
+    if emp_ids:
+        er = await db.execute(select(Employee.id, Employee.name).where(Employee.id.in_(emp_ids)))
+        emp_names = {eid: name for eid, name in er.all()}
+    dev_names: dict = {}
+    if dev_ids:
+        dr = await db.execute(select(Device.id, Device.hostname).where(Device.id.in_(dev_ids)))
+        dev_names = {did: host for did, host in dr.all()}
+
     out: list[MemberOut] = []
     for m in members:
-        label = ""
         if m.member_type == "employee" and m.employee_id:
-            e = await db.execute(select(Employee.name).where(Employee.id == m.employee_id))
-            label = e.scalar() or "(unknown user)"
+            label = emp_names.get(m.employee_id) or "(unknown user)"
         elif m.member_type == "device" and m.device_id:
-            d = await db.execute(select(Device.hostname).where(Device.id == m.device_id))
-            label = d.scalar() or "(unknown device)"
+            label = dev_names.get(m.device_id) or "(unknown device)"
+        else:
+            label = ""
         out.append(MemberOut(
             id=str(m.id), member_type=m.member_type,
             employee_id=str(m.employee_id) if m.employee_id else None,

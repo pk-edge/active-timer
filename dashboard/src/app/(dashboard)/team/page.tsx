@@ -38,7 +38,7 @@ export default function TeamPage() {
   return (
     <div className="overflow-y-auto pr-1">
       <div className="flex items-center justify-between mb-1">
-        <h1 className="text-2xl font-semibold text-gray-900">Team Management</h1>
+        <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Team Management</h1>
         <button onClick={() => mutate()}
                 className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm">
           <RefreshCw size={13} /> Refresh

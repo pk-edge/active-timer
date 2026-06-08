@@ -77,7 +77,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
   }
 
   return (
-    <div className="flex flex-col gap-3 h-full">
+    <div className="flex flex-col gap-3">
 
       {/* ── Quick stats row ── */}
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3">
@@ -175,8 +175,8 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
 
       {/* ── Top apps ── */}
       {insights.topApps.length > 0 && (
-        <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3 flex-1 min-h-0 flex flex-col">
-          <div className="flex items-center justify-between mb-2">
+        <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3">
+          <div className="flex items-center justify-between mb-3">
             <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
               Applications
               <span className="ml-1.5 font-normal normal-case text-gray-300">
@@ -197,20 +197,20 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
             )}
           </div>
 
-          <div className={`space-y-2.5 ${showAllApps ? "overflow-y-auto flex-1" : ""}`}>
+          <div className={`space-y-3 ${showAllApps ? "max-h-72 overflow-y-auto pr-1" : ""}`}>
             {(showAllApps ? insights.topApps : insights.topApps.slice(0, 5)).map(([app, secs], i) => {
               const pct = Math.round((secs / maxAppSecs) * 100);
               return (
                 <div key={app}>
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center justify-between mb-1.5">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span className="text-xs font-bold text-gray-300 w-3.5 shrink-0">{i + 1}</span>
                       <span className="text-xs font-semibold text-gray-700 truncate">{app}</span>
                     </div>
                     <span className="text-xs text-gray-400 shrink-0 ml-1">{fmtSeconds(secs)}</span>
                   </div>
-                  <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
-                    <div className="h-full rounded-full bg-blue-400" style={{ width: `${pct}%` }} />
+                  <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                    <div className="h-full rounded-full bg-blue-400 transition-all" style={{ width: `${pct}%` }} />
                   </div>
                 </div>
               );

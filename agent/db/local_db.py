@@ -62,6 +62,23 @@ CREATE TABLE IF NOT EXISTS attendance_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_synced ON attendance_sessions(synced);
+
+-- Persistent per-day accumulator so restarts don't lose accumulated time
+CREATE TABLE IF NOT EXISTS daily_totals (
+    date         TEXT    PRIMARY KEY,   -- YYYY-MM-DD in local time
+    device_id    TEXT    NOT NULL,
+    active_secs  INTEGER DEFAULT 0,
+    idle_secs    INTEGER DEFAULT 0,
+    updated_at   INTEGER NOT NULL
+);
+
+-- Agent-cached blocked-URL policy fetched from the backend
+CREATE TABLE IF NOT EXISTS blocked_urls (
+    id           TEXT    PRIMARY KEY,
+    pattern      TEXT    NOT NULL,
+    target_type  TEXT    NOT NULL DEFAULT 'all',  -- 'all' | 'device'
+    created_at   INTEGER NOT NULL
+);
 """
 
 
@@ -309,7 +326,15 @@ class LocalDB:
             )
 
     def get_today_active_secs(self) -> int:
-        """Sum active_secs for all ended sessions that started today (local time)."""
+        """Return today's accumulated active seconds.
+        Prefers the daily_totals accumulator (updated every minute) over the
+        session sum so restarts always resume from the correct baseline.
+        """
+        # 1. Check fast accumulator first
+        accumulated = self.get_today_accumulated_secs()
+        if accumulated > 0:
+            return accumulated
+        # 2. Fall back to summing ended sessions (legacy / first run)
         from datetime import datetime
         today_start = int(datetime.now().replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -321,6 +346,55 @@ class LocalDB:
                 (self._device_id, today_start),
             ).fetchone()
         return int(row[0])
+
+    # ── Daily totals (crash-safe accumulator) ────────────────────────────
+
+    def flush_daily_secs(self, active_delta: int, idle_delta: int = 0) -> None:
+        """Add active/idle seconds to today's persistent accumulator.
+        Called periodically by the widget so time is not lost on crash.
+        """
+        if not self._device_id or active_delta < 0:
+            return
+        from datetime import date
+        today = str(date.today())
+        with self._lock, self._conn() as conn:
+            conn.execute("""
+                INSERT INTO daily_totals (date, device_id, active_secs, idle_secs, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    active_secs = active_secs + excluded.active_secs,
+                    idle_secs   = idle_secs   + excluded.idle_secs,
+                    updated_at  = excluded.updated_at
+            """, (today, self._device_id, active_delta, idle_delta, int(time.time())))
+
+    def get_today_accumulated_secs(self) -> int:
+        """Return persisted active seconds for today — used on restart to resume timer."""
+        if not self._device_id:
+            return 0
+        from datetime import date
+        today = str(date.today())
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT active_secs FROM daily_totals WHERE date = ? AND device_id = ?",
+                (today, self._device_id),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    # ── Blocked URLs cache ────────────────────────────────────────────────
+
+    def update_blocked_urls(self, entries: list[dict]) -> None:
+        """Replace the local blocked-URL cache with the latest from the server."""
+        with self._lock, self._conn() as conn:
+            conn.execute("DELETE FROM blocked_urls")
+            conn.executemany(
+                "INSERT OR IGNORE INTO blocked_urls (id, pattern, target_type, created_at) VALUES (?,?,?,?)",
+                [(e["id"], e["pattern"], e.get("target_type", "all"), int(time.time())) for e in entries],
+            )
+
+    def get_blocked_url_patterns(self) -> list[str]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT pattern FROM blocked_urls").fetchall()
+        return [r[0] for r in rows]
 
     # ── Internal ──────────────────────────────────────────────────────────
 

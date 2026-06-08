@@ -2,233 +2,198 @@
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
-  LineChart, Line, Legend, Cell,
-} from "recharts";
+  PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, LabelList,
+  LineChart, Line, Legend } from "recharts";
 import {
-  Cpu, TrendingUp, TrendingDown, Users, Clock, Monitor,
-  Globe, ChevronDown, RefreshCw, ArrowUpRight, ArrowDownRight, Minus,
-} from "lucide-react";
+  Cpu, TrendingUp, TrendingDown, Users, Clock, Monitor, Globe,
+  ChevronDown, ArrowUpRight, ArrowDownRight, Minus, Info } from "lucide-react";
 import {
-  getTechSummary, getCategoryAllocation, getAppTrends, getAppList, getAdoptionData,
-  fmtSeconds,
-} from "@/lib/api";
+  getTechSummary, getCategoryAllocation, getAppTrends, getAppList,
+  getAdoptionData, getTechCategories, fmtSeconds } from "@/lib/api";
+import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
+import { format, subDays } from "date-fns";
+import { getGroups } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
+import RefreshButton from "@/components/RefreshButton";
 import type {
-  TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
-} from "@/types";
+  TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory, Group } from "@/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const PERIOD_OPTIONS = [
-  { label: "Last 7 days",  days: 7 },
-  { label: "Last 30 days", days: 30 },
-  { label: "Last 60 days", days: 60 },
-  { label: "Last 90 days", days: 90 },
-];
+const LINE_COLORS = ["#3b82f6","#22c55e","#f59e0b","#a855f7","#ef4444","#06b6d4","#ec4899"];
+const RADIAN = Math.PI / 180;
 
-const LINE_COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#a855f7", "#ef4444", "#06b6d4", "#ec4899"];
-
-function PctChangeBadge({ v }: { v: number }) {
-  if (v === 0) return <span className="text-xs text-gray-400 flex items-center gap-0.5"><Minus size={11} />0%</span>;
-  if (v > 0) return (
-    <span className="text-xs text-green-600 flex items-center gap-0.5">
-      <ArrowUpRight size={11} />+{v.toFixed(1)}%
-    </span>
-  );
-  return (
-    <span className="text-xs text-red-500 flex items-center gap-0.5">
-      <ArrowDownRight size={11} />{v.toFixed(1)}%
-    </span>
-  );
+function PctBadge({ v }: { v: number }) {
+  if (v === 0) return <span className="inline-flex items-center gap-0.5 text-xs text-gray-400"><Minus size={10} />0%</span>;
+  if (v > 0)   return <span className="inline-flex items-center gap-0.5 text-xs text-green-600"><ArrowUpRight size={10} />+{v.toFixed(1)}%</span>;
+  return              <span className="inline-flex items-center gap-0.5 text-xs text-red-500"><ArrowDownRight size={10} />{v.toFixed(1)}%</span>;
 }
 
-function PeriodSelect({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+function FilterChip({
+  label, value, options, onChange }: { label: string; value: string; options: { label: string; value: string }[]; onChange: (v: string) => void }) {
+  const selected = options.find(o => o.value === value);
   return (
     <div className="relative">
       <select
         value={value}
-        onChange={e => onChange(Number(e.target.value))}
-        className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300 shadow-sm"
+        onChange={e => onChange(e.target.value)}
+        className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300 cursor-pointer"
       >
-        {PERIOD_OPTIONS.map(o => (
-          <option key={o.days} value={o.days}>{o.label}</option>
-        ))}
+        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
-      <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+      <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
     </div>
   );
 }
 
-// ── Stat cards ────────────────────────────────────────────────────────────────
+// ── Donut chart with outer labels ─────────────────────────────────────────────
 
-function SummaryCards({ data }: { data: TechSummary }) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function DonutLabel({ cx, cy, midAngle, outerRadius, percent, name }: any) {
+  if (percent < 0.025) return null;
+  const radius = outerRadius + 38;
+  const x = cx + radius * Math.cos(-midAngle * RADIAN);
+  const y = cy + radius * Math.sin(-midAngle * RADIAN);
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-      <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-        <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
-            <Clock size={15} className="text-blue-600" />
-          </div>
-          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Total Hours</p>
-        </div>
-        <p className="text-2xl font-bold text-gray-900">{data.total_hours.toLocaleString()}</p>
-        <p className="text-xs text-gray-400 mt-0.5">tracked this period</p>
-      </div>
-
-      <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-        <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 h-8 rounded-lg bg-purple-50 flex items-center justify-center">
-            <Monitor size={15} className="text-purple-600" />
-          </div>
-          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Applications</p>
-        </div>
-        <p className="text-2xl font-bold text-gray-900">{data.total_apps}</p>
-        <p className="text-xs text-gray-400 mt-0.5">distinct apps used</p>
-      </div>
-
-      <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-        <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center">
-            <Users size={15} className="text-green-600" />
-          </div>
-          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Users Tracked</p>
-        </div>
-        <p className="text-2xl font-bold text-gray-900">{data.total_users}</p>
-        <p className="text-xs text-gray-400 mt-0.5">active employees</p>
-      </div>
-
-      <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-        <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-               style={{ backgroundColor: `${data.top_category_color}20` }}>
-            <Cpu size={15} style={{ color: data.top_category_color }} />
-          </div>
-          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Top Category</p>
-        </div>
-        <p className="text-2xl font-bold text-gray-900 truncate">{data.top_category ?? "—"}</p>
-        <p className="text-xs text-gray-400 mt-0.5 truncate">Top app: {data.top_app ?? "—"}</p>
-      </div>
-    </div>
+    <text x={x} y={y} fill="#374151" textAnchor={x > cx ? "start" : "end"}
+          dominantBaseline="central" style={{ fontSize: 10, fontWeight: 500 }}>
+      {`${name} - ${(percent * 100).toFixed(1)}%`}
+    </text>
   );
 }
 
 // ── Overview tab ──────────────────────────────────────────────────────────────
 
 function OverviewTab({
-  allocation, apps,
-}: {
+  allocation, apps, categoryId }: {
   allocation: CategoryAllocationItem[];
-  apps: AppDetailItem[];
+  apps:       AppDetailItem[];
+  categoryId: string;
 }) {
-  const pieData = allocation.slice(0, 8);
+  // Donut data — all categories
+  const donutData = useMemo(
+    () => allocation.map(a => ({ name: a.category_name, value: a.pct, color: a.color })),
+    [allocation],
+  );
+
+  // Horizontal bar chart — top 20 apps, sorted by pct desc
+  const barData = useMemo(
+    () => apps.slice(0, 20).map(a => ({
+      name:     a.app_name.length > 22 ? a.app_name.slice(0, 20) + "…" : a.app_name,
+      fullName: a.app_name,
+      pct:      a.pct,
+      color:    a.color,
+      users:    a.user_count })),
+    [apps],
+  );
+
+  const maxPct = barData[0]?.pct ?? 1;
 
   return (
-    <div className="space-y-6">
-      {/* Category allocation pie + legend */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-          <p className="text-sm font-semibold text-gray-800 mb-4">Category Allocation</p>
-          <div className="flex items-center gap-4">
-            <ResponsiveContainer width="55%" height={220}>
-              <BarChart data={pieData} layout="vertical" barCategoryGap="20%">
-                <XAxis type="number" tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false}
-                       tickFormatter={v => `${v}%`} />
-                <YAxis type="category" dataKey="category_name" width={90}
-                       tick={{ fontSize: 11, fill: "#6b7280" }} axisLine={false} tickLine={false} />
-                <Tooltip
-                  formatter={(v: number) => [`${v}%`, "Allocation"]}
-                  contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 12 }}
-                />
-                <Bar dataKey="pct" radius={[0, 4, 4, 0]}>
-                  {pieData.map((entry, i) => (
-                    <Cell key={i} fill={entry.color} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-            <div className="flex-1 space-y-2 min-w-0">
-              {pieData.map(item => (
-                <div key={item.category_name} className="flex items-center gap-2 text-xs">
-                  <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: item.color }} />
-                  <span className="text-gray-600 truncate flex-1">{item.category_name}</span>
-                  <span className="text-gray-500 font-medium shrink-0">{item.pct.toFixed(1)}%</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Hours by category */}
-        <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-          <p className="text-sm font-semibold text-gray-800 mb-4">Hours by Category</p>
-          <div className="space-y-3">
-            {allocation.map(item => (
-              <div key={item.category_name}>
-                <div className="flex items-center justify-between text-xs mb-1">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full" style={{ background: item.color }} />
-                    <span className="text-gray-700">{item.category_name}</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <PctChangeBadge v={item.pct_change} />
-                    <span className="text-gray-500">{item.hours.toFixed(1)}h</span>
-                  </div>
-                </div>
-                <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(item.pct, 100)}%`, background: item.color }} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* App list */}
+    <div className="flex flex-col gap-2">
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-gray-100 flex items-center gap-2">
-          <Globe size={15} className="text-gray-400" />
-          <p className="text-sm font-semibold text-gray-800">Top Applications</p>
+        {/* Section title */}
+        <div className="px-5 pt-4 pb-3 border-b border-gray-100">
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm font-semibold text-gray-800">
+              Usage by Category and Top Applications/Sites
+            </p>
+            <Info size={13} className="text-gray-400" />
+          </div>
+          <p className="text-xs text-gray-400 mt-0.5">
+            Identify your organisation&apos;s activity allocation (% of total duration) by category and top applications/sites.
+          </p>
         </div>
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide">
-              <th className="text-left px-5 py-2.5 font-semibold">Application</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Category</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Hours</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Allocation</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Users</th>
-            </tr>
-          </thead>
-          <tbody>
-            {apps.slice(0, 20).map(app => (
-              <tr key={app.app_name} className="border-t border-gray-100 hover:bg-gray-50">
-                <td className="px-5 py-3 font-medium text-gray-800">{app.app_name}</td>
-                <td className="px-5 py-3">
-                  <span className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full"
-                        style={{ background: `${app.color}18`, color: app.color }}>
-                    <span className="w-1.5 h-1.5 rounded-full" style={{ background: app.color }} />
-                    {app.category_name}
-                  </span>
-                </td>
-                <td className="px-5 py-3 text-gray-600">{app.hours.toFixed(1)}h</td>
-                <td className="px-5 py-3">
-                  <div className="flex items-center gap-2">
-                    <div className="w-16 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                      <div className="h-full rounded-full" style={{ width: `${Math.min(app.pct, 100)}%`, background: app.color }} />
-                    </div>
-                    <span className="text-xs text-gray-500">{app.pct.toFixed(1)}%</span>
-                  </div>
-                </td>
-                <td className="px-5 py-3 text-gray-500">{app.user_count}</td>
-              </tr>
-            ))}
-            {apps.length === 0 && (
-              <tr><td colSpan={5} className="px-5 py-10 text-center text-gray-400">No data yet.</td></tr>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-100">
+          {/* LEFT — Donut */}
+          <div className="p-5">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+              Category Allocation %
+            </p>
+            {donutData.length === 0 ? (
+              <div className="h-[280px] flex items-center justify-center text-sm text-gray-400">No data yet.</div>
+            ) : (
+              <ResponsiveContainer width="100%" height={300}>
+                <PieChart margin={{ top: 20, right: 60, bottom: 20, left: 60 }}>
+                  <Pie
+                    data={donutData}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={72}
+                    outerRadius={105}
+                    paddingAngle={1}
+                    labelLine={false}
+                    label={DonutLabel}
+                  >
+                    {donutData.map((d, i) => (
+                      <Cell
+                        key={i}
+                        fill={d.color}
+                        stroke={categoryId && allocation[i]?.category_id !== categoryId ? "#fff" : d.color}
+                        opacity={categoryId && allocation[i]?.category_id !== categoryId ? 0.35 : 1}
+                      />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    formatter={(v: number) => [`${v.toFixed(1)}%`, "Allocation"]}
+                    contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 11 }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
             )}
-          </tbody>
-        </table>
+          </div>
+
+          {/* RIGHT — Horizontal bar chart */}
+          <div className="p-5">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+              Top Applications/Sites by Allocation % based on Activity Date
+            </p>
+            {barData.length === 0 ? (
+              <div className="h-[280px] flex items-center justify-center text-sm text-gray-400">No data yet.</div>
+            ) : (
+              <div className="space-y-1.5 max-h-[380px] overflow-y-auto pr-1">
+                {barData.map(app => (
+                  <div key={app.fullName} className="flex items-center gap-2 group">
+                    {/* App name */}
+                    <p className="text-xs text-gray-700 w-36 shrink-0 truncate" title={app.fullName}>
+                      {app.name}
+                    </p>
+                    {/* Bar + user dot */}
+                    <div className="flex-1 flex items-center gap-1.5">
+                      <div className="flex-1 h-5 bg-gray-100 rounded-sm overflow-hidden relative">
+                        <div
+                          className="h-full rounded-sm transition-all"
+                          style={{
+                            width: `${(app.pct / maxPct) * 100}%`,
+                            background: app.color }}
+                        />
+                        {app.users > 0 && (
+                          <div
+                            className="absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white border-2 flex items-center justify-center text-[8px] font-bold shadow-sm"
+                            style={{
+                              left: `calc(${(app.pct / maxPct) * 100}% - 8px)`,
+                              borderColor: app.color,
+                              color: app.color }}
+                          >
+                            {app.users > 9 ? "9+" : app.users}
+                          </div>
+                        )}
+                      </div>
+                      <span className="text-xs text-gray-500 w-10 text-right tabular-nums shrink-0">
+                        {app.pct.toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -237,82 +202,75 @@ function OverviewTab({
 // ── Top Changes tab ───────────────────────────────────────────────────────────
 
 function TopChangesTab({ allocation, trends }: { allocation: CategoryAllocationItem[]; trends: AppTrends }) {
-  const chartData = useMemo(
+  const sorted = useMemo(
     () => [...allocation].sort((a, b) => Math.abs(b.pct_change) - Math.abs(a.pct_change)).slice(0, 10),
     [allocation],
   );
 
   return (
     <div className="space-y-6">
-      {/* Category allocation change chart */}
+      {/* Category change bar chart */}
       <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-        <p className="text-sm font-semibold text-gray-800 mb-1">Top Changes in Category Allocation</p>
+        <p className="text-sm font-semibold text-gray-800 mb-0.5">Top Changes in Category Allocation</p>
         <p className="text-xs text-gray-400 mb-4">Percentage point change vs comparison period</p>
-        <div className="overflow-x-auto">
-          <div style={{ minWidth: 500 }}>
-            <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={chartData} layout="vertical" barCategoryGap="25%" margin={{ left: 8 }}>
-                <XAxis type="number" tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false}
-                       tickFormatter={v => `${v > 0 ? "+" : ""}${v}%`} />
-                <YAxis type="category" dataKey="category_name" width={110}
-                       tick={{ fontSize: 11, fill: "#6b7280" }} axisLine={false} tickLine={false} />
-                <Tooltip
-                  formatter={(v: number) => [`${v > 0 ? "+" : ""}${v.toFixed(1)}%`, "Change"]}
-                  contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 12 }}
-                />
-                <Bar dataKey="pct_change" radius={[0, 4, 4, 0]}>
-                  {chartData.map((entry, i) => (
-                    <Cell key={i} fill={entry.pct_change >= 0 ? "#3b82f6" : "#ef4444"} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
+        <ResponsiveContainer width="100%" height={Math.max(sorted.length * 36, 200)}>
+          <BarChart data={sorted} layout="vertical" barCategoryGap="30%" margin={{ left: 8, right: 48 }}>
+            <XAxis type="number" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false}
+                   tickFormatter={v => `${v > 0 ? "+" : ""}${v}%`} />
+            <YAxis type="category" dataKey="category_name" width={115}
+                   tick={{ fontSize: 11, fill: "#6b7280" }} axisLine={false} tickLine={false} />
+            <Tooltip
+              formatter={(v: number) => [`${v > 0 ? "+" : ""}${v.toFixed(1)}%`, "Change"]}
+              contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 12 }}
+            />
+            <Bar dataKey="pct_change" radius={[0, 4, 4, 0]}>
+              {sorted.map((e, i) => <Cell key={i} fill={e.pct_change >= 0 ? "#3b82f6" : "#ef4444"} />)}
+              <LabelList dataKey="pct_change"
+                         formatter={(v: number) => `${v > 0 ? "+" : ""}${v.toFixed(1)}%`}
+                         style={{ fill: "#6b7280", fontSize: 10 }}
+                         position="right" />
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
       </div>
 
-      {/* Category details table */}
+      {/* Category table */}
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-100">
           <p className="text-sm font-semibold text-gray-800">Changes in Category Allocation</p>
-          <p className="text-xs text-gray-400 mt-0.5">Identify top changes to understand technology usage trends.</p>
+          <p className="text-xs text-gray-400 mt-0.5">Identify top changes in activity application/site allocation to understand technology usage trends.</p>
         </div>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[640px]">
           <thead>
             <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide">
               <th className="text-left px-5 py-2.5 font-semibold">Category</th>
               <th className="text-left px-5 py-2.5 font-semibold">Allocation % Chg</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Allocation %</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Hrs</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Users Chg</th>
+              <th className="text-left px-5 py-2.5 font-semibold">Allocation % (Activity Date)</th>
+              <th className="text-right px-5 py-2.5 font-semibold">Hrs</th>
+              <th className="text-right px-5 py-2.5 font-semibold">Users Chg</th>
             </tr>
           </thead>
           <tbody>
             {[...allocation].sort((a, b) => Math.abs(b.pct_change) - Math.abs(a.pct_change)).map(item => (
               <tr key={item.category_name} className="border-t border-gray-100 hover:bg-gray-50">
-                <td className="px-5 py-3">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-sm" style={{ background: item.color }} />
-                    <span className="font-medium text-gray-800">{item.category_name}</span>
-                  </div>
+                <td className="px-5 py-3 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: item.color }} />
+                  <span className="font-medium text-gray-800">{item.category_name}</span>
                 </td>
                 <td className="px-5 py-3">
                   <div className="flex items-center gap-2">
-                    <PctChangeBadge v={item.pct_change} />
-                    <div className="w-20 h-2 bg-gray-100 rounded-full overflow-hidden">
+                    <PctBadge v={item.pct_change} />
+                    <div className="w-20 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                       <div className="h-full rounded-full"
-                           style={{
-                             width: `${Math.min(Math.abs(item.pct_change) * 10, 100)}%`,
-                             background: item.pct_change >= 0 ? "#3b82f6" : "#ef4444",
-                           }} />
+                           style={{ width: `${Math.min(Math.abs(item.pct_change) * 8, 100)}%`,
+                                    background: item.pct_change >= 0 ? "#3b82f6" : "#ef4444" }} />
                     </div>
                   </div>
                 </td>
                 <td className="px-5 py-3 text-gray-600">{item.pct.toFixed(1)}%</td>
-                <td className="px-5 py-3 text-gray-600">{item.hours.toFixed(1)}</td>
-                <td className="px-5 py-3">
-                  <PctChangeBadge v={item.user_change} />
-                </td>
+                <td className="px-5 py-3 text-right text-gray-600">{item.hours.toFixed(1)}</td>
+                <td className="px-5 py-3 text-right"><PctBadge v={item.user_change} /></td>
               </tr>
             ))}
             {allocation.length === 0 && (
@@ -320,36 +278,34 @@ function TopChangesTab({ allocation, trends }: { allocation: CategoryAllocationI
             )}
           </tbody>
         </table>
+        </div>
       </div>
 
-      {/* Trending up/down */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <TrendingTable title="Applications/Sites Trending Up" icon={TrendingUp} items={trends.trending_up} up />
-        <TrendingTable title="Applications/Sites Trending Down" icon={TrendingDown} items={trends.trending_down} up={false} />
+      {/* Trending up / down */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <TrendTable title="Applications/Sites Trending Up"   icon={TrendingUp}   items={trends.trending_up}   up />
+        <TrendTable title="Applications/Sites Trending Down" icon={TrendingDown} items={trends.trending_down} up={false} />
       </div>
     </div>
   );
 }
 
-function TrendingTable({
-  title, icon: Icon, items, up,
-}: {
-  title: string;
-  icon: React.ElementType;
-  items: AppTrends["trending_up"];
-  up: boolean;
+function TrendTable({ title, icon: Icon, items, up }: {
+  title: string; icon: React.ElementType; items: AppTrends["trending_up"]; up: boolean;
 }) {
   return (
     <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
-      <div className="px-5 py-4 border-b border-gray-100 flex items-center gap-2">
-        <Icon size={15} className={up ? "text-green-500" : "text-red-400"} />
+      <div className="px-5 py-3.5 border-b border-gray-100 flex items-center gap-2">
+        <Icon size={14} className={up ? "text-green-500" : "text-red-400"} />
         <p className="text-sm font-semibold text-gray-800">{title}</p>
       </div>
-      <table className="w-full text-sm">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm min-w-[640px]">
         <thead>
           <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide">
             <th className="text-left px-4 py-2 font-semibold">App / Site</th>
             <th className="text-left px-4 py-2 font-semibold">Alloc % Chg</th>
+            <th className="text-right px-4 py-2 font-semibold">Alloc %</th>
             <th className="text-right px-4 py-2 font-semibold">Hrs</th>
             <th className="text-right px-4 py-2 font-semibold">Users</th>
           </tr>
@@ -358,32 +314,29 @@ function TrendingTable({
           {items.map(app => (
             <tr key={app.app_name} className="border-t border-gray-100 hover:bg-gray-50">
               <td className="px-4 py-2.5">
-                <p className="font-medium text-gray-800 truncate max-w-[120px]">{app.app_name}</p>
-                <p className="text-xs text-gray-400">{app.category_name}</p>
+                <p className="font-medium text-gray-800 text-xs truncate max-w-[110px]">{app.app_name}</p>
+                <p className="text-[11px] text-gray-400">{app.category_name}</p>
               </td>
               <td className="px-4 py-2.5">
-                <div className="flex items-center gap-2">
-                  <PctChangeBadge v={app.pct_change} />
-                  <div className="w-16 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div className="flex items-center gap-1.5">
+                  <PctBadge v={app.pct_change} />
+                  <div className="w-12 h-1 bg-gray-100 rounded-full overflow-hidden">
                     <div className="h-full rounded-full"
-                         style={{
-                           width: `${Math.min(Math.abs(app.pct_change) * 20, 100)}%`,
-                           background: app.color,
-                         }} />
+                         style={{ width: `${Math.min(Math.abs(app.pct_change) * 15, 100)}%`, background: app.color }} />
                   </div>
                 </div>
               </td>
-              <td className="px-4 py-2.5 text-right text-gray-600">{app.hours.toFixed(1)}</td>
-              <td className="px-4 py-2.5 text-right">
-                <PctChangeBadge v={app.user_change} />
-              </td>
+              <td className="px-4 py-2.5 text-right text-xs text-gray-500">{app.pct.toFixed(1)}%</td>
+              <td className="px-4 py-2.5 text-right text-xs text-gray-600">{app.hours.toFixed(1)}</td>
+              <td className="px-4 py-2.5 text-right"><PctBadge v={app.user_change} /></td>
             </tr>
           ))}
           {items.length === 0 && (
-            <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">No changes in this period.</td></tr>
+            <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No changes in this period.</td></tr>
           )}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -391,41 +344,28 @@ function TrendingTable({
 // ── Adoption tab ──────────────────────────────────────────────────────────────
 
 function AdoptionTab({ data }: { data: AdoptionData }) {
-  if (!data.apps.length) {
-    return (
-      <div className="bg-white border border-gray-200 rounded-xl p-10 shadow-sm flex items-center justify-center">
-        <p className="text-sm text-gray-400">No adoption data for this period.</p>
-      </div>
-    );
-  }
-
+  if (!data.apps.length) return (
+    <div className="bg-white border border-gray-200 rounded-xl p-10 shadow-sm text-center">
+      <p className="text-sm text-gray-400">No adoption data for this period.</p>
+    </div>
+  );
   return (
-    <div className="space-y-6">
-      <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
-        <p className="text-sm font-semibold text-gray-800 mb-1">Application Adoption Over Time</p>
-        <p className="text-xs text-gray-400 mb-4">Daily unique users per top application</p>
-        <ResponsiveContainer width="100%" height={320}>
-          <LineChart data={data.series} margin={{ top: 4, right: 16, bottom: 4, left: 0 }}>
-            <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} width={28} />
-            <Tooltip
-              contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 12 }}
-            />
-            <Legend wrapperStyle={{ fontSize: 12, paddingTop: 12 }} />
-            {data.apps.map((app, i) => (
-              <Line
-                key={app}
-                type="monotone"
-                dataKey={app}
-                stroke={LINE_COLORS[i % LINE_COLORS.length]}
-                strokeWidth={2}
-                dot={false}
-                activeDot={{ r: 4 }}
-              />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
+    <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
+      <p className="text-sm font-semibold text-gray-800 mb-0.5">Application Adoption Over Time</p>
+      <p className="text-xs text-gray-400 mb-4">Daily unique users per top application</p>
+      <ResponsiveContainer width="100%" height={300}>
+        <LineChart data={data.series} margin={{ top: 4, right: 16, bottom: 4, left: 0 }}>
+          <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} width={28} />
+          <Tooltip contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12, paddingTop: 12 }} />
+          {data.apps.map((app, i) => (
+            <Line key={app} type="monotone" dataKey={app}
+                  stroke={LINE_COLORS[i % LINE_COLORS.length]} strokeWidth={2}
+                  dot={false} activeDot={{ r: 4 }} />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }
@@ -436,32 +376,57 @@ type Tab = "overview" | "top-changes" | "adoption";
 
 export default function TechUtilizationPage() {
   const { loading, can } = useUser();
-  const [tab, setTab]           = useState<Tab>("overview");
-  const [days, setDays]         = useState(30);
-  const [compareDays]           = useState(30);
+  const [tab,        setTab]        = useState<Tab>("overview");
+  const [dateRange,  setDateRange]  = useState<DateRange>({ since: format(subDays(new Date(), 29), "yyyy-MM-dd"), until: format(new Date(), "yyyy-MM-dd") });
+  const [groupId,    setGroupId]    = useState("");
+  const [employeeId, setEmployeeId] = useState("");
+  const [categoryId, setCategoryId] = useState("");
 
-  const { data: summary, mutate: mutateSummary } =
-    useSWR<TechSummary>(["tech-summary", days], () => getTechSummary(days));
-  const { data: allocation, mutate: mutateAlloc } =
-    useSWR<CategoryAllocationItem[]>(["tech-alloc", days, compareDays], () => getCategoryAllocation(days, compareDays));
-  const { data: trends, mutate: mutateTrends } =
-    useSWR<AppTrends>(["tech-trends", days, compareDays], () => getAppTrends(days, compareDays, 10));
-  const { data: apps, mutate: mutateApps } =
-    useSWR<AppDetailItem[]>(["tech-apps", days], () => getAppList(days, undefined, 50));
-  const { data: adoption, mutate: mutateAdoption } =
-    useSWR<AdoptionData>(["tech-adoption", days], () => getAdoptionData(days, 5));
+  const { data: groups }     = useSWR<Group[]>("groups", () => import("@/lib/api").then(m => m.getGroups()));
+  const { data: users }      = useSWR("users-tf", () => import("@/lib/api").then(m => m.getUsers()));
+  const { data: categories } = useSWR<AppCategory[]>("tech-cats-filter", getTechCategories);
 
-  function refresh() {
-    mutateSummary(); mutateAlloc(); mutateTrends(); mutateApps(); mutateAdoption();
-  }
+  const { data: summary, mutate: ms } = useSWR(
+    ["tech-sum",   dateRange.since, dateRange.until, groupId, employeeId],
+    () => getTechSummary(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
+  );
+  const { data: allocation, mutate: ma } = useSWR(
+    ["tech-alloc", dateRange.since, dateRange.until, groupId, employeeId],
+    () => getCategoryAllocation(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
+  );
+  const { data: trends, mutate: mt } = useSWR(
+    ["tech-trends", dateRange.since, dateRange.until, groupId, employeeId],
+    () => getAppTrends(dateRange.since, dateRange.until, 10),
+  );
+  const { data: apps, mutate: mapp } = useSWR(
+    ["tech-apps", dateRange.since, dateRange.until, categoryId, groupId, employeeId],
+    () => getAppList(dateRange.since, dateRange.until, categoryId || undefined, 50, groupId || undefined, employeeId || undefined),
+  );
+  const { data: adoption, mutate: mad } = useSWR(
+    ["tech-adoption", dateRange.since, dateRange.until],
+    () => getAdoptionData(dateRange.since, dateRange.until, 5),
+  );
+
+  function refresh() { return Promise.all([ms(), ma(), mt(), mapp(), mad()]); }
 
   if (loading) return null;
   if (!can("tech", "view")) return <AccessDenied label="Technology Utilization" />;
 
   const TABS: { key: Tab; label: string }[] = [
-    { key: "overview",    label: "Overview" },
+    { key: "overview",    label: "Overview"    },
     { key: "top-changes", label: "Top Changes" },
-    { key: "adoption",    label: "Adoption" },
+    { key: "adoption",    label: "Adoption"    },
+  ];
+
+  const statCards = [
+    { label: "Total Hours",    value: (summary?.total_hours ?? 0).toLocaleString() + "h", icon: Clock,   color: "bg-blue-50 text-blue-600" },
+    { label: "Applications",   value: summary?.total_apps   ?? 0,                          icon: Monitor, color: "bg-purple-50 text-purple-600" },
+    { label: "Users Tracked",  value: summary?.total_users  ?? 0,                          icon: Users,   color: "bg-green-50 text-green-600" },
+    { label: summary?.top_category ?? "Top Category",
+      value: summary?.top_app ?? "—",
+      icon: Cpu,
+      color: "bg-gray-50 text-gray-600",
+      sub: summary?.top_category },
   ];
 
   return (
@@ -469,41 +434,92 @@ export default function TechUtilizationPage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Technology Utilization</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Track application usage and category allocation across your organization</p>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Technology Utilization</h1>
+          <p className="text-sm text-gray-500 mt-0.5">Track application usage and category allocation across your organisation</p>
         </div>
-        <div className="flex items-center gap-2">
-          <PeriodSelect value={days} onChange={setDays} />
-          <button
-            onClick={refresh}
-            className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm"
-          >
-            <RefreshCw size={13} /> Refresh
-          </button>
-        </div>
+        <RefreshButton onRefresh={refresh} />
       </div>
 
-      {/* Summary cards */}
-      {summary && <SummaryCards data={summary} />}
+      {/* Filter chips */}
+      <div className="flex flex-wrap items-center gap-2 mb-5">
+        {/* Activity Date */}
+        <DateRangePicker value={dateRange} onChange={setDateRange} />
+        {/* Team / Group */}
+        <div className="relative">
+          <select value={groupId} onChange={e => { setGroupId(e.target.value); setEmployeeId(""); }}
+                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">All Teams</option>
+            {(groups ?? []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
+          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+        </div>
+
+        {/* User */}
+        <div className="relative">
+          <select value={employeeId} onChange={e => { setEmployeeId(e.target.value); setGroupId(""); }}
+                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">All Users</option>
+            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+            {((users as any[]) ?? []).filter((u: any) => u.is_active).map((u: any) => (
+              <option key={u.id} value={u.id}>{u.name}</option>
+            ))}
+          </select>
+          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+        </div>
+
+        {/* Category filter */}
+        <div className="relative">
+          <select value={categoryId} onChange={e => setCategoryId(e.target.value)}
+                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">All Categories</option>
+            {(categories ?? []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+        </div>
+
+        {(groupId || employeeId || categoryId) && (
+          <button onClick={() => { setGroupId(""); setEmployeeId(""); setCategoryId(""); }}
+                  className="text-xs text-gray-400 hover:text-gray-700 underline">
+            Clear filters
+          </button>
+        )}
+      </div>
+
+      {/* Stat cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+        {statCards.map((s, i) => (
+          <div key={i} className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+            <div className="flex items-center gap-2 mb-2">
+              <div className={`w-8 h-8 rounded-lg ${s.color.split(" ")[0]} flex items-center justify-center`}>
+                <s.icon size={15} className={s.color.split(" ")[1]} />
+              </div>
+              <p className="text-xs text-gray-500 font-medium uppercase tracking-wide truncate">{s.label}</p>
+            </div>
+            <p className="text-2xl font-bold text-gray-900 truncate">{s.value}</p>
+            {s.sub && <p className="text-xs text-gray-400 mt-0.5 truncate">Category: {s.sub}</p>}
+          </div>
+        ))}
+      </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1 mb-6 w-fit">
-        {TABS.map(t => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${
-              tab === t.key ? "bg-white text-gray-900 shadow-sm" : "text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="border-b border-gray-200 mb-5">
+        <div className="flex gap-0">
+          {TABS.map(t => (
+            <button key={t.key} onClick={() => setTab(t.key)}
+                    className={`px-5 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
+                      tab === t.key
+                        ? "border-blue-600 text-blue-600"
+                        : "border-transparent text-gray-500 hover:text-gray-800"
+                    }`}>
+              {t.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Tab content */}
       {tab === "overview" && (
-        <OverviewTab allocation={allocation ?? []} apps={apps ?? []} />
+        <OverviewTab allocation={allocation ?? []} apps={apps ?? []} categoryId={categoryId} />
       )}
       {tab === "top-changes" && (
         <TopChangesTab allocation={allocation ?? []} trends={trends ?? { trending_up: [], trending_down: [] }} />

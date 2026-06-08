@@ -83,7 +83,7 @@ export default function DevicesPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-gray-900 mb-1">All Devices</h1>
+      <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 mb-1">All Devices</h1>
       <p className="text-gray-500 text-sm mb-6">Live — refreshes every 5 seconds</p>
 
       {/* Stat cards — clickable filter */}

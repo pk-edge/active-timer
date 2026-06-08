@@ -105,9 +105,9 @@ export default function GroupsPage() {
 
   return (
     <div className="overflow-y-auto pr-1">
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Groups</h1>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Groups</h1>
           <p className="text-gray-500 text-sm mt-0.5">{groups?.length ?? 0} groups</p>
         </div>
         {can("groups", "create") && (
@@ -118,7 +118,8 @@ export default function GroupsPage() {
       </div>
 
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[600px]">
           <thead>
             <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
               <th className="text-left px-4 py-3 font-semibold">Group</th>
@@ -146,6 +147,7 @@ export default function GroupsPage() {
             {groups?.length === 0 && <tr><td colSpan={3} className="px-4 py-10 text-center text-gray-400 text-sm">No groups yet. Create one to get started.</td></tr>}
           </tbody>
         </table>
+        </div>
       </div>
 
       {creating && <CreateModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); mutate(); }} />}

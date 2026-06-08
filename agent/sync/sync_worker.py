@@ -37,6 +37,7 @@ class SyncWorker:
         self._trigger = shared["sync_trigger"]
         self._fails   = 0
         self._last_screenshot_sync = 0.0
+        self._last_policy_sync     = 0.0
 
         # Persistent HTTP client — TCP connection reused across every sync call.
         self._http = httpx.Client(
@@ -55,6 +56,7 @@ class SyncWorker:
                     break
                 self._sync_events()
                 self._maybe_sync_screenshots()
+                self._maybe_sync_policy()
         finally:
             self._http.close()
             log.info("SyncWorker stopped")
@@ -153,6 +155,32 @@ class SyncWorker:
         self._last_screenshot_sync = now
         for ss in self._db.get_pending_screenshots(limit=5):
             self._upload_screenshot(ss)
+
+    # ── Policy sync ──────────────────────────────────────────────────────────
+
+    def _maybe_sync_policy(self) -> None:
+        now = time.time()
+        if now - self._last_policy_sync < Config.POLICY_SYNC_SECS:
+            return
+        self._last_policy_sync = now
+
+        headers = self._auth_headers()
+        if not headers:
+            return
+        try:
+            r = self._http.get(Config.POLICY_ENDPOINT, headers=headers, timeout=10)
+            if r.status_code == 200:
+                entries = r.json()  # list[{id, pattern, target_type}]
+                mgr = self._shared.get("policy_manager")
+                if mgr:
+                    mgr.update(entries)
+                else:
+                    self._db.update_blocked_urls(entries)
+                log.debug("Policy synced: %d blocked URLs", len(entries))
+            elif r.status_code == 404:
+                pass  # endpoint not yet deployed — silent skip
+        except Exception as e:
+            log.debug("Policy sync failed: %s", e)
 
     def _upload_screenshot(self, ss: dict) -> None:
         headers = self._auth_headers()

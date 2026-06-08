@@ -18,14 +18,15 @@ log = logging.getLogger("main")
 
 import enrollment
 import autostart
-from db.local_db            import LocalDB
-from capture.window_watcher import WindowWatcher
-from capture.screenshotter  import Screenshotter
-from capture.input_monitor  import InputMonitor
-from capture.url_watcher    import UrlWatcher
-from sync.sync_worker       import SyncWorker
-from lock.lock_detector     import LockDetector
-from updater                import UpdateWorker
+from db.local_db               import LocalDB
+from capture.window_watcher    import WindowWatcher
+from capture.screenshotter     import Screenshotter
+from capture.input_monitor     import InputMonitor
+from capture.url_watcher       import UrlWatcher
+from sync.sync_worker          import SyncWorker
+from lock.lock_detector        import LockDetector
+from updater                   import UpdateWorker
+from policy.policy_manager     import PolicyManager
 
 pause_event = threading.Event()
 stop_event  = threading.Event()
@@ -70,16 +71,20 @@ def main() -> None:
     db.init_schema()
 
     # 2. Shared state
+    policy_manager = PolicyManager(db)
     shared = {
         "db":                  db,
         "pause_event":         pause_event,
         "stop_event":          stop_event,
-        "sync_trigger":        threading.Event(),  # set by capture threads → wakes SyncWorker immediately
+        "sync_trigger":        threading.Event(),
         "current_app":         "",
+        "current_title":       "",   # kept current by WindowWatcher for idle media detection
         "sync_status":         "enrolling",
         "current_session_id":  None,
         "new_session_event":   threading.Event(),
         "lock_time":           None,
+        "policy_manager":      policy_manager,
+        "today_active_secs":   0,    # populated after enrollment
     }
 
     # 3. Register auto-start on login
@@ -134,6 +139,7 @@ def _run_widget(shared: dict) -> None:
     """
     try:
         from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore    import QTimer
         from widget.floating_widget import FloatingWidget
 
         app = QApplication.instance() or QApplication(sys.argv)
@@ -143,7 +149,28 @@ def _run_widget(shared: dict) -> None:
         widget = FloatingWidget(shared)
         widget.show()
 
+        # ── Periodic daily flush — saves active seconds every 60s ────────────
+        # Guarantees time is not lost if the process is force-killed.
+        # IMPORTANT: baseline must match widget.elapsed at startup so the first
+        # flush only saves the NEW time, not the already-persisted baseline.
+        from PySide6.QtCore import QTimer
+        _last_flushed_secs = [widget.elapsed]  # start at baseline, not 0
+
+        def _flush_daily():
+            current = widget.elapsed
+            delta   = current - _last_flushed_secs[0]
+            if delta > 0:
+                shared["db"].flush_daily_secs(delta)
+                _last_flushed_secs[0] = current
+
+        flush_timer = QTimer()
+        flush_timer.setInterval(60_000)  # every 60 seconds
+        flush_timer.timeout.connect(_flush_daily)
+        flush_timer.start()
+
         def _on_quit():
+            flush_timer.stop()
+            _flush_daily()            # final flush on clean exit
             stop_event.set()
             shared["db"].end_session(
                 shared.get("current_session_id"), widget.elapsed

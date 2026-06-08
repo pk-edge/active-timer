@@ -234,3 +234,21 @@ class AppCategoryRule(Base):
     created_at:  Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     category: Mapped["AppCategory"] = relationship(back_populates="rules")
+
+
+# ── URL Blocking Policy ───────────────────────────────────────────────────────
+
+class BlockedUrl(Base):
+    __tablename__ = "blocked_urls"
+
+    id:          Mapped[uuid.UUID]        = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    company_id:  Mapped[uuid.UUID]        = mapped_column(UUID, ForeignKey("companies.id"))
+    pattern:     Mapped[str]              = mapped_column(String, nullable=False)
+    # 'all' = block for every device in company, 'device' = specific device
+    target_type: Mapped[str]              = mapped_column(String, default="all")
+    device_id:   Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("devices.id"), nullable=True)
+    employee_id: Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
+    notes:       Mapped[str | None]       = mapped_column(Text, nullable=True)
+    is_active:   Mapped[bool]             = mapped_column(Boolean, default=True)
+    created_by:  Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
+    created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

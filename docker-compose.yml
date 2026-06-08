@@ -1,4 +1,3 @@
-version: "3.9"
 # ── TimeTracker — local Docker deployment ─────────────────────────────────────
 #
 # Services:
@@ -90,7 +89,8 @@ services:
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      # curl is no longer installed in the backend image — use the venv Python.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
       interval: 15s
       timeout: 5s
       start_period: 20s
