@@ -1,0 +1,587 @@
+﻿<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+
+    <DirectoryRef Id="INSTALLDIR">
+      <Directory Id="dir_internal" Name="_internal">
+        <Directory Id="dir_internal_certifi" Name="certifi">
+        </Directory>
+        <Directory Id="dir_internal_psutil" Name="psutil">
+        </Directory>
+        <Directory Id="dir_internal_PySide6" Name="PySide6">
+          <Directory Id="dir_internal_PySide6_plugins" Name="plugins">
+            <Directory Id="dir_internal_PySide6_plugins_generic" Name="generic">
+            </Directory>
+            <Directory Id="dir_internal_PySide6_plugins_iconengines" Name="iconengines">
+            </Directory>
+            <Directory Id="dir_internal_PySide6_plugins_imageformats" Name="imageformats">
+            </Directory>
+            <Directory Id="dir_internal_PySide6_plugins_networkinformation" Name="networkinformation">
+            </Directory>
+            <Directory Id="dir_internal_PySide6_plugins_platforminputcontexts" Name="platforminputcontexts">
+            </Directory>
+            <Directory Id="dir_internal_PySide6_plugins_platforms" Name="platforms">
+            </Directory>
+            <Directory Id="dir_internal_PySide6_plugins_styles" Name="styles">
+            </Directory>
+            <Directory Id="dir_internal_PySide6_plugins_tls" Name="tls">
+            </Directory>
+          </Directory>
+          <Directory Id="dir_internal_PySide6_translations" Name="translations">
+          </Directory>
+        </Directory>
+        <Directory Id="dir_internal_pywin32_system32" Name="pywin32_system32">
+        </Directory>
+        <Directory Id="dir_internal_shiboken6" Name="shiboken6">
+        </Directory>
+        <Directory Id="dir_internal_win32" Name="win32">
+        </Directory>
+      </Directory>
+    </DirectoryRef>
+
+    <ComponentGroup Id="AgentFiles">
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\api_base.txt" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\base_library.zip" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\libcrypto-3.dll" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\libffi-8.dll" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\libssl-3.dll" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\python3.dll" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\python312.dll" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\select.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\sqlite3.dll" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\unicodedata.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\VCRUNTIME140.dll" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\VCRUNTIME140_1.dll" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_asyncio.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_bz2.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_ctypes.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_decimal.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_hashlib.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_lzma.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_multiprocessing.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_overlapped.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_queue.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_socket.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_sqlite3.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_ssl.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_uuid.pyd" />
+      </Component>
+      <Component Directory="dir_internal">
+        <File Source="$(var.DistDir)\_internal\_wmi.pyd" />
+      </Component>
+      <Component Directory="dir_internal_certifi">
+        <File Source="$(var.DistDir)\_internal\certifi\cacert.pem" />
+      </Component>
+      <Component Directory="dir_internal_certifi">
+        <File Source="$(var.DistDir)\_internal\certifi\py.typed" />
+      </Component>
+      <Component Directory="dir_internal_psutil">
+        <File Source="$(var.DistDir)\_internal\psutil\_psutil_windows.pyd" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\MSVCP140.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\MSVCP140_1.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\MSVCP140_2.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\opengl32sw.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\pyside6.abi3.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6Core.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6Gui.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6Network.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6OpenGL.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6Pdf.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6Qml.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6QmlMeta.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6QmlModels.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6QmlWorkerScript.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6Quick.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6Svg.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6VirtualKeyboard.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\Qt6Widgets.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\QtCore.pyd" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\QtGui.pyd" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\QtNetwork.pyd" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\QtWidgets.pyd" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\VCRUNTIME140.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6">
+        <File Source="$(var.DistDir)\_internal\PySide6\VCRUNTIME140_1.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_generic">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\generic\qtuiotouchplugin.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_iconengines">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\iconengines\qsvgicon.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qgif.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qicns.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qico.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qjpeg.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qpdf.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qsvg.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qtga.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qtiff.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qwbmp.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_imageformats">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\imageformats\qwebp.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_networkinformation">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\networkinformation\qnetworklistmanager.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_platforminputcontexts">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\platforminputcontexts\qtvirtualkeyboardplugin.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_platforms">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\platforms\qdirect2d.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_platforms">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\platforms\qminimal.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_platforms">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\platforms\qoffscreen.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_platforms">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\platforms\qwindows.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_styles">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\styles\qmodernwindowsstyle.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_tls">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\tls\qcertonlybackend.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_tls">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\tls\qopensslbackend.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_plugins_tls">
+        <File Source="$(var.DistDir)\_internal\PySide6\plugins\tls\qschannelbackend.dll" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_ar.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_bg.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_ca.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_cs.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_da.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_de.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_en.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_es.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_fa.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_fi.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_fr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_gd.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_he.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_hr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_hu.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_it.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_ja.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_ka.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_ko.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_lg.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_lv.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_nl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_nn.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_pl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_pt_BR.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_ru.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_sk.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_tr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_uk.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_zh_CN.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qtbase_zh_TW.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_ar.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_bg.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_ca.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_cs.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_da.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_de.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_en.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_es.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_fa.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_fi.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_fr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_gd.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_gl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_he.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_ar.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_bg.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_ca.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_cs.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_da.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_de.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_en.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_es.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_fr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_gl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_hr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_hu.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_it.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_ja.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_ka.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_ko.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_nl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_nn.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_pl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_pt_BR.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_ru.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_sk.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_sl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_tr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_uk.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_zh_CN.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_help_zh_TW.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_hr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_hu.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_it.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_ja.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_ka.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_ko.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_lg.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_lt.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_lv.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_nl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_nn.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_pl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_pt_BR.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_pt_PT.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_ru.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_sk.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_sl.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_sv.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_tr.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_uk.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_zh_CN.qm" />
+      </Component>
+      <Component Directory="dir_internal_PySide6_translations">
+        <File Source="$(var.DistDir)\_internal\PySide6\translations\qt_zh_TW.qm" />
+      </Component>
+      <Component Directory="dir_internal_pywin32_system32">
+        <File Source="$(var.DistDir)\_internal\pywin32_system32\pywintypes312.dll" />
+      </Component>
+      <Component Directory="dir_internal_shiboken6">
+        <File Source="$(var.DistDir)\_internal\shiboken6\MSVCP140.dll" />
+      </Component>
+      <Component Directory="dir_internal_shiboken6">
+        <File Source="$(var.DistDir)\_internal\shiboken6\Shiboken.pyd" />
+      </Component>
+      <Component Directory="dir_internal_shiboken6">
+        <File Source="$(var.DistDir)\_internal\shiboken6\shiboken6.abi3.dll" />
+      </Component>
+      <Component Directory="dir_internal_shiboken6">
+        <File Source="$(var.DistDir)\_internal\shiboken6\VCRUNTIME140.dll" />
+      </Component>
+      <Component Directory="dir_internal_shiboken6">
+        <File Source="$(var.DistDir)\_internal\shiboken6\VCRUNTIME140_1.dll" />
+      </Component>
+      <Component Directory="dir_internal_win32">
+        <File Source="$(var.DistDir)\_internal\win32\win32api.pyd" />
+      </Component>
+      <Component Directory="dir_internal_win32">
+        <File Source="$(var.DistDir)\_internal\win32\win32event.pyd" />
+      </Component>
+      <Component Directory="dir_internal_win32">
+        <File Source="$(var.DistDir)\_internal\win32\win32gui.pyd" />
+      </Component>
+      <Component Directory="dir_internal_win32">
+        <File Source="$(var.DistDir)\_internal\win32\win32security.pyd" />
+      </Component>
+      <Component Directory="dir_internal_win32">
+        <File Source="$(var.DistDir)\_internal\win32\win32ts.pyd" />
+      </Component>
+    </ComponentGroup>
+
+  </Fragment>
+</Wix>
+
