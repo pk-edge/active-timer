@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
+from app.core.ingest_queue import ingest_queue
 from app.db.base import init_db
 
 logging.basicConfig(
@@ -20,7 +21,9 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await ingest_queue.start()   # start async worker pool
     yield
+    await ingest_queue.stop()    # drain + shutdown workers cleanly
 
 
 def create_app() -> FastAPI:

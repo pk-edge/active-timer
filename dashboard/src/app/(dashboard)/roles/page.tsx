@@ -5,6 +5,7 @@ import { Shield, Plus, Pencil, Trash2, X } from "lucide-react";
 import { getRoles, getModules, createRole, updateRole, deleteRole } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import type { Role, ModuleDef, Permission } from "@/types";
 
 const SCOPES = [
@@ -57,12 +58,12 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">Role name</label>
               <input value={name} onChange={e => setName(e.target.value)} disabled={role?.is_system}
-                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">Description</label>
               <input value={desc ?? ""} onChange={e => setDesc(e.target.value)}
-                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
             </div>
           </div>
 
@@ -71,7 +72,7 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
             <div className="grid grid-cols-3 gap-2">
               {SCOPES.map(s => (
                 <button key={s.value} onClick={() => setScope(s.value)}
-                        className={`text-left border rounded-lg px-3 py-2 transition ${scope === s.value ? "border-blue-400 ring-2 ring-blue-100" : "border-gray-200 hover:border-gray-300"}`}>
+                        className={`text-left border rounded-lg px-3 py-2 transition ${scope === s.value ? "border-brand-400 ring-2 ring-blue-100" : "border-gray-200 hover:border-gray-300"}`}>
                   <p className="text-sm font-medium text-gray-800">{s.label}</p>
                   <p className="text-[11px] text-gray-400">{s.hint}</p>
                 </button>
@@ -98,7 +99,7 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
                         <td key={a} className="text-center">
                           {m.actions.includes(a) ? (
                             <input type="checkbox" checked={perms.has(`${m.key}:${a}`)} onChange={() => toggle(m.key, a)}
-                                   className="w-4 h-4 accent-blue-600" />
+                                   className="w-4 h-4 accent-[#4a0f70]" />
                           ) : <span className="text-gray-200">—</span>}
                         </td>
                       ))}
@@ -115,7 +116,7 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
         <div className="flex justify-end gap-2 px-5 py-4 border-t border-gray-100">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900">Cancel</button>
           <button onClick={save} disabled={saving || !name}
-                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50">
+                  className="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700 disabled:opacity-50">
             {saving ? "Saving…" : "Save role"}
           </button>
         </div>
@@ -128,15 +129,19 @@ export default function RolesPage() {
   const { loading, can } = useUser();
   const { data: roles, mutate } = useSWR<Role[]>("roles", getRoles);
   const { data: modules } = useSWR<ModuleDef[]>("modules", getModules);
-  const [editing, setEditing] = useState<Role | null | "new">(null);
+  const [editing,       setEditing]      = useState<Role | null | "new">(null);
+  const [pendingDelete, setPendingDelete] = useState<Role | null>(null);
+  const [deleting,      setDeleting]      = useState(false);
 
   if (loading) return null;
   if (!can("roles", "view")) return <AccessDenied label="Roles" />;
 
-  async function onDelete(r: Role) {
-    if (!confirm(`Delete role "${r.name}"?`)) return;
-    try { await deleteRole(r.id); mutate(); }
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try { await deleteRole(pendingDelete.id); mutate(); setPendingDelete(null); }
     catch (e) { alert(String(e instanceof Error ? e.message : e)); }
+    finally { setDeleting(false); }
   }
 
   return (
@@ -147,7 +152,7 @@ export default function RolesPage() {
           <p className="text-gray-500 text-sm mt-0.5">Define what each role can do and see</p>
         </div>
         {can("roles", "create") && (
-          <button onClick={() => setEditing("new")} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
+          <button onClick={() => setEditing("new")} className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-700">
             <Plus size={15} /> New role
           </button>
         )}
@@ -179,10 +184,10 @@ export default function RolesPage() {
                 <td className="px-4 py-3 text-gray-500">{r.permissions.length} permissions</td>
                 <td className="px-4 py-3 text-right whitespace-nowrap">
                   {can("roles", "edit") && !r.is_system && (
-                    <button onClick={() => setEditing(r)} className="text-gray-400 hover:text-blue-600 p-1"><Pencil size={15} /></button>
+                    <button onClick={() => setEditing(r)} className="text-gray-400 hover:text-brand-600 p-1"><Pencil size={15} /></button>
                   )}
                   {can("roles", "delete") && !r.is_system && (
-                    <button onClick={() => onDelete(r)} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={15} /></button>
+                    <button onClick={() => setPendingDelete(r)} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={15} /></button>
                   )}
                 </td>
               </tr>
@@ -198,6 +203,16 @@ export default function RolesPage() {
                     onClose={() => setEditing(null)}
                     onSaved={() => { setEditing(null); mutate(); }} />
       )}
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title={`Delete role "${pendingDelete?.name}"?`}
+        message="Users assigned to this role will keep their assignment but the role won't be usable for new assignments."
+        confirmLabel="Delete Role"
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

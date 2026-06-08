@@ -30,7 +30,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
             <Menu size={20} />
           </button>
           <div className="lg:hidden flex items-center gap-2">
-            <div className="w-6 h-6 bg-blue-600 rounded-lg flex items-center justify-center">
+            <div className="w-6 h-6 bg-brand-600 rounded-lg flex items-center justify-center">
               <Timer size={12} className="text-white" />
             </div>
             <span className="font-semibold text-sm text-gray-900">TimeTracker</span>

@@ -21,7 +21,11 @@ async def run() -> None:
         for company in companies:
             # ── Super Admin ──────────────────────────────────────────────────
             sa = (await db.execute(
-                select(Role).where(Role.company_id == company.id, Role.name == "Super Admin")
+                select(Role).where(
+                    Role.company_id == company.id,
+                    Role.name == "Super Admin",
+                    Role.is_deleted == False,  # noqa: E712
+                )
             )).scalar_one_or_none()
             if not sa:
                 sa = Role(
@@ -45,7 +49,11 @@ async def run() -> None:
 
             # ── Viewer (group-scoped, read-only starter role) ────────────────
             viewer = (await db.execute(
-                select(Role).where(Role.company_id == company.id, Role.name == "Viewer")
+                select(Role).where(
+                    Role.company_id == company.id,
+                    Role.name == "Viewer",
+                    Role.is_deleted == False,  # noqa: E712
+                )
             )).scalar_one_or_none()
             if not viewer:
                 viewer = Role(

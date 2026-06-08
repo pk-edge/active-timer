@@ -44,7 +44,7 @@ function AddMemberModal({ groupId, existing, onClose, onSaved }: {
         <div className="flex border-b border-gray-100">
           {(["employee", "device"] as const).map(t => (
             <button key={t} onClick={() => setTab(t)}
-                    className={`flex-1 py-2.5 text-sm font-medium capitalize transition ${tab === t ? "text-blue-600 border-b-2 border-blue-600" : "text-gray-500"}`}>
+                    className={`flex-1 py-2.5 text-sm font-medium capitalize transition ${tab === t ? "text-brand-600 border-b-2 border-brand-600" : "text-gray-500"}`}>
               {t === "employee" ? "Users" : "Devices"}
             </button>
           ))}
@@ -53,7 +53,7 @@ function AddMemberModal({ groupId, existing, onClose, onSaved }: {
           <div className="relative">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search…"
-                   className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-300" />
+                   className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
           </div>
         </div>
         <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-1">
@@ -110,7 +110,7 @@ export default function GroupDetailPage({ params }: { params: Promise<{ id: stri
           <p className="text-gray-500 text-sm mt-0.5">{group?.member_count ?? 0} members{group?.description ? ` · ${group.description}` : ""}</p>
         </div>
         {can("groups", "edit") && group && (
-          <button onClick={() => setAdding(true)} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
+          <button onClick={() => setAdding(true)} className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-700">
             <UserPlus size={15} /> Add member
           </button>
         )}

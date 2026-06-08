@@ -67,7 +67,7 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
       <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
         <div>
           <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-            <Laptop size={20} className="text-blue-500 shrink-0" />
+            <Laptop size={20} className="text-brand-500 shrink-0" />
             {device ? device.hostname : `Device — ${id.slice(0, 8)}`}
           </h1>
           <div className="flex items-center gap-3 mt-1 flex-wrap">
@@ -106,7 +106,7 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
             value={selDate}
             max={today}
             onChange={e => setSelDate(e.target.value)}
-            className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400"
+            className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
           />
         </div>
       </div>

@@ -20,7 +20,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
     <button
       onClick={() => onChange(!checked)}
       className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
-        checked ? "bg-blue-600" : "bg-gray-300"
+        checked ? "bg-brand-600" : "bg-gray-300"
       }`}
     >
       <span
@@ -56,7 +56,7 @@ function SelectInput({ value, onChange, options }: {
     <select
       value={value}
       onChange={e => onChange(e.target.value)}
-      className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400"
+      className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
     >
       {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>
@@ -109,7 +109,7 @@ export default function SettingsPage() {
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
             saved
               ? "bg-green-50 text-green-600 border border-green-200"
-              : "bg-blue-600 text-white hover:bg-blue-700"
+              : "bg-brand-600 text-white hover:bg-brand-700"
           }`}
         >
           {saved ? <><Check size={14} /> Saved</> : "Save changes"}
@@ -126,7 +126,7 @@ export default function SettingsPage() {
                 onClick={() => setTab(t.key)}
                 className={`flex items-center justify-between w-full px-3 py-2.5 rounded-lg text-sm transition ${
                   tab === t.key
-                    ? "bg-blue-50 text-blue-700 font-medium"
+                    ? "bg-brand-50 text-brand-700 font-medium"
                     : "text-gray-600 hover:bg-gray-100 hover:text-gray-900"
                 }`}
               >
@@ -134,7 +134,7 @@ export default function SettingsPage() {
                   {t.icon}
                   {t.label}
                 </span>
-                {tab === t.key && <ChevronRight size={13} className="text-blue-400" />}
+                {tab === t.key && <ChevronRight size={13} className="text-brand-400" />}
               </button>
             ))}
           </nav>
@@ -154,7 +154,7 @@ export default function SettingsPage() {
                   type="text"
                   value={orgName}
                   onChange={e => setOrgName(e.target.value)}
-                  className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 w-52 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400"
+                  className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 w-52 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
                 />
               </SettingRow>
 
@@ -178,7 +178,7 @@ export default function SettingsPage() {
                   type="time"
                   value={workStart}
                   onChange={e => setWorkStart(e.target.value)}
-                  className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400"
+                  className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
                 />
               </SettingRow>
 
@@ -187,7 +187,7 @@ export default function SettingsPage() {
                   type="time"
                   value={workEnd}
                   onChange={e => setWorkEnd(e.target.value)}
-                  className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400"
+                  className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
                 />
               </SettingRow>
             </div>

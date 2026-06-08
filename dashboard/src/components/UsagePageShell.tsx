@@ -78,7 +78,7 @@ export function SmartSearchBar({ value, onChange, placeholder }: SearchBarProps)
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full pl-11 pr-10 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 shadow-sm"
+        className="w-full pl-11 pr-10 py-2.5 bg-white border border-gray-200 rounded-xl text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm"
       />
       {value && (
         <button onClick={() => onChange("")}
@@ -144,7 +144,7 @@ export function FilterBar({
       {/* Team / Group */}
       <div className="relative shrink-0">
         <select value={groupId} onChange={e => { setGroupId(e.target.value); setEmployeeId(""); }}
-                className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300 shadow-sm">
+                className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm">
           <option value="">All Teams</option>
           {(groups ?? []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
@@ -154,7 +154,7 @@ export function FilterBar({
       {/* User */}
       <div className="relative shrink-0">
         <select value={employeeId} onChange={e => { setEmployeeId(e.target.value); setGroupId(""); }}
-                className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300 shadow-sm">
+                className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm">
           <option value="">All Users</option>
           {(users ?? []).filter(u => u.is_active).map(u => (
             <option key={u.id} value={u.id}>{u.name}</option>
@@ -167,7 +167,7 @@ export function FilterBar({
       {showProdFilter && setProductivity && (
         <div className="relative shrink-0">
           <select value={productivity} onChange={e => setProductivity(e.target.value)}
-                  className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300 shadow-sm">
+                  className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm">
             {PROD_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
           <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
@@ -215,7 +215,7 @@ export function DetailTabs({
         <button key={t} onClick={() => onSelect(t)}
                 className={`px-4 py-2.5 text-sm font-medium transition border-b-2 -mb-px ${
                   active === t
-                    ? "border-blue-600 text-blue-600"
+                    ? "border-brand-600 text-brand-600"
                     : "border-transparent text-gray-500 hover:text-gray-700"
                 }`}>
           {t}
@@ -228,7 +228,7 @@ export function DetailTabs({
 // ── Duration bar row ─────────────────────────────────────────────────────────
 
 export function DurationRow({
-  label, duration_secs, pct, color = "#3b82f6", sub,
+  label, duration_secs, pct, color = "#4a0f70", sub,
 }: { label: string; duration_secs: number; pct: number; color?: string; sub?: string }) {
   return (
     <div className="py-2.5 border-b border-gray-100 last:border-0">

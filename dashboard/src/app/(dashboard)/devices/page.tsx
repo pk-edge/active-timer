@@ -21,11 +21,11 @@ function StatCard({
       onClick={onClick}
       className={`bg-white border rounded-xl p-4 flex items-center gap-4 w-full text-left transition ${
         active
-          ? "border-blue-400 ring-2 ring-blue-100 shadow-sm"
+          ? "border-brand-400 ring-2 ring-blue-100 shadow-sm"
           : "border-gray-200 hover:border-gray-300 hover:shadow-sm"
       }`}
     >
-      <div className={`${active ? "text-blue-500" : "text-gray-400"}`}>{icon}</div>
+      <div className={`${active ? "text-brand-500" : "text-gray-400"}`}>{icon}</div>
       <div>
         <p className={`text-2xl font-semibold ${color}`}>{value}</p>
         <p className="text-gray-500 text-xs">{label}</p>
@@ -121,7 +121,7 @@ export default function DevicesPage() {
           placeholder="Search by hostname, employee or platform…"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          className="w-full pl-9 pr-9 py-2.5 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:border-blue-400 transition"
+          className="w-full pl-9 pr-9 py-2.5 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
         />
         {search && (
           <button

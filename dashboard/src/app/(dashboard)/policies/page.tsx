@@ -12,6 +12,7 @@ import {
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import type { BlockedUrl, Device, User } from "@/types";
 
 // ── Detected-URL multi-select picker ─────────────────────────────────────────
@@ -101,7 +102,7 @@ function DetectedPicker({ selected, onToggle, existing }: DetectedPickerProps) {
             onClick={() => filtered.filter(d => !existing.has(d.host)).forEach(d => {
               if (!selected.has(d.host)) onToggle(d.host);
             })}
-            className="text-xs text-blue-600 hover:underline"
+            className="text-xs text-brand-600 hover:underline"
           >
             Select all visible
           </button>
@@ -365,7 +366,7 @@ function TargetBadge({ rule, devices, users }: { rule: BlockedUrl; devices: Devi
   if (rule.target_type === "device") {
     const dev = devices.find(d => d.id === rule.device_id);
     return (
-      <span className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full">
+      <span className="inline-flex items-center gap-1 text-xs bg-brand-50 text-brand-700 border border-brand-200 px-2 py-0.5 rounded-full">
         <Monitor size={10} /> {dev?.hostname ?? "Device"}
       </span>
     );
@@ -409,10 +410,13 @@ export default function PoliciesPage() {
     mutate();
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm("Delete this URL block rule?")) return;
-    await deleteBlockedUrl(id);
-    mutate();
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  async function confirmDelete() {
+    if (!pendingDeleteId) return;
+    setDeleting(true);
+    try { await deleteBlockedUrl(pendingDeleteId); mutate(); setPendingDeleteId(null); }
+    finally { setDeleting(false); }
   }
 
   if (loading) return null;
@@ -544,10 +548,10 @@ export default function PoliciesPage() {
                   <td className="px-5 py-3">
                     <div className="flex items-center gap-1 justify-end">
                       <button onClick={() => { setEditing(rule); setShowForm(true); }}
-                              className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition">
+                              className="p-1.5 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition">
                         <Edit2 size={13} />
                       </button>
-                      <button onClick={() => handleDelete(rule.id)}
+                      <button onClick={() => setPendingDeleteId(rule.id)}
                               className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition">
                         <Trash2 size={13} />
                       </button>
@@ -574,6 +578,15 @@ export default function PoliciesPage() {
         </div>
       </div>
 
+      <ConfirmDialog
+        open={!!pendingDeleteId}
+        title="Delete this URL block rule?"
+        message="This rule will be removed and the domain will no longer be blocked on agents."
+        confirmLabel="Delete Rule"
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDeleteId(null)}
+      />
       {showForm && (
         <RuleForm
           initial={editing}

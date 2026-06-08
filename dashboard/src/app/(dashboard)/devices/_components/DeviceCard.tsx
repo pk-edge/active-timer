@@ -11,7 +11,7 @@ export default function DeviceCard({ device }: { device: Device }) {
 
   return (
     <Link href={`/devices/${device.id}`}>
-      <div className="bg-white border border-gray-200 rounded-xl p-4 hover:border-blue-300 hover:shadow-sm transition cursor-pointer">
+      <div className="bg-white border border-gray-200 rounded-xl p-4 hover:border-brand-300 hover:shadow-sm transition cursor-pointer">
         <div className="flex items-start justify-between mb-3">
           <div>
             <p className="font-medium text-sm text-gray-900">{device.hostname}</p>

@@ -22,7 +22,7 @@ function timeAgo(dateStr: string | null): string {
 const TYPE_CONFIG: Record<string, { color: string; dot: string; href: string }> = {
   approval_request: {
     color: "from-blue-500 to-indigo-600",
-    dot:   "bg-blue-500",
+    dot:   "bg-brand-500",
     href:  "/users?tab=pending",
   },
 };
@@ -34,7 +34,7 @@ function NotifItem({ n, onRead }: { n: Notification; onRead: () => void }) {
     <Link
       href={cfg.href}
       onClick={onRead}
-      className={`flex items-start gap-3.5 px-4 py-3.5 hover:bg-gray-50/80 transition-colors border-b border-gray-100/80 last:border-0 group ${!n.is_read ? "bg-blue-50/40" : ""}`}
+      className={`flex items-start gap-3.5 px-4 py-3.5 hover:bg-gray-50/80 transition-colors border-b border-gray-100/80 last:border-0 group ${!n.is_read ? "bg-brand-50/40" : ""}`}
     >
       {/* Avatar */}
       <div className={`relative shrink-0 w-11 h-11 rounded-full bg-gradient-to-br ${cfg.color} flex items-center justify-center shadow-sm`}>
@@ -50,14 +50,14 @@ function NotifItem({ n, onRead }: { n: Notification; onRead: () => void }) {
           {n.title}
         </p>
         <p className="text-xs text-gray-500 mt-0.5 truncate">{n.body}</p>
-        <p className={`text-[11px] mt-1.5 font-medium ${!n.is_read ? "text-blue-500" : "text-gray-400"}`}>
+        <p className={`text-[11px] mt-1.5 font-medium ${!n.is_read ? "text-brand-500" : "text-gray-400"}`}>
           {timeAgo(n.created_at)}
         </p>
       </div>
 
       {/* Approve badge */}
       {n.type === "approval_request" && (
-        <span className="shrink-0 text-[10px] font-semibold px-2 py-1 bg-blue-100 text-blue-700 rounded-full self-center opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+        <span className="shrink-0 text-[10px] font-semibold px-2 py-1 bg-brand-100 text-brand-700 rounded-full self-center opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
           Review →
         </span>
       )}
@@ -120,7 +120,7 @@ export default function NotificationBell() {
         className={`relative p-2.5 rounded-xl text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition-colors ${shake ? "animate-[wiggle_0.6s_ease-in-out]" : ""}`}
         aria-label="Notifications"
       >
-        <Bell size={20} className={open ? "text-blue-600" : ""} />
+        <Bell size={20} className={open ? "text-brand-600" : ""} />
         {unread > 0 && (
           <span className="absolute top-1.5 right-1.5 min-w-[18px] h-[18px] bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center px-1 shadow-sm animate-pulse">
             {unread > 9 ? "9+" : unread}
@@ -142,7 +142,7 @@ export default function NotificationBell() {
           <div className="flex items-center gap-2.5">
             <h3 className="font-bold text-gray-900 text-base">Notifications</h3>
             {unread > 0 && (
-              <span className="text-xs font-semibold bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full">
+              <span className="text-xs font-semibold bg-brand-100 text-brand-600 px-2 py-0.5 rounded-full">
                 {unread} new
               </span>
             )}
@@ -151,7 +151,7 @@ export default function NotificationBell() {
             {unread > 0 && (
               <button
                 onClick={markAllRead}
-                className="flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-700 font-semibold px-2.5 py-1.5 hover:bg-blue-50 rounded-lg transition"
+                className="flex items-center gap-1.5 text-xs text-brand-600 hover:text-brand-700 font-semibold px-2.5 py-1.5 hover:bg-brand-50 rounded-lg transition"
               >
                 <CheckCheck size={13} />
                 Mark all read
@@ -207,7 +207,7 @@ export default function NotificationBell() {
             <Link
               href="/users?tab=pending"
               onClick={() => setOpen(false)}
-              className="block text-center text-xs font-semibold text-blue-600 hover:text-blue-700 py-1 transition"
+              className="block text-center text-xs font-semibold text-brand-600 hover:text-brand-700 py-1 transition"
             >
               View all pending approvals →
             </Link>

@@ -93,8 +93,8 @@ if sys.platform == "darwin":
         icon=None,          # replace with "assets/icon.icns" when available
         bundle_identifier="com.timetracker.agent",
         info_plist={
-            "CFBundleShortVersionString": "1.0.2",
-            "CFBundleVersion":            "1.0.2",
+            "CFBundleShortVersionString": "1.1.3",
+            "CFBundleVersion":            "1.1.3",
             "NSHighResolutionCapable":    True,
             "NSAppleEventsUsageDescription":
                 "TimeTracker reads the active window to track application usage.",

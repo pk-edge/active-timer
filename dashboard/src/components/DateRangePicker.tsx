@@ -53,7 +53,7 @@ export default function DateRangePicker({ value, onChange }: Props) {
       {/* Trigger */}
       <button
         onClick={() => setOpen(x => !x)}
-        className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-700 hover:border-blue-300 shadow-sm transition"
+        className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-700 hover:border-brand-300 shadow-sm transition"
       >
         <CalendarDays size={14} className="text-gray-400 shrink-0" />
         <span className="font-medium">{preset}</span>
@@ -79,7 +79,7 @@ export default function DateRangePicker({ value, onChange }: Props) {
                     onClick={() => applyPreset(p)}
                     className={`text-left px-3 py-1.5 rounded-lg text-sm transition ${
                       preset === p.label
-                        ? "bg-blue-50 text-blue-700 font-medium"
+                        ? "bg-brand-50 text-brand-700 font-medium"
                         : "text-gray-600 hover:bg-gray-50"
                     }`}
                   >
@@ -100,7 +100,7 @@ export default function DateRangePicker({ value, onChange }: Props) {
                     value={value.since}
                     max={value.until}
                     onChange={e => onChange({ ...value, since: e.target.value })}
-                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300"
                   />
                 </div>
                 <div>
@@ -111,13 +111,13 @@ export default function DateRangePicker({ value, onChange }: Props) {
                     min={value.since}
                     max={today()}
                     onChange={e => onChange({ ...value, until: e.target.value })}
-                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-300"
+                    className="w-full border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300"
                   />
                 </div>
               </div>
               <button
                 onClick={() => setOpen(false)}
-                className="mt-2 w-full bg-blue-600 text-white text-sm py-1.5 rounded-lg hover:bg-blue-700 transition font-medium"
+                className="mt-2 w-full bg-brand-600 text-white text-sm py-1.5 rounded-lg hover:bg-brand-700 transition font-medium"
               >
                 Apply
               </button>

@@ -3,10 +3,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Building2, Users2,
-  Monitor, BarChart2, Settings, Timer, LogOut, ScrollText,
+  Monitor, BarChart2, Settings, LogOut, ScrollText,
   UserCog, FolderKanban, Shield, DownloadCloud, ClipboardList, Home,
   Cpu, Tag, Globe, ShieldAlert, X,
 } from "lucide-react";
+import EdgeLogo from "@/components/EdgeLogo";
 import clsx from "clsx";
 import { adminLogout } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
@@ -100,11 +101,11 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           open ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         )}
       >
-        <div className="flex items-center gap-2.5 px-5 py-5 border-b border-gray-200">
-          <div className="w-7 h-7 bg-blue-600 rounded-lg flex items-center justify-center">
-            <Timer size={14} className="text-white" />
-          </div>
-          <span className="font-semibold text-sm text-gray-900">TimeTracker</span>
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-200">
+          <EdgeLogo variant="icon" size={30} />
+          <span className="font-bold text-sm tracking-tight" style={{ color: "#4a0f70" }}>
+            TimeTracker
+          </span>
           {/* Close button — mobile only */}
           <button
             onClick={onClose}
@@ -137,7 +138,7 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
                         className={clsx(
                           "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition",
                           active
-                            ? "bg-blue-50 text-blue-600 font-medium"
+                            ? "bg-brand-50 text-brand-600 font-medium"
                             : "text-gray-600 hover:text-gray-900 hover:bg-gray-50",
                         )}
                       >

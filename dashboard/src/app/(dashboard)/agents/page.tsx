@@ -58,8 +58,8 @@ function UploadForm({ onUploaded }: { onUploaded: () => void }) {
         </div>
       </div>
       <div className="flex items-center gap-3 mt-3">
-        <input ref={fileRef} type="file" className="block text-sm text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-blue-50 file:text-blue-600" />
-        <button onClick={submit} disabled={busy} className="flex items-center gap-1.5 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 ml-auto">
+        <input ref={fileRef} type="file" className="block text-sm text-gray-600 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-brand-50 file:text-brand-600" />
+        <button onClick={submit} disabled={busy} className="flex items-center gap-1.5 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-700 disabled:opacity-50 ml-auto">
           <Upload size={14} /> {busy ? "Uploading…" : "Upload"}
         </button>
       </div>
@@ -105,7 +105,7 @@ export default function AgentsPage() {
                 <p className="text-xs text-gray-400">{a ? `Active: v${a.version} (${a.installer_type.toUpperCase()})` : "No active build"}</p>
               </div>
               {a && can("agents", "view") && (
-                <button onClick={() => download(a.id)} className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700">
+                <button onClick={() => download(a.id)} className="flex items-center gap-1.5 text-sm text-brand-600 hover:text-brand-700">
                   <Download size={14} /> Download
                 </button>
               )}
@@ -147,9 +147,9 @@ export default function AgentsPage() {
                     : <span className="text-xs text-gray-400">inactive</span>}
                 </td>
                 <td className="px-4 py-3 text-right whitespace-nowrap">
-                  <button onClick={() => download(i.id)} className="text-gray-400 hover:text-blue-600 p-1"><Download size={15} /></button>
+                  <button onClick={() => download(i.id)} className="text-gray-400 hover:text-brand-600 p-1"><Download size={15} /></button>
                   {can("agents", "edit") && !i.is_active && (
-                    <button onClick={() => activate(i.id)} className="text-xs text-blue-600 hover:text-blue-700 ml-2">Activate</button>
+                    <button onClick={() => activate(i.id)} className="text-xs text-brand-600 hover:text-brand-700 ml-2">Activate</button>
                   )}
                 </td>
               </tr>

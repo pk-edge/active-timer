@@ -9,7 +9,7 @@ const ACTION_COLOR: Record<string, string> = {
   create: "bg-green-50 text-green-700",
   delete: "bg-red-50 text-red-700",
   deactivate: "bg-red-50 text-red-700",
-  update: "bg-blue-50 text-blue-700",
+  update: "bg-brand-50 text-brand-700",
   activate: "bg-amber-50 text-amber-700",
   upload: "bg-purple-50 text-purple-700",
 };

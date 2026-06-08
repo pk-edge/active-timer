@@ -1,11 +1,13 @@
 "use client";
+import { useState } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
   Monitor, BarChart2, Users2, DownloadCloud,
   Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon,
-  Laptop, AppWindow, Globe,
+  Laptop, AppWindow, Globe, ChevronDown, CalendarDays,
 } from "lucide-react";
+import { format, subDays, startOfMonth, startOfYear, subMonths } from "date-fns";
 import {
   getOverview, getRealtime, getHomeAppUsage, getMyStats,
   fmtSeconds, fmtTime,
@@ -14,6 +16,113 @@ import { useUser } from "@/hooks/useUser";
 import { AccessDenied, StatusDonut, UsagePie } from "@/components/charts";
 import RefreshButton from "@/components/RefreshButton";
 import type { Me, OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
+
+// ── Stat period filter ────────────────────────────────────────────────────────
+
+const TODAY = () => format(new Date(), "yyyy-MM-dd");
+
+const STAT_PRESETS = [
+  { label: "Today",         getSince: () => TODAY(),                                       getUntil: () => TODAY() },
+  { label: "Yesterday",     getSince: () => format(subDays(new Date(), 1), "yyyy-MM-dd"), getUntil: () => format(subDays(new Date(), 1), "yyyy-MM-dd") },
+  { label: "Last 7 Days",   getSince: () => format(subDays(new Date(), 6), "yyyy-MM-dd"), getUntil: () => TODAY() },
+  { label: "Last 30 Days",  getSince: () => format(subDays(new Date(), 29), "yyyy-MM-dd"), getUntil: () => TODAY() },
+  { label: "This Month",    getSince: () => format(startOfMonth(new Date()), "yyyy-MM-dd"), getUntil: () => TODAY() },
+  { label: "Last Month",    getSince: () => format(startOfMonth(subMonths(new Date(), 1)), "yyyy-MM-dd"), getUntil: () => format(new Date(new Date().getFullYear(), new Date().getMonth(), 0), "yyyy-MM-dd") },
+  { label: "This Year",     getSince: () => format(startOfYear(new Date()), "yyyy-MM-dd"), getUntil: () => TODAY() },
+  { label: "Custom",        getSince: () => TODAY(), getUntil: () => TODAY() },
+];
+
+function StatPeriodFilter({
+  sinceDate, untilDate,
+  onSinceChange, onUntilChange,
+}: {
+  sinceDate: string; untilDate: string;
+  onSinceChange: (v: string) => void; onUntilChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [customMode, setCustomMode] = useState(false);
+
+  const activePreset = STAT_PRESETS.find(
+    p => p.label !== "Custom" && p.getSince() === sinceDate && p.getUntil() === untilDate
+  );
+  const displayLabel = activePreset?.label ?? "Custom";
+  const displayRange = sinceDate === untilDate ? sinceDate : `${sinceDate} – ${untilDate}`;
+
+  function applyPreset(p: typeof STAT_PRESETS[number]) {
+    if (p.label === "Custom") {
+      setCustomMode(true);
+      return;
+    }
+    setCustomMode(false);
+    onSinceChange(p.getSince());
+    onUntilChange(p.getUntil());
+    setOpen(false);
+  }
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen(x => !x)}
+        className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-700 hover:border-brand-300 shadow-sm transition"
+      >
+        <CalendarDays size={14} className="text-gray-400 shrink-0" />
+        <span className="font-medium">{displayLabel}</span>
+        <span className="text-gray-400 text-xs hidden sm:inline">{displayRange}</span>
+        <ChevronDown size={12} className={`text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full mt-1.5 z-40 bg-white border border-gray-200 rounded-xl shadow-xl w-72">
+            <div className="p-3 border-b border-gray-100">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Period</p>
+              <div className="grid grid-cols-2 gap-1">
+                {STAT_PRESETS.map(p => (
+                  <button
+                    key={p.label}
+                    onClick={() => applyPreset(p)}
+                    className={`text-left px-3 py-1.5 rounded-lg text-sm transition ${
+                      displayLabel === p.label
+                        ? "bg-brand-50 text-brand-700 font-medium"
+                        : "text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Custom inputs */}
+            {(customMode || displayLabel === "Custom") && (
+              <div className="p-3">
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Custom Range</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">From</label>
+                    <input type="date" value={sinceDate} max={untilDate}
+                           onChange={e => onSinceChange(e.target.value)}
+                           className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">To</label>
+                    <input type="date" value={untilDate} min={sinceDate} max={TODAY()}
+                           onChange={e => onUntilChange(e.target.value)}
+                           className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
+                  </div>
+                </div>
+                <button onClick={() => setOpen(false)}
+                        className="mt-2 w-full bg-brand-600 text-white text-sm py-1.5 rounded-lg hover:bg-brand-700 transition font-medium">
+                  Apply
+                </button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 const STATUS_STYLE: Record<string, string> = {
   active:   "bg-green-50 text-green-700 border-green-200",
@@ -45,14 +154,26 @@ function StatCard({ label, value, sub, color = "text-gray-900" }: {
 
 function AdminHome({ me }: { me: Me }) {
   const { can } = useUser();
-  const today = new Date().toLocaleDateString("en-US", {
+  const todayStr = format(new Date(), "yyyy-MM-dd");
+  const todayLabel = new Date().toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric",
   });
 
+  const [sinceDate, setSinceDate] = useState(todayStr);
+  const [untilDate, setUntilDate] = useState(todayStr);
+
+  const isToday = sinceDate === todayStr && untilDate === todayStr;
+  const activeLabel = isToday
+    ? "Active today"
+    : sinceDate === untilDate ? `Active on ${sinceDate}` : "Active in period";
+  const avgLabel = isToday
+    ? "Avg active / device"
+    : "Avg active / device (period)";
+
   const { data: stats, mutate } = useSWR<OverviewStats>(
-    "home-overview",
-    () => getOverview(undefined, 7),
-    { refreshInterval: 15_000 },
+    ["home-overview", sinceDate, untilDate],
+    () => getOverview(undefined, 7, sinceDate, untilDate),
+    { refreshInterval: 60_000 },
   );
   const { data: realtime } = useSWR<RealtimeDevice[]>(
     "home-realtime",
@@ -65,7 +186,11 @@ function AdminHome({ me }: { me: Me }) {
   );
 
   const s = stats?.status ?? { active: 0, passive: 0, inactive: 0 };
-  const avgHrs = ((stats?.avg_active_seconds_today ?? 0) / 3600).toFixed(1);
+  const avgSecs = stats?.avg_active_seconds_today ?? 0;
+  const avgHrs  = (avgSecs / 3600).toFixed(1);
+  const avgMins = Math.round(avgSecs / 60);
+  // Show minutes when < 1 hour for better precision
+  const avgDisplay = avgSecs < 3600 ? `${avgMins}m` : `${avgHrs}h`;
 
   const QUICK_ACTIONS = [
     { href: "/devices",  label: "Devices",  icon: Monitor,      module: "devices" },
@@ -83,7 +208,7 @@ function AdminHome({ me }: { me: Me }) {
             Welcome back, {me.name}!
           </h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            <span className="font-medium text-blue-600">{me.role_name}</span> · {today}
+            <span className="font-medium text-brand-600">{me.role_name}</span> · {todayLabel}
           </p>
         </div>
         <RefreshButton onRefresh={() => mutate()} />
@@ -95,7 +220,7 @@ function AdminHome({ me }: { me: Me }) {
           <Link
             key={href}
             href={href}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 hover:border-blue-400 hover:text-blue-600 shadow-sm transition"
+            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 hover:border-brand-400 hover:text-brand-600 shadow-sm transition"
           >
             <Icon size={15} />
             {label}
@@ -103,12 +228,24 @@ function AdminHome({ me }: { me: Me }) {
         ))}
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <StatCard label="Total devices"    value={stats?.total_devices ?? 0} />
-        <StatCard label="Active today"     value={stats?.active_today ?? 0}  color="text-green-600" />
-        <StatCard label="Online right now" value={s.active}                  color="text-blue-600" />
-        <StatCard label="Avg active / device" value={`${avgHrs}h`}           color="text-purple-600" />
+      {/* Period filter + Stat cards */}
+      <div className="mb-2 flex items-center gap-2">
+        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Stats for</p>
+        <StatPeriodFilter
+          sinceDate={sinceDate} untilDate={untilDate}
+          onSinceChange={setSinceDate} onUntilChange={setUntilDate}
+        />
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 mt-3">
+        <StatCard label="Total devices"   value={stats?.total_devices ?? 0} />
+        <StatCard label={activeLabel}     value={stats?.active_today ?? 0}  color="text-green-600" />
+        <StatCard label="Online right now" value={s.active}                 color="text-brand-600" />
+        <StatCard
+          label={avgLabel}
+          value={avgDisplay}
+          sub="working time only"
+          color="text-purple-600"
+        />
       </div>
 
       {/* Donut + Top Apps */}
@@ -168,7 +305,7 @@ function AdminHome({ me }: { me: Me }) {
             {(realtime ?? []).slice(0, 15).map(d => (
               <tr key={d.device_id} className="border-t border-gray-100 hover:bg-gray-50">
                 <td className="px-5 py-3 font-medium text-gray-800">
-                  <Link href={`/devices/${d.device_id}`} className="hover:text-blue-600 transition">
+                  <Link href={`/devices/${d.device_id}`} className="hover:text-brand-600 transition">
                     {d.employee_name ?? "—"}
                   </Link>
                 </td>
@@ -217,13 +354,13 @@ function EmployeeHome({ me }: { me: Me }) {
           Welcome back, {me.name}!
         </h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          <span className="font-medium text-blue-600">{me.role_name ?? "Employee"}</span> · {today}
+          <span className="font-medium text-brand-600">{me.role_name ?? "Employee"}</span> · {today}
         </p>
       </div>
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <StatCard label="Active today"   value={`${activeHrs}h`} color="text-blue-600" />
+        <StatCard label="Active today"   value={`${activeHrs}h`} color="text-brand-600" />
         <StatCard label="Top app today"  value={topApp}          color="text-purple-600" />
         <StatCard label="My devices"     value={stats?.device_count ?? 0} />
       </div>

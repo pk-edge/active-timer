@@ -39,7 +39,7 @@ async def list_groups(
     q = (
         select(Group, func.count(GroupMember.id))
         .outerjoin(GroupMember, GroupMember.group_id == Group.id)
-        .where(Group.company_id == user.company_id)
+        .where(Group.company_id == user.company_id, Group.is_deleted == False)  # noqa: E712
         .group_by(Group.id)
         .order_by(Group.name.asc())
     )
@@ -165,8 +165,9 @@ async def delete_group(
     db: AsyncSession = Depends(get_db),
 ):
     g = await _get_group(group_id, user, db)
+    # Soft-delete: preserve member history + audit trail
+    g.is_deleted = True
     await audit.record(db, user, "group.delete", "group", group_id, {"name": g.name})
-    await db.delete(g)
     await db.commit()
 
 
