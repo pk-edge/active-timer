@@ -38,7 +38,7 @@ pipelines:
             - aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
             - aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
             - aws ecs update-service --cluster tracker-backend-staging  --service tracker-backend-staging-svc  --force-new-deployment --region us-east-1
-            - aws ecs update-service --cluster tracker-dashboard-staging --service tracker-dashboard-staging-svc --force-new-deployment --region us-east-1
+            - aws ecs update-service --cluster tracker-dash-staging --service tracker-dash-staging-svc --force-new-deployment --region us-east-1
 
     master:
       # NOTE: prod ECR repos + clusters must exist first (apply environments/prod).
@@ -65,7 +65,7 @@ pipelines:
             - aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
             - aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
             - aws ecs update-service --cluster tracker-backend-prod  --service tracker-backend-prod-svc  --force-new-deployment --region us-east-1
-            - aws ecs update-service --cluster tracker-dashboard-prod --service tracker-dashboard-prod-svc --force-new-deployment --region us-east-1
+            - aws ecs update-service --cluster tracker-dash-prod --service tracker-dash-prod-svc --force-new-deployment --region us-east-1
 
 definitions:
   services:
