@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     SEED_NAME:    str  = "Admin"
     SEED_PASSWORD: str = ""
 
+    # ── Remote setup endpoint ─────────────────────────────────────────────────
+    # POST /v1/setup/reset-admin  (requires X-Setup-Secret header)
+    # Leave blank to disable the endpoint entirely.
+    SETUP_SECRET: str = ""
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Default "*" allows any origin — restrict to your dashboard URL in production
     # via CORS_ORIGINS env var (comma-separated or JSON array).
