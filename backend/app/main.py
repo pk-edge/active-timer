@@ -91,13 +91,15 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware ────────────────────────────────────────────────────────────
-    # When origins is ["*"] credentials must be False (browser spec).
-    # When a specific origin list is set, credentials are allowed.
+    # allow_origin_regex permanently covers every *.onedge.co subdomain so no
+    # env var is needed in production.  CORS_ORIGINS still works for local dev
+    # and any extra origins passed via env.
     wildcard = settings.CORS_ORIGINS == ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=not wildcard,
+        allow_origins=[] if wildcard else settings.CORS_ORIGINS,
+        allow_origin_regex=r"https://[a-zA-Z0-9\-]+\.onedge\.co",
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )

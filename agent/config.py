@@ -5,10 +5,12 @@ Per-device identity (device_id, jwt_token) is NOT here — it lives in
 identity.py and is created/refreshed by enrollment.py on first run.
 """
 
+import json
 import os
 import platform
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 # ── Per-user data directory ──────────────────────────────────────────────────
@@ -23,29 +25,75 @@ else:
 BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _resolve_api_base() -> str:
-    # 1. Explicit env var always wins (dev/test override)
-    if v := os.environ.get("TT_API_BASE", "").strip():
-        return v
+def _bundle_resources() -> Optional[Path]:
+    """Return the bundle resources directory when running as a frozen app."""
+    if not getattr(sys, "frozen", False):
+        return None
+    if sys.platform == "darwin":
+        return Path(sys.executable).parent.parent / "Resources"
+    return Path(sys.executable).parent / "_internal"
 
-    # 2. api_base.txt embedded in the .app bundle Resources by build_dmg.sh / build_msi.ps1
-    if getattr(sys, "frozen", False):
-        if sys.platform == "darwin":
-            bundle_res = Path(sys.executable).parent.parent / "Resources"
-        else:
-            bundle_res = Path(sys.executable).parent / "_internal"
-        cfg = bundle_res / "api_base.txt"
+
+def _resolve_backends() -> list[dict]:
+    """
+    Return a list of backend configs in priority order.
+
+    Each entry is a dict with keys:
+      - url   : API base URL (e.g. https://tracker.example.com)
+      - token : enrollment token for that backend (optional — may be None
+                if a separate enrollment_token.txt supplies it)
+
+    Resolution order (first match wins for the primary backend):
+      1. TT_API_BASE env var  (single URL, token from TT_COMPANY_TOKEN)
+      2. backends.json in bundle Resources / _internal
+      3. api_base.txt in bundle Resources / _internal  (legacy single-URL)
+      4. Localhost fallback
+    """
+    # 1. Env var override
+    if url := os.environ.get("TT_API_BASE", "").strip():
+        token = os.environ.get("TT_COMPANY_TOKEN", "").strip() or None
+        return [{"url": url, "token": token}]
+
+    res = _bundle_resources()
+    if res:
+        # 2. backends.json — supports 1 or 2 backends with explicit tokens
+        bfile = res / "backends.json"
+        if bfile.exists():
+            try:
+                data = json.loads(bfile.read_text(encoding="utf-8-sig"))
+                backends = [
+                    {"url": b["url"].rstrip("/"), "token": b.get("token") or None}
+                    for b in data
+                    if b.get("url")
+                ]
+                if backends:
+                    return backends
+            except Exception:
+                pass
+
+        # 3. Legacy api_base.txt (single line = single URL)
+        cfg = res / "api_base.txt"
         if cfg.exists():
-            if v := cfg.read_text(encoding="utf-8-sig").strip():
-                return v
+            if url := cfg.read_text(encoding="utf-8-sig").strip():
+                return [{"url": url, "token": None}]
 
-    return "http://localhost:8000"
+    return [{"url": "http://localhost:8000", "token": None}]
+
+
+_BACKENDS: list[dict] = _resolve_backends()
+
+
+def _resolve_api_base() -> str:
+    return _BACKENDS[0]["url"]
 
 
 class Config:
     BASE_DIR: Path = BASE_DIR
 
     # ── Server (resolved once at startup) ────────────────────────────────────
+    # All backends in priority order; enrollment.py tries each in sequence.
+    BACKENDS: list[dict] = _BACKENDS
+
     API_BASE: str = _resolve_api_base()
     ENROLL_ENDPOINT:        str = f"{API_BASE}/v1/auth/enroll"
     INGEST_ENDPOINT:        str = f"{API_BASE}/v1/ingest"

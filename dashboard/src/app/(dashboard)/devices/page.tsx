@@ -2,7 +2,8 @@
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import { getDevices } from "@/lib/api";
-import { useAuth } from "@/hooks/useAuth";
+import { useUser } from "@/hooks/useUser";
+import { AccessDenied } from "@/components/charts";
 import { useDevicesPush } from "@/hooks/useDevicesPush";
 import DeviceCard from "./_components/DeviceCard";
 import { Monitor, Wifi, WifiOff, Search, X } from "lucide-react";
@@ -49,7 +50,7 @@ function PageSkeleton() {
 }
 
 export default function DevicesPage() {
-  useAuth();
+  const { loading, can } = useUser();
   useDevicesPush();
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
@@ -79,6 +80,8 @@ export default function DevicesPage() {
     return list;
   }, [devices, filter, search]);
 
+  if (loading) return null;
+  if (!can("devices", "view")) return <AccessDenied label="Devices" />;
   if (isLoading) return <PageSkeleton />;
 
   return (

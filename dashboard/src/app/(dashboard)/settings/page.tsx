@@ -1,18 +1,22 @@
 "use client";
 import { useState } from "react";
-import { useAuth } from "@/hooks/useAuth";
+import useSWR from "swr";
+import { useUser } from "@/hooks/useUser";
+import { AccessDenied } from "@/components/charts";
+import { getCompanyInfo, type CompanyInfo } from "@/lib/api";
 import {
-  Building2, Camera, Activity, Bell,
-  Check, ChevronRight,
+  Building2, Camera, Activity, Bell, Link2,
+  Check, ChevronRight, Copy, Eye, EyeOff,
 } from "lucide-react";
 
-type Tab = "general" | "tracking" | "screenshots" | "notifications";
+type Tab = "general" | "tracking" | "screenshots" | "notifications" | "integration";
 
 const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
   { key: "general",       label: "General",       icon: <Building2 size={16} /> },
   { key: "tracking",      label: "Tracking",      icon: <Activity  size={16} /> },
   { key: "screenshots",   label: "Screenshots",   icon: <Camera    size={16} /> },
   { key: "notifications", label: "Notifications", icon: <Bell      size={16} /> },
+  { key: "integration",   label: "Integration",   icon: <Link2     size={16} /> },
 ];
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -64,9 +68,20 @@ function SelectInput({ value, onChange, options }: {
 }
 
 export default function SettingsPage() {
-  useAuth();
+  const { loading, can } = useUser();
   const [tab, setTab] = useState<Tab>("general");
   const [saved, setSaved] = useState(false);
+  const [tokenVisible, setTokenVisible] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const { data: companyInfo } = useSWR<CompanyInfo>("company-info", getCompanyInfo);
+
+  function copyToken() {
+    if (!companyInfo) return;
+    navigator.clipboard.writeText(companyInfo.enrollment_token);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
 
   // General
   const [orgName,   setOrgName]   = useState("My Organization");
@@ -96,6 +111,9 @@ export default function SettingsPage() {
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   }
+
+  if (loading) return null;
+  if (!can("settings", "view")) return <AccessDenied label="Settings" />;
 
   return (
     <div>
@@ -279,6 +297,77 @@ export default function SettingsPage() {
                   ]}
                 />
               </SettingRow>
+            </div>
+          )}
+
+          {/* ── Integration ─────────────────────────────────────────── */}
+          {tab === "integration" && (
+            <div>
+              <h2 className="text-base font-semibold text-gray-900 mb-1">Integration</h2>
+              <p className="text-sm text-gray-500 mb-5">
+                Company enrollment token — used to register agent installers with this backend
+              </p>
+
+              <div className="border border-gray-200 rounded-xl p-5 space-y-4">
+                <div>
+                  <p className="text-sm font-medium text-gray-800 mb-1">Enrollment Token</p>
+                  <p className="text-xs text-gray-500 mb-3">
+                    Embed this token in your agent installer so devices can self-enroll.
+                    Keep it secret — anyone with this token can enroll new devices.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 flex items-center gap-0 border border-gray-300 rounded-lg overflow-hidden bg-gray-50">
+                      <code className="flex-1 px-3 py-2 text-sm font-mono text-gray-700 truncate select-all">
+                        {companyInfo
+                          ? tokenVisible
+                            ? companyInfo.enrollment_token
+                            : "•".repeat(companyInfo.enrollment_token.length)
+                          : "Loading…"}
+                      </code>
+                      <button
+                        onClick={() => setTokenVisible(v => !v)}
+                        title={tokenVisible ? "Hide token" : "Reveal token"}
+                        className="px-3 py-2 border-l border-gray-300 text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition"
+                      >
+                        {tokenVisible ? <EyeOff size={15} /> : <Eye size={15} />}
+                      </button>
+                    </div>
+                    <button
+                      onClick={copyToken}
+                      disabled={!companyInfo}
+                      className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium border transition ${
+                        copied
+                          ? "bg-green-50 text-green-600 border-green-200"
+                          : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
+                      }`}
+                    >
+                      {copied ? <><Check size={13} /> Copied</> : <><Copy size={13} /> Copy</>}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="pt-3 border-t border-gray-100">
+                  <p className="text-sm font-medium text-gray-800 mb-1">Backend URL</p>
+                  <p className="text-xs text-gray-500 mb-2">
+                    The API base URL agents use to connect. Pass this alongside the enrollment token when building installers.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 px-3 py-2 text-sm font-mono text-gray-700 bg-gray-50 border border-gray-300 rounded-lg truncate select-all">
+                      {typeof window !== "undefined" ? window.location.origin : ""}
+                    </code>
+                    <button
+                      onClick={() => {
+                        if (typeof window !== "undefined") {
+                          navigator.clipboard.writeText(window.location.origin);
+                        }
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium border bg-white text-gray-700 border-gray-300 hover:bg-gray-50 transition"
+                    >
+                      <Copy size={13} /> Copy
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           )}
 
