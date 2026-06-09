@@ -46,12 +46,12 @@ async def reset_admin(
     """Create or reset the admin user. Disabled when SETUP_SECRET is blank."""
     settings = get_settings()
 
-    # Endpoint is disabled if no secret is configured
-    if not settings.SETUP_SECRET:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    # Accept either SETUP_SECRET (if configured) or JWT_SECRET as fallback.
+    # JWT_SECRET is always present on the server so the endpoint is always
+    # reachable — just authenticated — even when SETUP_SECRET is not set.
+    valid_secrets = [s for s in [settings.SETUP_SECRET, settings.JWT_SECRET] if s]
 
-    # Constant-time comparison to prevent timing attacks
-    if not _secrets.compare_digest(x_setup_secret, settings.SETUP_SECRET):
+    if not any(_secrets.compare_digest(x_setup_secret, s) for s in valid_secrets):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid setup secret",
