@@ -45,9 +45,13 @@ class Settings(BaseSettings):
     SETUP_SECRET: str = ""
 
     # ── CORS ──────────────────────────────────────────────────────────────────
-    # Default "*" allows any origin — restrict to your dashboard URL in production
-    # via CORS_ORIGINS env var (comma-separated or JSON array).
-    CORS_ORIGINS: List[str] = ["*"]
+    # *.onedge.co is permanently allowed via allow_origin_regex in main.py.
+    # This list covers localhost dev origins; override via CORS_ORIGINS env var
+    # (comma-separated or JSON array) for any other explicit origins.
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:3002",
+    ]
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

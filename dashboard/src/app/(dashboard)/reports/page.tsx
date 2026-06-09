@@ -6,7 +6,8 @@ import {
   getCompanySummary, getTopApps, getDevices,
   getDeviceSummary, getDeviceTopApps, fmtSeconds,
 } from "@/lib/api";
-import { useAuth } from "@/hooks/useAuth";
+import { useUser } from "@/hooks/useUser";
+import { AccessDenied } from "@/components/charts";
 import { Search, X, ChevronDown } from "lucide-react";
 import type { CompanyDay, AppUsage, Device } from "@/types";
 
@@ -26,7 +27,7 @@ function SectionCard({ title, children }: { title: string; children: React.React
 }
 
 export default function ReportsPage() {
-  useAuth();
+  const { loading, can } = useUser();
   const [days, setDays]         = useState(7);
   const [deviceId, setDeviceId] = useState("");
   const [appSearch, setAppSearch] = useState("");
@@ -55,6 +56,9 @@ export default function ReportsPage() {
   }, [apps, appSearch]);
 
   const totalActive = summary?.reduce((sum, d) => sum + d.active_seconds, 0) ?? 0;
+
+  if (loading) return null;
+  if (!can("reports", "view")) return <AccessDenied label="Reports" />;
 
   return (
     <div>

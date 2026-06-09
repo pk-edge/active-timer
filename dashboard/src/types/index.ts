@@ -128,6 +128,18 @@ export interface Installer {
   uploaded_at:    string | null;
 }
 
+export interface InstallerDownload {
+  id:                  string;
+  installer_id:        string;
+  platform:            string;
+  version:             string;
+  installer_type:      string;
+  downloaded_by_id:    string;
+  downloaded_by_name:  string;
+  downloaded_by_email: string;
+  downloaded_at:       string;
+}
+
 // ── Home dashboards ─────────────────────────────────────────────────────────
 
 export interface OverviewStats {

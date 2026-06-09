@@ -186,6 +186,18 @@ class InstallerVersion(Base):
     uploaded_at:    Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
+class InstallerDownload(Base):
+    __tablename__ = "installer_downloads"
+
+    id:            Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    installer_id:  Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("installer_versions.id", ondelete="CASCADE"), nullable=False)
+    downloaded_by: Mapped[uuid.UUID] = mapped_column(UUID, ForeignKey("employees.id", ondelete="CASCADE"), nullable=False)
+    downloaded_at: Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    installer: Mapped["InstallerVersion"] = relationship()
+    employee:  Mapped["Employee"]         = relationship()
+
+
 class NotificationRead(Base):
     __tablename__ = "notification_reads"
 

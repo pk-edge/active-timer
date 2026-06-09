@@ -72,8 +72,7 @@ dashboard/out/
 dashboard/tsconfig.tsbuildinfo
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
-*.log
-logs/
+
 
 # ── Local agent runtime data ──────────────────────────────────────────────────
 agent/*.db
