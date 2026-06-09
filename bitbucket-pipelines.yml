@@ -1,0 +1,73 @@
+image: python:3.7.4-alpine3.10
+
+# active-time / TimeTracker — monorepo (backend + dashboard).
+#   staging branch -> :staging images + staging ECS clusters
+#   master  branch -> :prod    images + prod    ECS clusters
+#
+# Required repo variables (Repo Settings > Repository variables):
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  — creds with ECR push + ecs:UpdateService
+#
+# NOTE: the dashboard is Next.js (output: standalone) — NEXT_PUBLIC_API_URL is
+# baked in at BUILD time, so it must be passed as a --build-arg per environment.
+
+pipelines:
+  branches:
+    staging:
+      - step:
+          name: Build & push images (staging)
+          services:
+            - docker
+          size: 2x
+          script:
+            - apk add --no-cache git
+            - pip3 install awscli
+            - export REG="082178185739.dkr.ecr.us-east-1.amazonaws.com"
+            - aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
+            - aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+            - eval $(aws ecr get-login --no-include-email --region us-east-1)
+            # backend (FastAPI)
+            - docker build -t $REG/tracker-backend-staging:staging ./backend
+            - docker push $REG/tracker-backend-staging:staging
+            # dashboard (Next.js — API URL baked at build time)
+            - docker build --build-arg NEXT_PUBLIC_API_URL=https://api.tracker.staging.onedge.co -t $REG/tracker-dashboard-staging:staging ./dashboard
+            - docker push $REG/tracker-dashboard-staging:staging
+      - step:
+          name: Deploy to ECS (staging)
+          script:
+            - pip3 install awscli
+            - aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
+            - aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+            - aws ecs update-service --cluster tracker-backend-staging  --service tracker-backend-staging-svc  --force-new-deployment --region us-east-1
+            - aws ecs update-service --cluster tracker-dashboard-staging --service tracker-dashboard-staging-svc --force-new-deployment --region us-east-1
+
+    master:
+      # NOTE: prod ECR repos + clusters must exist first (apply environments/prod).
+      - step:
+          name: Build & push images (prod)
+          services:
+            - docker
+          size: 2x
+          script:
+            - apk add --no-cache git
+            - pip3 install awscli
+            - export REG="082178185739.dkr.ecr.us-east-1.amazonaws.com"
+            - aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
+            - aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+            - eval $(aws ecr get-login --no-include-email --region us-east-1)
+            - docker build -t $REG/tracker-backend-prod:prod ./backend
+            - docker push $REG/tracker-backend-prod:prod
+            - docker build --build-arg NEXT_PUBLIC_API_URL=https://api.tracker.onedge.co -t $REG/tracker-dashboard-prod:prod ./dashboard
+            - docker push $REG/tracker-dashboard-prod:prod
+      - step:
+          name: Deploy to ECS (prod)
+          script:
+            - pip3 install awscli
+            - aws configure set aws_access_key_id "${AWS_ACCESS_KEY_ID}"
+            - aws configure set aws_secret_access_key "${AWS_SECRET_ACCESS_KEY}"
+            - aws ecs update-service --cluster tracker-backend-prod  --service tracker-backend-prod-svc  --force-new-deployment --region us-east-1
+            - aws ecs update-service --cluster tracker-dashboard-prod --service tracker-dashboard-prod-svc --force-new-deployment --region us-east-1
+
+definitions:
+  services:
+    docker:
+      memory: 4096
