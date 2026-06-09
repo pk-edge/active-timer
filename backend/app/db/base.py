@@ -18,7 +18,27 @@ engine = create_async_engine(
     echo=False,
     pool_size=10,
     max_overflow=20,
+    # ── Connection resilience ────────────────────────────────────────────────
+    # On low-traffic environments (e.g. staging) idle pooled connections get
+    # silently dropped by NAT gateways / firewalls / RDS idle-timeouts. The pool
+    # still believes they are alive, so the next query is sent into a black hole
+    # and hangs until the TCP timeout (~30s) before failing with a 500.
+    #   • pool_pre_ping  — test a connection with SELECT 1 before handing it out;
+    #                      a dead one is transparently discarded and replaced.
+    #   • pool_recycle   — proactively retire connections older than 5 min, well
+    #                      under the typical NAT/RDS idle cutoff, so they never go
+    #                      stale in the first place. This is the real fix.
+    #   • pool_timeout   — if the pool is genuinely exhausted, fail fast (10s)
+    #                      instead of the 30s default.
+    #   • connect_args   — bound asyncpg connect + per-query time so a bad
+    #                      connection surfaces an error quickly rather than hanging.
     pool_pre_ping=True,
+    pool_recycle=300,
+    pool_timeout=10,
+    connect_args={
+        "timeout": 10,          # max seconds to establish a new connection
+        "command_timeout": 30,  # max seconds for any single query
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(
