@@ -6,41 +6,21 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
+
 from app.core.config import get_settings
 
 log = logging.getLogger(__name__)
 
 settings = get_settings()
 
-# Pool sizing — kept small so we never approach Postgres max_connections.
-# Overflow lets us absorb short bursts without exhausting the base pool.
-# Both values are intentionally conservative; raise them if profiling shows
-# connection wait time under sustained prod load.
-_POOL_SIZE     = 5   # persistent warm connections
-_MAX_OVERFLOW  = 10  # burst headroom  →  15 total max
-
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
-    pool_size=_POOL_SIZE,
-    max_overflow=_MAX_OVERFLOW,
-    # ── The two fixes that prevent pool exhaustion ────────────────────────────
-    # 1. pool_recycle: AWS NAT gateway silently kills idle TCP connections at
-    #    ~350 s. Recycling at 120 s means connections are replaced well before
-    #    the NAT kills them, so the pool never holds stale sockets.
-    # 2. pool_timeout: if all slots are taken, fail the request in 5 s instead
-    #    of the default 30 s. A 30 s wait cascades — every new request queues
-    #    behind the stuck ones, the pool stays full for 30 s, and dozens of
-    #    requests pile up. 5 s stops the cascade early.
-    pool_recycle=120,
-    pool_timeout=5,
-    # pre-ping catches any connection the recycle window missed (e.g. a DB
-    # restart mid-cycle). The SELECT 1 costs ~0.1 ms on a LAN — negligible.
-    pool_pre_ping=True,
-    # asyncpg-level caps so a network blip never hangs indefinitely.
+    poolclass=NullPool,
     connect_args={
-        "timeout": 10,         # max seconds to open a new connection
-        "command_timeout": 30, # max seconds for any single query
+        "timeout": 10,         # seconds before giving up on a new connection
+        "command_timeout": 30, # seconds before cancelling a hung query
     },
 )
 
