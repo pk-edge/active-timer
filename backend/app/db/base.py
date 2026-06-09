@@ -19,8 +19,7 @@ engine = create_async_engine(
     echo=False,
     poolclass=NullPool,
     connect_args={
-        "timeout": 10,         # seconds before giving up on a new connection
-        "command_timeout": 30, # seconds before cancelling a hung query
+        "timeout": 10,  # seconds before giving up on establishing a new connection
     },
 )
 
@@ -48,7 +47,3 @@ async def init_db() -> None:
                 await conn.execute(text(stmt))
             log.info("Applied migration: %s", f.name)
 
-    # Seed RBAC system roles + link legacy admins (idempotent).
-    from app.db import seed_rbac
-    await seed_rbac.run()
-    log.info("RBAC seed complete")
