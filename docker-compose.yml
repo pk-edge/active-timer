@@ -86,6 +86,11 @@ services:
       PRESIGNED_URL_EXPIRY:   3600
       ONLINE_CUTOFF_SECS:    90
       CORS_ORIGINS:          '["http://localhost:3000","http://localhost:3002","http://10.10.21.230:3002"]'
+      # ── Auto-seed first admin (leave blank to disable) ──────────────────
+      SEED_COMPANY:          ${SEED_COMPANY:-}
+      SEED_EMAIL:            ${SEED_EMAIL:-}
+      SEED_NAME:             ${SEED_NAME:-Admin}
+      SEED_PASSWORD:         ${SEED_PASSWORD:-}
     ports:
       - "8000:8000"
     healthcheck:

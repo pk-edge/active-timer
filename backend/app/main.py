@@ -18,9 +18,53 @@ logging.basicConfig(
 settings = get_settings()
 
 
+async def _auto_seed() -> None:
+    """Create company + first admin from env vars if they don't exist yet.
+
+    Triggered by setting all four SEED_* variables in .env or docker-compose.
+    Safe to leave enabled — skips silently if the company already exists.
+    """
+    s = settings
+    if not (s.SEED_COMPANY and s.SEED_EMAIL and s.SEED_PASSWORD):
+        return
+
+    import secrets
+    from sqlalchemy import select
+    from app.db.base import AsyncSessionLocal
+    from app.db.models import Company, Employee
+    from app.core.security import hash_password
+
+    log = logging.getLogger("auto_seed")
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Company).where(Company.name == s.SEED_COMPANY))
+        company = result.scalar_one_or_none()
+        if company:
+            log.info("Auto-seed skipped — company '%s' already exists", s.SEED_COMPANY)
+            return
+
+        company = Company(name=s.SEED_COMPANY, enrollment_token=secrets.token_hex(24))
+        db.add(company)
+        await db.flush()
+
+        emp = Employee(
+            company_id=company.id,
+            email=s.SEED_EMAIL.lower(),
+            name=s.SEED_NAME,
+            role="admin",
+            password_hash=hash_password(s.SEED_PASSWORD),
+        )
+        db.add(emp)
+        await db.commit()
+
+        log.info("Auto-seed complete — company '%s', admin '%s'", s.SEED_COMPANY, s.SEED_EMAIL)
+        log.info("Enrollment token: %s", company.enrollment_token)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await _auto_seed()           # no-op if SEED_* vars are not set
     await ingest_queue.start()   # start async worker pool
     yield
     await ingest_queue.stop()    # drain + shutdown workers cleanly

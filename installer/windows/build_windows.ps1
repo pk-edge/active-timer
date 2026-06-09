@@ -1,4 +1,4 @@
-# TimeTracker Windows Build Script — v1.0.3 (WiX v4/v7)
+# TimeTracker Windows Build Script — v1.1.3 (WiX v4/v7)
 # Run this on a Windows machine with Python 3.11+ installed.
 # Output: installer\windows\output\TimeTracker.msi
 #
@@ -17,8 +17,8 @@
 #   .\build_windows.ps1 -ApiBase "http://192.168.1.100:8000"
 
 param(
-    [string]$ApiBase  = "http://10.10.20.77:8000",
-    [string]$Version  = "1.0.3",
+    [string]$ApiBase  = "http://10.10.21.230:8000",
+    [string]$Version  = "1.1.3",
     [switch]$SkipPyInstaller
 )
 
