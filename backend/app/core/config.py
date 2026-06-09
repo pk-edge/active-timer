@@ -35,9 +35,9 @@ class Settings(BaseSettings):
     # Set all four to auto-create the company + first admin on startup.
     # Ignored if the company already exists (idempotent).
     SEED_COMPANY: str  = "Edge"
-    SEED_EMAIL:   str  = "admin@edge.co"
+    SEED_EMAIL:   str  = ""
     SEED_NAME:    str  = "Admin"
-    SEED_PASSWORD: str = "Admin@123"
+    SEED_PASSWORD: str = ""
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Default "*" allows any origin — restrict to your dashboard URL in production
