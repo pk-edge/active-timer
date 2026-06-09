@@ -1,0 +1,137 @@
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+from app.api.deps import get_db, get_current_user
+from app.core import audit
+from app.core.security import create_device_token, create_admin_token, verify_password, hash_password
+from app.db.models import Company, Device, Employee
+from app.schemas.auth import EnrollRequest, EnrollResponse, AdminLoginRequest, AdminLoginResponse
+from app.schemas.rbac import MeOut, PermissionItem, RegisterRequest, RegisterResponse
+
+log = logging.getLogger(__name__)
+router = APIRouter()
+
+
+@router.post("/enroll", response_model=EnrollResponse)
+async def enroll_device(body: EnrollRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Company).where(Company.enrollment_token == body.enrollment_token)
+    )
+    company = result.scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid enrollment token")
+
+    # Upsert by (company_id, hostname)
+    result = await db.execute(
+        select(Device).where(Device.company_id == company.id, Device.hostname == body.hostname)
+    )
+    device = result.scalar_one_or_none()
+
+    if not device:
+        device = Device(
+            company_id=company.id,
+            hostname=body.hostname,
+            platform=body.platform,
+            agent_version=body.agent_version,
+        )
+        db.add(device)
+        await db.flush()
+    else:
+        device.platform      = body.platform
+        device.agent_version = body.agent_version
+        device.is_active     = True
+
+    token = create_device_token(str(device.id), str(company.id))
+    device.jwt_token = token
+    await db.commit()
+
+    log.info("Device enrolled: %s (%s)", body.hostname, device.id)
+    return EnrollResponse(device_id=str(device.id), jwt_token=token)
+
+
+@router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
+async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    """Public self-registration. Account is pending until an admin approves it."""
+    # Attach to the single company (single-company deployment).
+    company_result = await db.execute(select(Company).limit(1))
+    company = company_result.scalar_one_or_none()
+    if not company:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="System not yet set up. Contact an administrator.")
+
+    dup = await db.execute(select(Employee).where(Employee.email == body.email.lower()))
+    if dup.scalar_one_or_none():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="An account with this email already exists.")
+
+    emp = Employee(
+        company_id=company.id,
+        email=body.email.lower(),
+        name=body.name,
+        role="employee",
+        password_hash=hash_password(body.password),
+        is_active=True,
+        is_approved=False,
+    )
+    db.add(emp)
+    await db.flush()
+    await audit.record(db, emp, "user.register", "user", str(emp.id), {"email": emp.email})
+    await db.commit()
+
+    log.info("Self-registration submitted: %s (pending approval)", emp.email)
+    return RegisterResponse(
+        message="Registration submitted. You will be notified once an admin approves your account."
+    )
+
+
+@router.post("/admin/login", response_model=AdminLoginResponse)
+async def admin_login(body: AdminLoginRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Employee).where(Employee.email == body.email.lower())
+    )
+    employee = result.scalar_one_or_none()
+
+    # Step 1 — basic credential check (don't reveal whether the account exists).
+    if (
+        not employee
+        or not employee.is_active
+        or not employee.password_hash
+        or not verify_password(body.password, employee.password_hash)
+    ):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    # Step 2 — approval gate (password was correct but account is still pending).
+    if not getattr(employee, "is_approved", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account pending admin approval",
+        )
+
+    # Step 3 — require a dashboard role.
+    has_dashboard_role = (
+        employee.role_id is not None or employee.role in ("admin", "manager")
+    )
+    if not has_dashboard_role:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    role_name = employee.role_obj.name if employee.role_obj else employee.role
+    token = create_admin_token(str(employee.id), employee.role, str(employee.company_id))
+    return AdminLoginResponse(access_token=token, role=role_name, name=employee.name)
+
+
+@router.get("/me", response_model=MeOut)
+async def me(user: Employee = Depends(get_current_user)):
+    return MeOut(
+        id=str(user.id),
+        name=user.name,
+        email=user.email,
+        role_name=user.role_obj.name if user.role_obj else user.role,
+        scope_type=getattr(user, "_scope_type", "own"),
+        permissions=[
+            PermissionItem(module=m, action=a)
+            for (m, a) in sorted(getattr(user, "_perms", set()))
+        ],
+    )

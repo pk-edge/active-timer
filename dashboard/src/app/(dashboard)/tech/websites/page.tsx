@@ -1,0 +1,266 @@
+"use client";
+import { format, subDays } from "date-fns";
+import { useState, useMemo } from "react";
+import useSWR from "swr";
+import { Globe, Download, MoreHorizontal, ExternalLink, ChevronLeft } from "lucide-react";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
+import { getWebsites, getWebsiteDetail } from "@/lib/api";
+import { useUser } from "@/hooks/useUser";
+import { AccessDenied } from "@/components/charts";
+import RefreshButton from "@/components/RefreshButton";
+import {
+  SmartSearchBar, FilterBar, QuickStats, DetailTabs,
+  DurationRow, ProdIcon, fmtDur, exportCsv,
+  type DateRange } from "@/components/UsagePageShell";
+import type { WebsiteItem, WebsiteDetailOut } from "@/types";
+
+const DETAIL_TABS = ["Titles", "Subpages", "Users", "Usage"];
+
+// ── Right panel ───────────────────────────────────────────────────────────────
+
+function DetailPanel({
+  item, since, until, groupId, employeeId }: { item: WebsiteItem; since: string; until: string; groupId: string; employeeId: string }) {
+  const [tab, setTab] = useState("Titles");
+
+  const { data, isLoading } = useSWR<WebsiteDetailOut>(
+    ["website-detail", item.host, tab.toLowerCase(), since, until, groupId, employeeId],
+    () => getWebsiteDetail(item.host, tab.toLowerCase(), since, until, groupId || undefined, employeeId || undefined),
+  );
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="px-5 py-4 border-b border-gray-200 shrink-0">
+        <div className="flex items-center gap-2 mb-1">
+          <div className="w-5 h-5 rounded bg-gray-100 flex items-center justify-center shrink-0">
+            <Globe size={12} className="text-gray-500" />
+          </div>
+          <p className="font-semibold text-gray-900 text-sm truncate">{item.host}</p>
+          <a href={`https://${item.host}`} target="_blank" rel="noreferrer"
+             className="text-gray-400 hover:text-brand-500 ml-auto shrink-0">
+            <ExternalLink size={13} />
+          </a>
+        </div>
+        <p className="text-xs text-gray-400">
+          {fmtDur(item.duration_secs)} · {item.visits.toLocaleString()} visits · {item.pct.toFixed(1)}%
+        </p>
+      </div>
+
+      {/* Tabs */}
+      <div className="px-5 shrink-0">
+        <DetailTabs tabs={DETAIL_TABS} active={tab} onSelect={setTab} />
+      </div>
+
+      {/* Tab content */}
+      <div className="flex-1 overflow-y-auto px-5 min-h-0">
+        {isLoading ? (
+          <p className="text-sm text-gray-400 py-8 text-center">Loading…</p>
+        ) : tab === "Titles" ? (
+          <>
+            {(data?.titles ?? []).length === 0
+              ? <p className="text-sm text-gray-400 py-8 text-center">No data.</p>
+              : (data?.titles ?? []).map(t => (
+                <DurationRow key={t.title} label={t.title}
+                             duration_secs={t.visits * 60} pct={t.pct} color={item.color} />
+              ))}
+          </>
+        ) : tab === "Subpages" ? (
+          <>
+            {(data?.subpages ?? []).length === 0
+              ? <p className="text-sm text-gray-400 py-8 text-center">No data.</p>
+              : (data?.subpages ?? []).map(s => (
+                <div key={s.path} className="py-2 border-b border-gray-100 last:border-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs text-gray-700 truncate font-mono flex-1" title={s.path}>{s.path}</p>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="text-xs text-gray-600 tabular-nums">{s.visits} visits</span>
+                      <span className="text-xs text-gray-400">{s.pct.toFixed(1)}%</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+          </>
+        ) : tab === "Users" ? (
+          <>
+            {(data?.users ?? []).length === 0
+              ? <p className="text-sm text-gray-400 py-8 text-center">No users.</p>
+              : (data?.users ?? []).map(u => (
+                <DurationRow key={u.name} label={u.name}
+                             duration_secs={u.duration_secs} pct={u.pct} color={item.color} />
+              ))}
+          </>
+        ) : (
+          /* Usage chart */
+          <div className="pt-2">
+            {(data?.usage ?? []).length === 0
+              ? <p className="text-sm text-gray-400 py-8 text-center">No data.</p>
+              : (
+                <ResponsiveContainer width="100%" height={220}>
+                  <LineChart data={data?.usage ?? []}>
+                    <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
+                    <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} width={30} />
+                    <Tooltip
+                      formatter={(v: number) => [v, "Visits"]}
+                      contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 11 }}
+                    />
+                    <Line type="monotone" dataKey="visits" stroke={item.color} strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
+export default function WebsiteUsagePage() {
+  const { loading, can } = useUser();
+  const [search,       setSearch]       = useState("");
+  const [dateRange, setDateRange] = useState<DateRange>({ since: format(subDays(new Date(), 29), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
+  const [groupId,      setGroupId]      = useState("");
+  const [employeeId,   setEmployeeId]   = useState("");
+  const [productivity, setProductivity] = useState("");
+  const [summaryMode,  setSummaryMode]  = useState(true);
+  const [selected,     setSelected]     = useState<WebsiteItem | null>(null);
+
+  const { data, mutate, isLoading } = useSWR(
+    ["websites", dateRange.since, dateRange.until, productivity, groupId, employeeId],
+    () => getWebsites(dateRange.since, dateRange.until, productivity || undefined, groupId || undefined, employeeId || undefined),
+  );
+
+  const filtered = useMemo(() => {
+    const items = data?.items ?? [];
+    if (!search.trim()) return items;
+    const q = search.toLowerCase();
+    return items.filter(i =>
+      i.host.toLowerCase().includes(q) || (i.category_name ?? "").toLowerCase().includes(q)
+    );
+  }, [data, search]);
+
+  function doExport() {
+    exportCsv(
+      ["Website", "Duration", "Visits", "Users", "Allocation %", "Productivity", "Category"],
+      filtered.map(i => [i.host, fmtDur(i.duration_secs), String(i.visits),
+                         String(i.user_count), `${i.pct}%`, i.productivity, i.category_name ?? ""]),
+      "website-usage.csv",
+    );
+  }
+
+  if (loading) return null;
+  if (!can("tech", "view")) return <AccessDenied label="Website Usage" />;
+
+  const stats = [
+    { label: "Total Duration",    value: fmtDur(data?.total_secs ?? 0),         color: "text-brand-600" },
+    { label: "Total Visits",      value: (data?.total_visits ?? 0).toLocaleString() },
+    { label: "Unique Websites",   value: String(data?.items.length ?? 0) },
+    { label: "Productive Sites",  value: String(data?.items.filter(i => i.productivity === "productive").length ?? 0), color: "text-green-600" },
+  ];
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
+        <div>
+          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Website Usage</h1>
+          <p className="text-sm text-gray-500 mt-0.5">Browser activity from all devices</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <RefreshButton onRefresh={() => mutate()} />
+          <button onClick={doExport}
+                  className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm transition">
+            <Download size={13} /> Export
+          </button>
+        </div>
+      </div>
+
+      {/* Search */}
+      <div className="flex gap-2 mb-4 shrink-0">
+        <SmartSearchBar value={search} onChange={setSearch} placeholder="Search by website or category…" />
+      </div>
+
+      {/* Filters */}
+      <div className="shrink-0">
+        <FilterBar
+          dateRange={dateRange} setDateRange={setDateRange}
+          groupId={groupId} setGroupId={setGroupId}
+          employeeId={employeeId} setEmployeeId={setEmployeeId}
+          productivity={productivity} setProductivity={setProductivity}
+          summaryMode={summaryMode} setSummaryMode={setSummaryMode}
+        />
+      </div>
+
+      {/* Quick stats */}
+      <div className="shrink-0">
+        <QuickStats stats={stats} />
+      </div>
+
+      {/* Two-panel layout */}
+      <div className="flex gap-0 flex-1 min-h-0 bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+        {/* Left — website list. Hidden on mobile when an item is selected. */}
+        <div className={`flex-col min-h-0 lg:border-r border-gray-200 ${
+          selected ? "hidden lg:flex lg:w-[55%]" : "flex w-full"
+        }`}>
+          {/* Table header */}
+          <div className="grid grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_110px_60px_32px] gap-2 px-3 sm:px-4 py-2.5 bg-gray-50 border-b border-gray-200 shrink-0">
+            <div />
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Website</p>
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Duration</p>
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide text-right">%</p>
+            <div />
+          </div>
+
+          {/* Rows */}
+          <div className="flex-1 overflow-y-auto min-h-0">
+            {isLoading ? (
+              <p className="text-sm text-gray-400 py-12 text-center animate-pulse">Loading…</p>
+            ) : filtered.length === 0 ? (
+              <p className="text-sm text-gray-400 py-12 text-center">No websites found.</p>
+            ) : filtered.map(item => (
+              <button
+                key={item.host}
+                onClick={() => setSelected(prev => prev?.host === item.host ? null : item)}
+                className={`w-full grid grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_110px_60px_32px] gap-2 px-3 sm:px-4 py-3 border-b border-gray-100 hover:bg-brand-50/40 transition text-left ${
+                  selected?.host === item.host ? "bg-brand-50" : ""
+                }`}
+              >
+                <ProdIcon v={item.productivity} />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-800 truncate">{item.host}</p>
+                  {item.category_name && (
+                    <p className="text-xs truncate" style={{ color: item.color }}>{item.category_name}</p>
+                  )}
+                </div>
+                <p className="text-sm text-gray-700 tabular-nums self-center">{fmtDur(item.duration_secs)}</p>
+                <p className="text-sm text-gray-500 tabular-nums text-right self-center">{item.pct.toFixed(1)}%</p>
+                <MoreHorizontal size={14} className="text-gray-300 self-center" />
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Right — detail panel. Full-width on mobile, side panel on desktop. */}
+        {selected && (
+          <div className="flex flex-col min-h-0 w-full lg:flex-1 lg:min-w-0">
+            {/* Mobile back bar */}
+            <button
+              onClick={() => setSelected(null)}
+              className="lg:hidden flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-brand-600 border-b border-gray-100 shrink-0"
+            >
+              <ChevronLeft size={16} /> Back to list
+            </button>
+            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until} groupId={groupId} employeeId={employeeId} />
+          </div>
+        )}
+      </div>
+
+      {!selected && filtered.length > 0 && (
+        <p className="text-xs text-gray-400 text-center mt-2 shrink-0">
+          Tap a website to see details
+        </p>
+      )}
+    </div>
+  );
+}

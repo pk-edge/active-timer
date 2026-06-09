@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Edge brand keyframes ───────────────────────────────────────────────────
+   Defined here (not only in tailwind.config) because they are referenced
+   via inline style.animation in EdgeLogo, which bypasses Tailwind's purge. */
+
+@keyframes dissolve-flow {
+  0%, 100%  { opacity: 1;    transform: translateX(0px);  }
+  35%       { opacity: 0.06; transform: translateX(8px);  }
+  36%       { opacity: 0;    transform: translateX(-7px); }
+  65%       { opacity: 0.06; transform: translateX(-2px); }
+  80%       { opacity: 1;    transform: translateX(0px);  }
+}
+
+@keyframes logo-pulse {
+  0%, 100% { opacity: 1;    transform: scale(1);    }
+  50%      { opacity: 0.82; transform: scale(0.965); }
+}
+
+@keyframes fade-in-up {
+  0%   { opacity: 0; transform: translateY(12px); }
+  100% { opacity: 1; transform: translateY(0);    }
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+::-webkit-scrollbar        { width: 6px; height: 6px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: #d1d5db; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
