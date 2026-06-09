@@ -1,0 +1,3 @@
+# Keeps the public/ directory in the repo so the Dockerfile's
+# `COPY --from=builder /app/public ./public` (Next.js standalone runtime) succeeds.
+# Put static assets (favicon, images served at the web root) here.
