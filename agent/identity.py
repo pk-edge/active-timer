@@ -36,15 +36,23 @@ def load() -> dict:
         return {}
 
 
-def save(*, device_id: str, jwt_token: str, company_token: Optional[str] = None) -> None:
+def save(
+    *,
+    device_id: str,
+    jwt_token: str,
+    company_token: Optional[str] = None,
+    api_base: Optional[str] = None,
+) -> None:
     """Atomically write the identity file, owner-only readable."""
     existing      = load()
     company_token = company_token or existing.get("company_token")
+    api_base      = api_base      or existing.get("api_base")
 
     data = {
         "device_id":     device_id,
         "jwt_token":     jwt_token,
         "company_token": company_token,
+        "api_base":      api_base,
     }
 
     _IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)

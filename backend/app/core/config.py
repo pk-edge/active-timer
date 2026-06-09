@@ -31,10 +31,27 @@ class Settings(BaseSettings):
     # ── Agent installer storage ─────────────────────────────────────────────────
     MAX_INSTALLER_MB: int = 600
 
+    # ── Auto-seed (first-run) ─────────────────────────────────────────────────
+    # Set all four to auto-create the company + first admin on startup.
+    # Ignored if the company already exists (idempotent).
+    SEED_COMPANY: str  = "Edge"
+    SEED_EMAIL:   str  = ""
+    SEED_NAME:    str  = "Admin"
+    SEED_PASSWORD: str = ""
+
+    # ── Remote setup endpoint ─────────────────────────────────────────────────
+    # POST /v1/setup/reset-admin  (requires X-Setup-Secret header)
+    # Leave blank to disable the endpoint entirely.
+    SETUP_SECRET: str = ""
+
     # ── CORS ──────────────────────────────────────────────────────────────────
-    # Default "*" allows any origin — restrict to your dashboard URL in production
-    # via CORS_ORIGINS env var (comma-separated or JSON array).
-    CORS_ORIGINS: List[str] = ["*"]
+    # *.onedge.co is permanently allowed via allow_origin_regex in main.py.
+    # This list covers localhost dev origins; override via CORS_ORIGINS env var
+    # (comma-separated or JSON array) for any other explicit origins.
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:3002",
+    ]
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

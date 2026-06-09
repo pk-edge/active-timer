@@ -11,13 +11,14 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from app.api.deps import get_db, get_current_device, require
 from app.core import audit
 from app.api.v1.endpoints.screenshots import _s3_client
 from app.core.config import get_settings
-from app.db.models import Employee, Device, InstallerVersion
-from app.schemas.rbac import InstallerOut
+from app.db.models import Employee, Device, InstallerVersion, InstallerDownload
+from app.schemas.rbac import InstallerOut, InstallerDownloadOut
 
 log = logging.getLogger(__name__)
 router = APIRouter()          # mounted at /installers
@@ -157,7 +158,47 @@ async def download_installer(
     except Exception as e:
         log.error("Presigned download error: %s", e)
         raise HTTPException(status_code=500, detail="Could not generate download URL")
+
+    # Record who downloaded this installer.
+    db.add(InstallerDownload(installer_id=v.id, downloaded_by=user.id))
+    await db.commit()
+
     return {"download_url": url, "version": v.version, "platform": v.platform}
+
+
+@router.get("/downloads", response_model=list[InstallerDownloadOut])
+async def list_downloads(
+    user: Employee = Depends(require("agents", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return all download records for this company, newest first."""
+    rows = await db.execute(
+        select(InstallerDownload)
+        .join(InstallerDownload.installer)
+        .where(InstallerVersion.company_id == user.company_id)
+        .options(
+            joinedload(InstallerDownload.installer),
+            joinedload(InstallerDownload.employee),
+        )
+        .order_by(InstallerDownload.downloaded_at.desc())
+        .limit(500)
+    )
+    results = []
+    for dl in rows.scalars().unique().all():
+        emp = dl.employee
+        inv = dl.installer
+        results.append(InstallerDownloadOut(
+            id=str(dl.id),
+            installer_id=str(inv.id),
+            platform=inv.platform,
+            version=inv.version,
+            installer_type=inv.installer_type,
+            downloaded_by_id=str(emp.id),
+            downloaded_by_name=emp.name,
+            downloaded_by_email=emp.email,
+            downloaded_at=dl.downloaded_at.isoformat(),
+        ))
+    return results
 
 
 @updates_router.get("/check")

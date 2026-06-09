@@ -140,3 +140,15 @@ class InstallerOut(BaseModel):
     notes: Optional[str] = None
     is_active: bool
     uploaded_at: Optional[str] = None
+
+
+class InstallerDownloadOut(BaseModel):
+    id: str
+    installer_id: str
+    platform: str
+    version: str
+    installer_type: str
+    downloaded_by_id: str
+    downloaded_by_name: str
+    downloaded_by_email: str
+    downloaded_at: str

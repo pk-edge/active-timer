@@ -1,11 +1,12 @@
 "use client";
 import { useState, useRef } from "react";
 import useSWR from "swr";
-import { DownloadCloud, Upload, CheckCircle2, Download, Apple, Monitor } from "lucide-react";
-import { getInstallers, uploadInstaller, activateInstaller, getInstallerDownload, fmtBytes } from "@/lib/api";
+import { format, parseISO } from "date-fns";
+import { DownloadCloud, Upload, CheckCircle2, Download, Apple, Monitor, History, User } from "lucide-react";
+import { getInstallers, uploadInstaller, activateInstaller, getInstallerDownload, getInstallerDownloads, fmtBytes } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
-import type { Installer } from "@/types";
+import type { Installer, InstallerDownload } from "@/types";
 
 function UploadForm({ onUploaded }: { onUploaded: () => void }) {
   const [platform, setPlatform] = useState("macos");
@@ -68,9 +69,15 @@ function UploadForm({ onUploaded }: { onUploaded: () => void }) {
   );
 }
 
+const PLATFORM_ICON: Record<string, React.ReactNode> = {
+  macos:   <Apple   size={13} className="shrink-0" />,
+  windows: <Monitor size={13} className="shrink-0" />,
+};
+
 export default function AgentsPage() {
   const { loading, can } = useUser();
   const { data: installers, mutate } = useSWR<Installer[]>("installers", getInstallers);
+  const { data: downloads }          = useSWR<InstallerDownload[]>("installer-downloads", getInstallerDownloads);
 
   if (loading) return null;
   if (!can("agents", "view")) return <AccessDenied label="Agents" />;
@@ -157,6 +164,73 @@ export default function AgentsPage() {
             {installers?.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-gray-400 text-sm">No agent builds uploaded yet.</td></tr>}
           </tbody>
         </table>
+        </div>
+      </div>
+
+      {/* Download history */}
+      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+        <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
+          <History size={15} className="text-gray-400" />
+          <p className="text-sm font-semibold text-gray-700">Download history</p>
+          {downloads && downloads.length > 0 && (
+            <span className="ml-auto text-xs text-gray-400">{downloads.length} record{downloads.length !== 1 ? "s" : ""}</span>
+          )}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[640px]">
+            <thead>
+              <tr className="text-gray-500 text-xs uppercase tracking-wide border-b border-gray-100">
+                <th className="text-left px-4 py-2.5 font-semibold">User</th>
+                <th className="text-left px-4 py-2.5 font-semibold">Platform</th>
+                <th className="text-left px-4 py-2.5 font-semibold">Version</th>
+                <th className="text-left px-4 py-2.5 font-semibold">Downloaded at</th>
+              </tr>
+            </thead>
+            <tbody>
+              {downloads?.map(dl => (
+                <tr key={dl.id} className="border-t border-gray-100 hover:bg-gray-50">
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-brand-100 text-brand-600 shrink-0">
+                        <User size={12} />
+                      </span>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-gray-800 truncate">{dl.downloaded_by_name}</p>
+                        <p className="text-xs text-gray-400 truncate">{dl.downloaded_by_email}</p>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-600 capitalize">
+                      {PLATFORM_ICON[dl.platform]}
+                      {dl.platform}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="text-sm font-medium text-gray-800">v{dl.version}</span>
+                    <span className="ml-1.5 text-xs text-gray-400 uppercase">{dl.installer_type}</span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                    {format(parseISO(dl.downloaded_at), "MMM d, yyyy · h:mm a")}
+                  </td>
+                </tr>
+              ))}
+              {downloads?.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="px-4 py-10 text-center text-gray-400 text-sm">
+                    No downloads recorded yet.
+                  </td>
+                </tr>
+              )}
+              {!downloads && (
+                <tr>
+                  <td colSpan={4} className="px-4 py-6 text-center text-gray-300 text-sm animate-pulse">
+                    Loading…
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
