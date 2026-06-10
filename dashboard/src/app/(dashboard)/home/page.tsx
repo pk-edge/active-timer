@@ -1,20 +1,84 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
   Monitor, BarChart2, Users2, DownloadCloud,
   Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon,
-  AppWindow, Globe, ChevronDown, CalendarDays,
+  AppWindow, ChevronDown, CalendarDays,
 } from "lucide-react";
 import { format, subDays, startOfMonth, startOfYear, subMonths } from "date-fns";
 import {
-  getOverview, getRealtime, getHomeAppUsage, getMyStats,
-  fmtSeconds, fmtTime,
+  getOverview, getHomeAppUsage, getMyStats,
+  fmtSeconds, fmtTime, BASE,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, StatusDonut, UsagePie } from "@/components/charts";
 import type { OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
+
+// ── SSE realtime hook ─────────────────────────────────────────────────────────
+
+function useRealtimeStream(groupId?: string): RealtimeDevice[] {
+  const [devices, setDevices] = useState<RealtimeDevice[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("tt_token") : null;
+    if (!token) return;
+
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    let backoff = 1_000;
+
+    async function connect() {
+      while (!ctrl.signal.aborted) {
+        try {
+          const qs = groupId ? `?group_id=${groupId}` : "";
+          const res = await fetch(`${BASE}/v1/home/stream${qs}`, {
+            headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+            signal: ctrl.signal,
+            cache: "no-store",
+          });
+
+          if (!res.ok || !res.body) {
+            await new Promise(r => setTimeout(r, backoff));
+            backoff = Math.min(backoff * 2, 30_000);
+            continue;
+          }
+
+          backoff = 1_000;
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+
+          while (!ctrl.signal.aborted) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop() ?? "";
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                try { setDevices(JSON.parse(line.slice(6))); } catch { /* skip malformed */ }
+              }
+            }
+          }
+        } catch {
+          if (ctrl.signal.aborted) break;
+          await new Promise(r => setTimeout(r, backoff));
+          backoff = Math.min(backoff * 2, 30_000);
+        }
+      }
+    }
+
+    connect();
+    return () => ctrl.abort();
+  // token is read fresh each run; groupId is the only external dep
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupId]);
+
+  return devices;
+}
 
 // ── Stat period filter ────────────────────────────────────────────────────────
 
@@ -169,16 +233,13 @@ function AdminHome() {
   const { data: stats } = useSWR<OverviewStats>(
     ["home-overview", sinceDate, untilDate],
     () => getOverview(undefined, 7, sinceDate, untilDate),
-    { refreshInterval: 60_000 },
+    { refreshInterval: 300_000 },
   );
-  const { data: realtime } = useSWR<RealtimeDevice[]>(
-    "home-realtime",
-    () => getRealtime(),
-    { refreshInterval: 10_000 },
-  );
+  const realtime = useRealtimeStream();
   const { data: apps } = useSWR<AppUsage[]>(
     "home-apps",
     () => getHomeAppUsage(undefined, 1),
+    { refreshInterval: 300_000 },
   );
 
   const s = stats?.status ?? { active: 0, passive: 0, inactive: 0 };

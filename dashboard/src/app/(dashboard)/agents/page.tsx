@@ -2,8 +2,8 @@
 import { useState, useRef } from "react";
 import useSWR from "swr";
 import { format, parseISO } from "date-fns";
-import { DownloadCloud, Upload, CheckCircle2, Download, Apple, Monitor, History, User } from "lucide-react";
-import { getInstallers, uploadInstaller, activateInstaller, getInstallerDownload, getInstallerDownloads, fmtBytes } from "@/lib/api";
+import { DownloadCloud, Upload, CheckCircle2, Download, Apple, Monitor, History, User, Trash2 } from "lucide-react";
+import { getInstallers, uploadInstaller, activateInstaller, deleteInstaller, getInstallerDownload, getInstallerDownloads, fmtBytes } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
 import type { Installer, InstallerDownload } from "@/types";
@@ -85,6 +85,10 @@ export default function AgentsPage() {
   async function activate(id: string) {
     try { await activateInstaller(id); mutate(); } catch (e) { alert(String(e instanceof Error ? e.message : e)); }
   }
+  async function remove(id: string, version: string) {
+    if (!confirm(`Delete v${version}? This cannot be undone.`)) return;
+    try { await deleteInstaller(id); mutate(); } catch (e) { alert(String(e instanceof Error ? e.message : e)); }
+  }
   async function download(id: string) {
     try { const { download_url } = await getInstallerDownload(id); window.open(download_url, "_blank"); }
     catch (e) { alert(String(e instanceof Error ? e.message : e)); }
@@ -157,6 +161,11 @@ export default function AgentsPage() {
                   <button onClick={() => download(i.id)} className="text-gray-400 hover:text-brand-600 p-1"><Download size={15} /></button>
                   {can("agents", "edit") && !i.is_active && (
                     <button onClick={() => activate(i.id)} className="text-xs text-brand-600 hover:text-brand-700 ml-2">Activate</button>
+                  )}
+                  {can("agents", "delete") && (
+                    <button onClick={() => remove(i.id, i.version)} title="Delete" className="text-gray-300 hover:text-red-500 p-1 ml-1 inline-flex">
+                      <Trash2 size={14} />
+                    </button>
                   )}
                 </td>
               </tr>

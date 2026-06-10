@@ -142,6 +142,23 @@ async def activate_installer(
     return _out(v)
 
 
+@router.delete("/{installer_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_installer(
+    installer_id: str,
+    user: Employee = Depends(require("agents", "delete")),
+    db: AsyncSession = Depends(get_db),
+):
+    v = await _get_installer(installer_id, user, db)
+    try:
+        _s3_client().delete_object(Bucket=settings.S3_BUCKET, Key=v.s3_key)
+    except Exception as e:
+        log.warning("Could not delete installer from S3 (key=%s): %s", v.s3_key, e)
+    await audit.record(db, user, "installer.delete", "installer", str(v.id),
+                       {"platform": v.platform, "version": v.version})
+    await db.delete(v)
+    await db.commit()
+
+
 @router.get("/{installer_id}/download")
 async def download_installer(
     installer_id: str,
