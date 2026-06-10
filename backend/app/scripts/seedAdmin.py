@@ -14,52 +14,25 @@ Prints the company enrollment_token which is embedded into agent installers.
 import argparse
 import asyncio
 import getpass
-import secrets
 import sys
 
-from sqlalchemy import select
-
+from app.db.admin import ensure_admin
 from app.db.base import AsyncSessionLocal, init_db
-from app.db.models import Company, Employee
-from app.core.security import hash_password
 
 
 async def run(company_name: str, email: str, name: str, password: str) -> None:
     await init_db()
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Company).where(Company.name == company_name))
-        company = result.scalar_one_or_none()
-        if not company:
-            company = Company(name=company_name, enrollment_token=secrets.token_hex(24))
-            db.add(company)
-            await db.flush()
-            print(f"Created company: {company.name}")
-        else:
-            print(f"Using existing company: {company.name}")
-
-        email = email.lower()
-        result = await db.execute(select(Employee).where(Employee.email == email))
-        emp = result.scalar_one_or_none()
-        if emp:
-            emp.password_hash = hash_password(password)
-            emp.role = "admin"
-            emp.is_active = True
-            emp.name = name
-            print(f"Updated: {email}")
-        else:
-            emp = Employee(
-                company_id=company.id, email=email, name=name,
-                role="admin", password_hash=hash_password(password),
-            )
-            db.add(emp)
-            print(f"Created admin: {email}")
-
+        company, created = await ensure_admin(
+            db, company_name=company_name, email=email, name=name, password=password
+        )
         await db.commit()
 
-        print("\n" + "─" * 60)
-        print(f"Enrollment token:  {company.enrollment_token}")
-        print("Embed this in the agent installer.")
-        print("─" * 60)
+    print(f"Admin {'created' if created else 'updated'}: {email.lower()}  (company: {company.name})")
+    print("\n" + "─" * 60)
+    print(f"Enrollment token:  {company.enrollment_token}")
+    print("Embed this in the agent installer.")
+    print("─" * 60)
 
 
 def main() -> None:
