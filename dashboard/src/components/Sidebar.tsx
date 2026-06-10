@@ -101,7 +101,7 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           open ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         )}
       >
-        <div className="flex items-center gap-3 px-5 py-4 border-b border-gray-200">
+        <div className="h-14 shrink-0 flex items-center gap-3 px-5 border-b border-gray-200">
           <EdgeLogo variant="icon" size={30} />
           <span className="font-bold text-sm tracking-tight" style={{ color: "#4a0f70" }}>
             TimeTracker

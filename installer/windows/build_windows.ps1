@@ -1,15 +1,13 @@
-# TimeTracker Windows Build Script — v1.1.3 (WiX v7)
+# TimeTracker Windows Build Script
 #
-# Builds timetracker.exe once with PyInstaller, then packages TWO MSIs:
-#   output\TimeTracker-staging.msi    → https://api.tracker.staging.onedge.co
-#   output\TimeTracker-production.msi → https://api.tracker.onedge.co
+# Builds timetracker.exe once with PyInstaller, then packages a single MSI.
+# backends.json is the single source of truth for URL + token.
 #
 # Usage:
 #   cd active-time\installer\windows
-#   .\build_windows.ps1
-#   .\build_windows.ps1 -Only staging           # one environment only
-#   .\build_windows.ps1 -Only production
-#   .\build_windows.ps1 -SkipPyInstaller        # re-package existing dist\
+#   .\build_windows.ps1                              - uses backends.json from agent dir if present
+#   .\build_windows.ps1 <token> [<api_url>]          - embeds given token and optional API URL
+#   .\build_windows.ps1 -SkipPyInstaller             - re-package existing dist\
 #
 # Prerequisites (install once):
 #   1. Python 3.11 or 3.12 (python.org) — add to PATH
@@ -19,38 +17,30 @@
 #        wix eula accept wix7
 #        wix extension add WixToolset.UI.wixext/7.0.0 -g
 #        wix extension add WixToolset.Util.wixext/7.0.0 -g
+#
+# Output: output\TimeTracker-<version>.msi
 
 param(
-    [string]$Only           = "",        # "staging" | "production" | "" (both)
-    [string]$Version        = "1.1.3",
+    [Parameter(Position=0)][string]$Token          = "",
+    [Parameter(Position=1)][string]$ApiUrl         = "",
+    [string]$Version        = "",        # auto-detected from version.py if blank
     [switch]$SkipPyInstaller
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
-$AgentDir   = Join-Path $ScriptDir "..\..\agent"
+$AgentDir   = (Resolve-Path (Join-Path $ScriptDir "..\..\agent")).Path
 $DistDir    = Join-Path $AgentDir  "dist\timetracker"
 $OutputDir  = Join-Path $ScriptDir "output"
 $WxsFile    = Join-Path $ScriptDir "TimeTracker.wxs"
 $WixObjDir  = Join-Path $ScriptDir "wix_obj"
 $FragFile   = Join-Path $WixObjDir "AgentFiles.wxs"
 
-# ── Environment definitions ───────────────────────────────────────────────────
-$Environments = [ordered]@{
-    staging    = "https://api.tracker.staging.onedge.co"
-    production = "https://api.tracker.onedge.co"
-}
-
-Write-Host "=== TimeTracker Windows Build v$Version ===" -ForegroundColor Cyan
-Write-Host "Agent dir : $AgentDir"
-Write-Host "Output    : $OutputDir"
-if ($Only) { Write-Host "Only      : $Only" }
-
-# ── 1. Virtual environment ────────────────────────────────────────────────────
+# ── 1. Virtual environment + PyInstaller ──────────────────────────────────────
 if (-not $SkipPyInstaller) {
     Push-Location $AgentDir
     if (-not (Test-Path ".venv")) {
-        Write-Host "`n[1/3] Creating virtual environment…" -ForegroundColor Yellow
+        Write-Host "`n[1/3] Creating virtual environment..." -ForegroundColor Yellow
         python -m venv .venv
     }
     Write-Host "[1/3] Installing requirements…" -ForegroundColor Yellow
@@ -58,7 +48,6 @@ if (-not $SkipPyInstaller) {
     & .\.venv\Scripts\pip install --quiet -r requirements.txt
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw "pip install failed" }
 
-    # ── 2. PyInstaller ────────────────────────────────────────────────────────
     Write-Host "`n[2/3] Running PyInstaller…" -ForegroundColor Yellow
     & .\.venv\Scripts\pyinstaller timetracker.spec --clean --noconfirm
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw "PyInstaller failed" }
@@ -68,16 +57,56 @@ if (-not $SkipPyInstaller) {
 }
 
 if (-not (Test-Path $DistDir)) {
-    throw "Dist directory not found at $DistDir — run without -SkipPyInstaller"
+    throw "Dist directory not found at $DistDir - run without -SkipPyInstaller"
 }
 $DistDir = (Resolve-Path $DistDir).Path
 
-# ── 3. Generate WiX fragment once (shared by both environments) ───────────────
-Write-Host "`n[3/3] Packaging MSIs…" -ForegroundColor Yellow
+# ── Auto-detect version ───────────────────────────────────────────────────────
+if (-not $Version) {
+    $venvPython = Join-Path $AgentDir ".venv\Scripts\python.exe"
+    if (Test-Path $venvPython) {
+        Push-Location $AgentDir
+        $Version = (& $venvPython -c "from version import __version__; print(__version__)" 2>$null)
+        Pop-Location
+    }
+    if (-not $Version) { $Version = "1.0.0" }
+}
+
+Write-Host "Building TimeTracker v$Version ..."
+
+# ── 2. Embed backends.json ────────────────────────────────────────────────────
+# backends.json is the single source of truth for URL + token.
+# Written into _internal\ so config.py picks it up as bundle resources.
+$InternalDir = Join-Path $DistDir "_internal"
+New-Item -ItemType Directory -Force -Path $InternalDir | Out-Null
+
+if ($Token -and $ApiUrl) {
+    $json = '[{"url":"' + $ApiUrl + '","token":"' + $Token + '"}]'
+    Set-Content -Path (Join-Path $InternalDir "backends.json") -Value $json -Encoding UTF8
+    Write-Host "Embedded backends.json from arguments (url=$ApiUrl)."
+} elseif ($Token) {
+    $srcBackends = Join-Path $AgentDir "backends.json"
+    if (Test-Path $srcBackends) {
+        Copy-Item $srcBackends (Join-Path $InternalDir "backends.json") -Force
+        Write-Host "Embedded backends.json (token arg ignored - backends.json has its own token)."
+    } else {
+        $tokenBytes = [System.Text.Encoding]::UTF8.GetBytes($Token)
+        [System.IO.File]::WriteAllBytes((Join-Path $InternalDir "enrollment_token.txt"), $tokenBytes)
+        Write-Host "Embedded enrollment_token.txt (no backends.json found)."
+    }
+} else {
+    $srcBackends = Join-Path $AgentDir "backends.json"
+    if (Test-Path $srcBackends) {
+        Copy-Item $srcBackends (Join-Path $InternalDir "backends.json") -Force
+        Write-Host "Embedded backends.json."
+    }
+}
+
+# ── 3. Generate WiX fragment (all _internal\ files auto-enumerated) ───────────
+Write-Host "`n[3/3] Packaging MSI…" -ForegroundColor Yellow
 New-Item -ItemType Directory -Force -Path $WixObjDir | Out-Null
 New-Item -ItemType Directory -Force -Path $OutputDir  | Out-Null
 
-# Collect all files except timetracker.exe (handled by TimeTrackerExe component)
 $allFiles = Get-ChildItem -Path $DistDir -Recurse -File |
     Where-Object { $_.Name -ne "timetracker.exe" -or $_.DirectoryName -ne $DistDir }
 
@@ -146,44 +175,23 @@ foreach ($line in $compLines) { [void]$sb.AppendLine($line) }
 [void]$sb.AppendLine('</Wix>')
 $sb.ToString() | Set-Content -Path $FragFile -Encoding UTF8
 
-# ── Build one MSI per environment ─────────────────────────────────────────────
-foreach ($env in $Environments.Keys) {
-    if ($Only -and $Only -ne $env) { continue }
+# ── 4. Build MSI ──────────────────────────────────────────────────────────────
+$MsiOut = Join-Path $OutputDir "TimeTracker-${Version}.msi"
 
-    $ApiBase = $Environments[$env]
-    $MsiOut  = Join-Path $OutputDir "TimeTracker-${env}.msi"
+wix build `
+    -d "Version=$Version" `
+    -d "DistDir=$DistDir" `
+    -ext WixToolset.UI.wixext `
+    -ext WixToolset.Util.wixext `
+    -out $MsiOut `
+    $WxsFile $FragFile
 
-    Write-Host ""
-    Write-Host "  ── $env → $ApiBase" -ForegroundColor White
+if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 
-    # Write api_base.txt for this environment
-    $apiFile = Join-Path $DistDir "_internal\api_base.txt"
-    Set-Content -Path $apiFile -Value $ApiBase -Encoding UTF8
-    Write-Host "    api_base.txt written"
+$size = [math]::Round((Get-Item $MsiOut).Length / 1MB, 1)
 
-    # Build MSI
-    wix build `
-        -d "Version=$Version" `
-        -d "DistDir=$DistDir" `
-        -ext WixToolset.UI.wixext `
-        -ext WixToolset.Util.wixext `
-        -out $MsiOut `
-        $WxsFile $FragFile
-
-    if ($LASTEXITCODE -ne 0) { throw "wix build failed for $env" }
-
-    $size = [math]::Round((Get-Item $MsiOut).Length / 1MB, 1)
-    Write-Host "    -> $MsiOut ($size MB)" -ForegroundColor Green
-}
-
-# ── Done ──────────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "=== Build complete ===" -ForegroundColor Green
-foreach ($env in $Environments.Keys) {
-    if ($Only -and $Only -ne $env) { continue }
-    $msi = Join-Path $OutputDir "TimeTracker-${env}.msi"
-    if (Test-Path $msi) {
-        Write-Host "  $env : $msi"
-    }
-}
-Write-Host "Version : $Version"
+Write-Host "[OK] Built: $MsiOut ($size MB)" -ForegroundColor Green
+Write-Host "  Version : $Version"
+Write-Host ""
+Write-Host "User flow: msiexec /i `"$MsiOut`" /quiet /norestart"

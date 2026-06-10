@@ -4,6 +4,7 @@ device-facing update-check endpoint that drives agent self-update.
 Installers are stored in the same MinIO/S3 bucket as screenshots, under
 installers/{company_id}/{platform}/{version}/TimeTracker.{ext}.
 """
+import asyncio
 import hashlib
 import logging
 import uuid
@@ -82,7 +83,11 @@ async def upload_installer(
 
     s3_key = f"installers/{user.company_id}/{platform}/{version}/TimeTracker.{_EXT[installer_type]}"
     try:
-        _s3_client().upload_fileobj(file.file, settings.S3_BUCKET, s3_key)
+        # boto3 upload is blocking — a multi-hundred-MB installer would freeze the
+        # event loop (and every other request) for the whole transfer. Run it in a thread.
+        await asyncio.to_thread(
+            _s3_client().upload_fileobj, file.file, settings.S3_BUCKET, s3_key
+        )
     except Exception as e:
         log.error("Installer upload failed: %s", e)
         raise HTTPException(status_code=500, detail="Upload to storage failed")
@@ -140,6 +145,25 @@ async def activate_installer(
     await db.commit()
     await db.refresh(v)
     return _out(v)
+
+
+@router.delete("/{installer_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_installer(
+    installer_id: str,
+    user: Employee = Depends(require("agents", "delete")),
+    db: AsyncSession = Depends(get_db),
+):
+    v = await _get_installer(installer_id, user, db)
+    try:
+        await asyncio.to_thread(
+            _s3_client().delete_object, Bucket=settings.S3_BUCKET, Key=v.s3_key
+        )
+    except Exception as e:
+        log.warning("Could not delete installer from S3 (key=%s): %s", v.s3_key, e)
+    await audit.record(db, user, "installer.delete", "installer", str(v.id),
+                       {"platform": v.platform, "version": v.version})
+    await db.delete(v)
+    await db.commit()
 
 
 @router.get("/{installer_id}/download")

@@ -19,8 +19,8 @@ Two access modes, decided automatically by how many admins already exist:
 
 2. LOCKED (one or more admins already exist)
    The endpoint now requires the X-Setup-Secret header, matched against
-   SETUP_SECRET (or JWT_SECRET as a fallback). This prevents anyone from
-   hijacking the admin once the system is set up.
+   SETUP_SECRET. If SETUP_SECRET is unset the endpoint is disabled (every
+   reset rejected). This prevents anyone from hijacking the admin once set up.
 
        curl -X POST .../v1/setup/reset-admin \
          -H "X-Setup-Secret: YOUR_SECRET" \
@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.core.config import get_settings
-from app.core.security import hash_password
+from app.core.security import hash_password_async
 from app.db.models import Company, Employee
 
 log = logging.getLogger("setup")
@@ -83,7 +83,8 @@ async def reset_admin(
     """Create or reset the admin user.
 
     No secret required on first run (zero admins). Once an admin exists, the
-    X-Setup-Secret header is required and matched against SETUP_SECRET/JWT_SECRET.
+    X-Setup-Secret header is required and matched against SETUP_SECRET only.
+    If SETUP_SECRET is unset, the endpoint is disabled (every reset is rejected).
     """
     settings = get_settings()
     existing_admins = await _admin_count(db)
@@ -91,7 +92,9 @@ async def reset_admin(
 
     if not bootstrap:
         # Locked mode — an admin already exists, so a valid secret is required.
-        valid_secrets = [s for s in [settings.SETUP_SECRET, settings.JWT_SECRET] if s]
+        # Opt-in only: matched against SETUP_SECRET. If SETUP_SECRET is unset the
+        # list is empty, so every request is rejected (endpoint effectively off).
+        valid_secrets = [settings.SETUP_SECRET] if settings.SETUP_SECRET else []
         provided = x_setup_secret or ""
         if not any(_secrets.compare_digest(provided, s) for s in valid_secrets):
             raise HTTPException(
@@ -125,7 +128,7 @@ async def reset_admin(
     emp = result.scalar_one_or_none()
 
     if emp:
-        emp.password_hash = hash_password(body.password)
+        emp.password_hash = await hash_password_async(body.password)
         emp.role          = "admin"
         emp.is_active     = True
         emp.is_approved   = True
@@ -139,7 +142,7 @@ async def reset_admin(
             role          = "admin",
             is_active     = True,
             is_approved   = True,
-            password_hash = hash_password(body.password),
+            password_hash = await hash_password_async(body.password),
         )
         db.add(emp)
         action = "created"

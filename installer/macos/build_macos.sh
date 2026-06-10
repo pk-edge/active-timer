@@ -1,132 +1,182 @@
 #!/usr/bin/env bash
-# bash 4+ required for associative arrays (Homebrew: brew install bash)
-# TimeTracker macOS Build Script
+# Build TimeTracker macOS installer DMG
 #
-# Builds TimeTracker.app once with PyInstaller, then packages TWO DMGs:
-#   TimeTracker-staging.dmg    → https://api.tracker.staging.onedge.co
-#   TimeTracker-production.dmg → https://api.tracker.onedge.co
+# Flow for the end-user:
+#   1. Open the DMG
+#   2. Double-click TimeTracker-<version>.pkg
+#   3. Click through the installer wizard → Install
+#   4. TimeTracker is copied to /Applications and launches immediately
 #
 # Usage:
-#   cd active-time/installer/macos
-#   ./build_macos.sh
-#   ./build_macos.sh --skip-pyinstaller        # re-package existing dist/
-#   ./build_macos.sh --only staging            # one environment only
-#   ./build_macos.sh --only production
+#   ./build_macos.sh                       — uses enrollment_token.txt + backends.json if present
+#   ./build_macos.sh <token> [<api_url>]   — embeds the given token and optional API URL
 #
-# Requirements:
-#   - Python 3.11+ (python3 on PATH)
-#   - macOS 12+, Xcode CLT: xcode-select --install
-#   - hdiutil (built-in on macOS)
+# Prerequisites: Python venv with pyinstaller, pkgbuild + hdiutil (built-in macOS)
+#
+# Output: dist/TimeTracker-<version>.dmg  (contains a .pkg installer inside)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_DIR="$(cd "$SCRIPT_DIR/../../agent" && pwd)"
-DIST_APP="$AGENT_DIR/dist/TimeTracker.app"
-VERSION="${VERSION:-1.1.3}"
-SKIP_PYINSTALLER=false
-ONLY=""
+cd "$AGENT_DIR"
 
-# ── Environments: parallel arrays (bash 3.2 compatible) ──────────────────────
-ENVS=(staging production)
-URL_staging="https://api.tracker.staging.onedge.co"
-URL_production="https://api.tracker.onedge.co"
+VENV="$AGENT_DIR/.venv"
 
-# ── Parse args ────────────────────────────────────────────────────────────────
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --skip-pyinstaller) SKIP_PYINSTALLER=true ;;
-    --only)             shift; ONLY="${1:-}" ;;
-    --version=*)        VERSION="${1#*=}" ;;
-    --version)          shift; VERSION="${1:-}" ;;
-  esac
-  shift
-done
-
-echo "=== TimeTracker macOS Build v$VERSION ==="
-
-# ── 1. Virtual environment + PyInstaller ──────────────────────────────────────
-if [ "$SKIP_PYINSTALLER" = false ]; then
-  cd "$AGENT_DIR"
-
-  if [ ! -d ".venv" ]; then
-    echo -e "\n[1/3] Creating virtual environment…"
-    python3 -m venv .venv
-  fi
-
-  echo "[1/3] Installing requirements…"
-  .venv/bin/pip install --quiet --upgrade pip
-  .venv/bin/pip install --quiet -r requirements.txt
-
-  echo -e "\n[2/3] Running PyInstaller…"
-  .venv/bin/pyinstaller timetracker.spec --clean --noconfirm
-
-  if [ ! -d "$DIST_APP" ]; then
-    echo "ERROR: PyInstaller did not produce $DIST_APP" >&2
+if [ ! -x "$VENV/bin/pyinstaller" ]; then
+    echo "ERROR: PyInstaller not found. Run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
     exit 1
-  fi
-else
-  echo -e "\n[1-2/3] Skipping PyInstaller."
-  if [ ! -d "$DIST_APP" ]; then
-    echo "ERROR: $DIST_APP not found — run without --skip-pyinstaller first." >&2
-    exit 1
-  fi
 fi
 
-# Resource dir inside the frozen macOS bundle (matches config.py logic)
-RESOURCES="$DIST_APP/Contents/Resources"
+# ── Version ───────────────────────────────────────────────────────────────────
+VERSION=$("$VENV/bin/python" -c "from version import __version__; print(__version__)")
+echo "Building TimeTracker v${VERSION} …"
 
-# ── 2. Package a DMG for each environment ────────────────────────────────────
-echo -e "\n[3/3] Packaging DMGs…"
+ARG_TOKEN="${1:-}"
+ARG_URL="${2:-}"
 
-_build_dmg() {
-  local env="$1"          # staging | production
-  local url="$2"          # API base URL
-  local dmg_out="$SCRIPT_DIR/TimeTracker-${env}.dmg"
+# ── Temp dirs (all cleaned up on exit) ───────────────────────────────────────
+SCRIPTS_DIR=$(mktemp -d)
+ROOT_DIR=$(mktemp -d)
+STAGING=$(mktemp -d)
+trap 'rm -rf "$SCRIPTS_DIR" "$ROOT_DIR" "$STAGING"' EXIT
 
-  echo ""
-  echo "  ── $env → $url"
+# ── 1. PyInstaller ────────────────────────────────────────────────────────────
+"$VENV/bin/pyinstaller" timetracker.spec --noconfirm
+echo "PyInstaller complete."
 
-  # Write api_base.txt into a temporary copy of the app
-  local stage
-  stage="$(mktemp -d)"
-  trap "rm -rf '$stage'" RETURN
+# ── 2. Embed config files into the app bundle ─────────────────────────────────
+RESOURCES="$AGENT_DIR/dist/TimeTracker.app/Contents/Resources"
 
-  cp -R "$DIST_APP" "$stage/TimeTracker.app"
-  echo -n "$url" > "$stage/TimeTracker.app/Contents/Resources/api_base.txt"
+# backends.json is the single source of truth for URL + token.
+# If args were passed, write them into backends.json format so everything
+# stays in one place and the agent's re-enrollment detection works correctly.
+if [ -n "$ARG_TOKEN" ] && [ -n "$ARG_URL" ]; then
+    printf '[{"url":"%s","token":"%s"}]\n' "$ARG_URL" "$ARG_TOKEN" > "$RESOURCES/backends.json"
+    echo "Embedded backends.json from arguments (url=$ARG_URL)."
+elif [ -n "$ARG_TOKEN" ]; then
+    # Token only — inject into existing backends.json if present, otherwise keep
+    # the token as a standalone file (no URL override).
+    if [ -f "$AGENT_DIR/backends.json" ]; then
+        cp "$AGENT_DIR/backends.json" "$RESOURCES/"
+        echo "Embedded backends.json (token arg ignored — backends.json has its own token)."
+    else
+        printf '%s' "$ARG_TOKEN" > "$RESOURCES/enrollment_token.txt"
+        echo "Embedded enrollment_token.txt (no backends.json found)."
+    fi
+elif [ -f "$AGENT_DIR/backends.json" ]; then
+    cp "$AGENT_DIR/backends.json" "$RESOURCES/"
+    echo "Embedded backends.json."
+fi
 
-  # Re-sign with ad-hoc identity so macOS Gatekeeper is satisfied locally
-  codesign --force --deep --sign - "$stage/TimeTracker.app" 2>/dev/null \
-    && echo "    signed (ad-hoc)" \
-    || echo "    WARNING: codesign failed — app may show Gatekeeper warning"
+# ── 3. Installer scripts ──────────────────────────────────────────────────────
 
-  # Add /Applications symlink for drag-install UX
-  ln -s /Applications "$stage/Applications"
+# preinstall: quit any running instance + clear stale localhost identity
+cat > "$SCRIPTS_DIR/preinstall" << 'EOF'
+#!/bin/bash
+# Quit any running instance gracefully before upgrade
+pkill -x "timetracker" 2>/dev/null || true
+sleep 1
 
-  rm -f "$dmg_out"
-  hdiutil create \
-    -volname "TimeTracker" \
-    -srcfolder "$stage" \
+# Clear the stored identity on every install so the agent re-enrolls fresh
+# against the backend configured in backends.json. This ensures a URL or token
+# change in backends.json always takes effect without manual cleanup.
+for HOME_DIR in /Users/*/; do
+    IDENTITY="$HOME_DIR/Library/Application Support/TimeTracker/identity.json"
+    if [ -f "$IDENTITY" ]; then
+        rm -f "$IDENTITY"
+        echo "Cleared identity at $IDENTITY (will re-enroll on next launch)"
+    fi
+done
+
+exit 0
+EOF
+
+# postinstall: launch the app for the current GUI user right after install
+cat > "$SCRIPTS_DIR/postinstall" << 'EOF'
+#!/bin/bash
+# Find the logged-in GUI user (installer runs as root).
+LOGGED_USER=$(stat -f "%Su" /dev/console 2>/dev/null || echo "")
+
+if [ -z "$LOGGED_USER" ] || [ "$LOGGED_USER" = "root" ] || [ "$LOGGED_USER" = "loginwindow" ]; then
+    exit 0
+fi
+
+USER_UID=$(id -u "$LOGGED_USER" 2>/dev/null || echo "")
+[ -z "$USER_UID" ] && exit 0
+
+# Set up LaunchAgent for auto-start on login (idempotent).
+PLIST_DIR="/Users/$LOGGED_USER/Library/LaunchAgents"
+PLIST="$PLIST_DIR/com.timetracker.agent.plist"
+mkdir -p "$PLIST_DIR"
+
+cat > "$PLIST" << PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.timetracker.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/Applications/TimeTracker.app/Contents/MacOS/timetracker</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+  </dict>
+</plist>
+PLIST
+
+chown "$LOGGED_USER" "$PLIST"
+
+# Launch immediately in the user's GUI session.
+launchctl asuser "$USER_UID" open -a /Applications/TimeTracker.app
+
+exit 0
+EOF
+
+chmod +x "$SCRIPTS_DIR/preinstall" "$SCRIPTS_DIR/postinstall"
+
+# ── 4. Build the .pkg installer ───────────────────────────────────────────────
+# pkgbuild --root copies everything from ROOT_DIR into --install-location.
+# So we place TimeTracker.app inside ROOT_DIR → it lands at /Applications/TimeTracker.app.
+cp -R "$AGENT_DIR/dist/TimeTracker.app" "$ROOT_DIR/"
+
+PKG_PATH="$AGENT_DIR/dist/TimeTracker-${VERSION}.pkg"
+
+pkgbuild \
+    --root "$ROOT_DIR" \
+    --install-location /Applications \
+    --scripts "$SCRIPTS_DIR" \
+    --identifier "com.timetracker.agent" \
+    --version "$VERSION" \
+    "$PKG_PATH"
+
+echo "Package built: $(basename "$PKG_PATH")"
+
+# ── 5. Wrap the .pkg in a DMG ─────────────────────────────────────────────────
+cp "$PKG_PATH" "$STAGING/"
+
+DMG_PATH="$SCRIPT_DIR/TimeTracker-${VERSION}.dmg"
+rm -f "$DMG_PATH"
+
+hdiutil create \
+    -volname "TimeTracker ${VERSION}" \
+    -srcfolder "$STAGING" \
     -ov \
     -format UDZO \
-    -fs HFS+ \
-    "$dmg_out" 2>&1 | grep -v "^hdiutil:"
+    -imagekey zlib-level=9 \
+    "$DMG_PATH"
 
-  local size
-  size=$(du -sh "$dmg_out" | cut -f1)
-  echo "    -> $dmg_out ($size)"
-}
-
-for env in "${ENVS[@]}"; do
-  [ -n "$ONLY" ] && [ "$ONLY" != "$env" ] && continue
-  url_var="URL_${env}"
-  _build_dmg "$env" "${!url_var}"
-done
-
-echo -e "\n=== Build complete ==="
-for env in "${ENVS[@]}"; do
-  [ -n "$ONLY" ] && [ "$ONLY" != "$env" ] && continue
-  dmg="$SCRIPT_DIR/TimeTracker-${env}.dmg"
-  [ -f "$dmg" ] && echo "  $env : $dmg"
-done
-echo "Version : $VERSION"
+echo ""
+echo "✓ Built: $DMG_PATH"
+echo "  Size : $(du -sh "$DMG_PATH" | cut -f1)"
+echo ""
+echo "User flow: Open DMG → double-click the .pkg → click Install → app launches automatically."

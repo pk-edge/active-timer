@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -22,6 +23,17 @@ def verify_password(plain: str, hashed: Optional[str]) -> bool:
         return bcrypt.checkpw(plain.encode(), hashed.encode())
     except ValueError:
         return False
+
+
+# bcrypt burns ~100-300ms of CPU per call; run it off the event loop in request
+# handlers or a burst of logins stalls every in-flight request (incl. ingest).
+
+async def hash_password_async(plain: str) -> str:
+    return await asyncio.to_thread(hash_password, plain)
+
+
+async def verify_password_async(plain: str, hashed: Optional[str]) -> bool:
+    return await asyncio.to_thread(verify_password, plain, hashed)
 
 
 # ── JWT ───────────────────────────────────────────────────────────────────────

@@ -1,13 +1,13 @@
 "use client";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
-import { getDevices } from "@/lib/api";
+import { getDevices, getUsers } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
 import { useDevicesPush } from "@/hooks/useDevicesPush";
 import DeviceCard from "./_components/DeviceCard";
-import { Monitor, Wifi, WifiOff, Search, X } from "lucide-react";
-import type { Device } from "@/types";
+import { Monitor, Wifi, WifiOff, Search, X, Users2 } from "lucide-react";
+import type { Device, User } from "@/types";
 
 type Filter = "all" | "online" | "offline";
 
@@ -54,12 +54,21 @@ export default function DevicesPage() {
   useDevicesPush();
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
+  const [view, setView] = useState<"all" | "byUser">("all");
 
-  const { data: devices, isLoading } = useSWR<Device[]>("devices", getDevices, {
+  const { data: devices, isLoading, mutate } = useSWR<Device[]>("devices", getDevices, {
     refreshInterval: 5_000,
     revalidateOnFocus: true,
     revalidateOnReconnect: true,
   });
+
+  // Employees for the assign dropdown — needs users.view to populate.
+  const canAssign = can("devices", "assign") && can("users", "view");
+  const { data: users } = useSWR<User[]>(canAssign ? "users-for-assign" : null, () => getUsers());
+  const employees = useMemo(
+    () => (users ?? []).map(u => ({ id: u.id, name: u.name })),
+    [users],
+  );
 
   const online  = devices?.filter(d => d.is_online).length ?? 0;
   const offline = (devices?.length ?? 0) - online;
@@ -80,13 +89,38 @@ export default function DevicesPage() {
     return list;
   }, [devices, filter, search]);
 
+  const grouped = useMemo(() => {
+    const m = new Map<string, { name: string; devices: Device[] }>();
+    for (const d of filtered) {
+      const key = d.employee_id ?? "__unassigned__";
+      if (!m.has(key)) m.set(key, { name: d.employee_name ?? "Unassigned", devices: [] });
+      m.get(key)!.devices.push(d);
+    }
+    return [...m.entries()].sort((a, b) =>
+      a[0] === "__unassigned__" ? -1 :
+      b[0] === "__unassigned__" ? 1 :
+      a[1].name.localeCompare(b[1].name));
+  }, [filtered]);
+
   if (loading) return null;
   if (!can("devices", "view")) return <AccessDenied label="Devices" />;
   if (isLoading) return <PageSkeleton />;
 
   return (
     <div>
-      <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 mb-1">All Devices</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
+        <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">All Devices</h1>
+        <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
+          <button onClick={() => setView("all")}
+                  className={`px-3 py-1.5 text-sm font-medium transition ${view === "all" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
+            All devices
+          </button>
+          <button onClick={() => setView("byUser")}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition ${view === "byUser" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
+            <Users2 size={14} /> By user
+          </button>
+        </div>
+      </div>
       <p className="text-gray-500 text-sm mb-6">Live — refreshes every 5 seconds</p>
 
       {/* Stat cards — clickable filter */}
@@ -137,16 +171,48 @@ export default function DevicesPage() {
       </div>
 
       {/* Device grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-        {filtered.map(d => <DeviceCard key={d.id} device={d} />)}
-        {filtered.length === 0 && (
-          <p className="col-span-full text-gray-400 text-sm py-12 text-center">
-            {search || filter !== "all"
-              ? "No devices match your filter."
-              : "No devices enrolled yet. Install the agent on a laptop to get started."}
-          </p>
-        )}
-      </div>
+      {view === "all" && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          {filtered.map(d => (
+            <DeviceCard key={d.id} device={d} employees={employees}
+                        canAssign={canAssign} onAssigned={() => mutate()} />
+          ))}
+          {filtered.length === 0 && (
+            <p className="col-span-full text-gray-400 text-sm py-12 text-center">
+              {search || filter !== "all"
+                ? "No devices match your filter."
+                : "No devices enrolled yet. Install the agent on a laptop to get started."}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Grouped by user */}
+      {view === "byUser" && (
+        <div className="space-y-6">
+          {grouped.map(([key, group]) => (
+            <div key={key}>
+              <div className="flex items-center gap-2 mb-2.5">
+                <p className={`text-sm font-semibold ${key === "__unassigned__" ? "text-amber-600" : "text-gray-800"}`}>
+                  {group.name}
+                </p>
+                <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+                  {group.devices.length} device{group.devices.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                {group.devices.map(d => (
+                  <DeviceCard key={d.id} device={d} employees={employees}
+                              canAssign={canAssign} onAssigned={() => mutate()} />
+                ))}
+              </div>
+            </div>
+          ))}
+          {grouped.length === 0 && (
+            <p className="text-gray-400 text-sm py-12 text-center">No devices match your filter.</p>
+          )}
+        </div>
+      )}
 
       {search || filter !== "all" ? (
         <p className="text-xs text-gray-400 mt-3">{filtered.length} of {devices?.length ?? 0} device{devices?.length !== 1 ? "s" : ""}</p>

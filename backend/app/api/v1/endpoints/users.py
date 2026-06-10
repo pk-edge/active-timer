@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require
 from app.core import audit
-from app.core.security import hash_password
+from app.core.security import hash_password_async
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
 from app.schemas.rbac import UserIn, UserPatch, UserOut, ApproveRequest
 
@@ -59,14 +59,20 @@ async def _resolve_role(role_id: str | None, company_id, db: AsyncSession) -> Ro
 
 async def _set_group_access(emp_id, company_id, group_ids: list[str], db: AsyncSession) -> None:
     await db.execute(delete(EmployeeGroupAccess).where(EmployeeGroupAccess.employee_id == emp_id))
-    for gid in group_ids:
+    guids = []
+    for gid in dict.fromkeys(group_ids):  # dedupe, preserve order
         try:
-            guid = uuid.UUID(gid)
+            guids.append(uuid.UUID(gid))
         except ValueError:
             continue
-        exists = await db.execute(select(Group.id).where(Group.id == guid, Group.company_id == company_id))
-        if exists.first():
-            db.add(EmployeeGroupAccess(employee_id=emp_id, group_id=guid))
+    if not guids:
+        return
+    # Validate every id against the company in one query (was one per group).
+    valid = (await db.execute(
+        select(Group.id).where(Group.id.in_(guids), Group.company_id == company_id)
+    )).scalars().all()
+    for guid in valid:
+        db.add(EmployeeGroupAccess(employee_id=emp_id, group_id=guid))
 
 
 @router.get("", response_model=list[UserOut])
@@ -165,7 +171,7 @@ async def create_user(
         name=body.name,
         role="employee",
         role_id=role.id if role else None,
-        password_hash=hash_password(body.password) if body.password else None,
+        password_hash=await hash_password_async(body.password) if body.password else None,
         is_active=True,
     )
     db.add(emp)
@@ -212,17 +218,28 @@ async def update_user(
     db: AsyncSession = Depends(get_db),
 ):
     emp = await _get_user(user_id, user.company_id, db)
-    if body.name is not None:
+    changed: dict = {}
+    if body.name is not None and body.name != emp.name:
+        changed["name"] = {"from": emp.name, "to": body.name}
         emp.name = body.name
     if body.role_id is not None:
         role = await _resolve_role(body.role_id, user.company_id, db)
-        emp.role_id = role.id if role else None
+        new_role_id = role.id if role else None
+        if new_role_id != emp.role_id:
+            changed["role"] = role.name if role else None
+        emp.role_id = new_role_id
     if body.password:
-        emp.password_hash = hash_password(body.password)
-    if body.is_active is not None:
+        changed["password"] = "changed"
+        emp.password_hash = await hash_password_async(body.password)
+    if body.is_active is not None and body.is_active != emp.is_active:
+        changed["is_active"] = body.is_active
         emp.is_active = body.is_active
     if body.group_ids is not None:
+        changed["group_ids"] = body.group_ids
         await _set_group_access(emp.id, user.company_id, body.group_ids, db)
+    if changed:
+        await audit.record(db, user, "user.update", "user", user_id,
+                           {"email": emp.email, "changes": changed})
     await db.commit()
 
     fresh = await db.execute(

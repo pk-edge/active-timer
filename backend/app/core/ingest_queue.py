@@ -46,6 +46,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.config import get_settings
+
 log = logging.getLogger("ingest_queue")
 
 # ── Tuning constants ──────────────────────────────────────────────────────────
@@ -53,7 +55,7 @@ QUEUE_MAXSIZE   = 100_000   # drop back-pressure threshold
 BATCH_SIZE      = 200       # events per DB write cycle
 BATCH_WAIT      = 0.4       # seconds to wait for a full batch before flushing
 MIN_WORKERS     = 4         # always-on workers
-MAX_WORKERS     = 16        # hard ceiling
+MAX_WORKERS     = get_settings().INGEST_MAX_WORKERS  # env-driven; keep < DB pool
 SCALE_INTERVAL  = 5.0       # how often to check queue depth
 SCALE_UP_AT     = 500       # grow pool when queue exceeds this
 SCALE_DOWN_AT   = 50        # shrink pool when queue drops below this
@@ -67,6 +69,9 @@ class IngestQueue:
         self._workers: list[asyncio.Task] = []
         self._monitor_task: asyncio.Task | None = None
         self._running = False
+        # Graceful scale-down: workers exit between batches when this is > 0,
+        # instead of being cancelled mid-DB-write (which would drop the batch).
+        self._shrink_pending = 0
 
         # In-memory device state cache: {device_id: {...}} used by realtime endpoint
         self.device_cache: dict[str, dict] = {}
@@ -137,10 +142,11 @@ class IngestQueue:
                 log.info("IngestQueue scaled UP → %d workers (queue depth %d)",
                          alive + 1, depth)
 
-            elif depth < SCALE_DOWN_AT and alive > MIN_WORKERS:
-                # Mark one worker for graceful exit on next empty wait
-                self._workers[0].cancel()
-                log.info("IngestQueue scaled DOWN → %d workers (queue depth %d)",
+            elif depth < SCALE_DOWN_AT and alive > MIN_WORKERS and self._shrink_pending == 0:
+                # Ask one worker to exit after its current batch — never cancel
+                # mid-write, or the batch it already popped would be lost.
+                self._shrink_pending = 1
+                log.info("IngestQueue scaling DOWN → %d workers (queue depth %d)",
                          alive - 1, depth)
 
     # ── Worker coroutine ──────────────────────────────────────────────────────
@@ -155,6 +161,13 @@ class IngestQueue:
         log.debug("Worker %d starting", worker_id)
         try:
             while True:
+                # Honour a pending scale-down between batches (safe exit point).
+                if self._shrink_pending > 0:
+                    alive = len([t for t in self._workers if not t.done()])
+                    if alive > MIN_WORKERS:
+                        self._shrink_pending -= 1
+                        break
+
                 batch: list[dict] = []
 
                 # Block until at least one item arrives

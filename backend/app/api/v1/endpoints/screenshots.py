@@ -1,6 +1,7 @@
 import uuid
 import logging
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import List
 
 import boto3
@@ -8,6 +9,7 @@ from botocore.config import Config as BotoConfig
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.api.deps import get_db, get_current_device, get_current_admin, require
 from app.core.config import get_settings
@@ -20,10 +22,14 @@ router   = APIRouter()
 settings = get_settings()
 
 
+@lru_cache(maxsize=4)
 def _s3_client(public: bool = False):
     """
     public=True  → uses S3_PUBLIC_ENDPOINT_URL for presigned URLs the agent will PUT to
     public=False → uses S3_ENDPOINT_URL for internal operations (list, delete, get)
+
+    Cached: client construction costs ~10ms and boto3 clients are thread-safe,
+    so building one per request (or per presigned URL) wastes CPU on hot paths.
     """
     kwargs = {"region_name": settings.AWS_REGION}
     if settings.AWS_ACCESS_KEY_ID:
@@ -66,13 +72,16 @@ async def request_upload_url(
     except (ValueError, OSError):
         captured = datetime.now(timezone.utc)
 
-    existing = await db.execute(select(Screenshot).where(Screenshot.id == ss_uuid))
-    ss = existing.scalar_one_or_none()
-    if ss is None:
-        ss = Screenshot(id=ss_uuid, device_id=device.id, s3_key=s3_key, captured_at=captured, file_size=body.file_size)
-        db.add(ss)
-    else:
-        ss.s3_key = s3_key; ss.captured_at = captured; ss.file_size = body.file_size
+    # Single round-trip upsert (agents retry uploads, so the row may exist).
+    await db.execute(
+        pg_insert(Screenshot)
+        .values(id=ss_uuid, device_id=device.id, s3_key=s3_key,
+                captured_at=captured, file_size=body.file_size)
+        .on_conflict_do_update(
+            index_elements=["id"],
+            set_={"s3_key": s3_key, "captured_at": captured, "file_size": body.file_size},
+        )
+    )
     await db.commit()
 
     return UploadResponse(upload_url=url, s3_key=s3_key)
