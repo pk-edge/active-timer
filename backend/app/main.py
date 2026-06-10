@@ -40,65 +40,9 @@ def _cors_allow_origin(origin: str | None) -> str | None:
     return None
 
 
-async def _auto_seed() -> None:
-    """Ensure the company + first admin exist, from env vars.
-
-    Triggered by setting all three of SEED_COMPANY / SEED_EMAIL / SEED_PASSWORD.
-    Idempotent and admin-keyed: the company is reused if it already exists, and
-    the admin is created only if that email is not already present. This means a
-    missing admin gets created even on a DB where the company already exists.
-    The stored password is never overwritten on subsequent boots.
-    """
-    s = settings
-    if not (s.SEED_COMPANY and s.SEED_EMAIL and s.SEED_PASSWORD):
-        return
-
-    import secrets
-    from sqlalchemy import select
-    from app.db.base import AsyncSessionLocal
-    from app.db.models import Company, Employee
-    from app.core.security import hash_password
-
-    log = logging.getLogger("auto_seed")
-
-    async with AsyncSessionLocal() as db:
-        # Company — reuse the named one if present, otherwise create it.
-        result = await db.execute(select(Company).where(Company.name == s.SEED_COMPANY))
-        company = result.scalar_one_or_none()
-        if not company:
-            company = Company(name=s.SEED_COMPANY, enrollment_token=secrets.token_hex(24))
-            db.add(company)
-            await db.flush()
-            log.info("Auto-seed: created company '%s'", s.SEED_COMPANY)
-
-        # Admin — create only if this email is not already registered.
-        email = s.SEED_EMAIL.lower()
-        result = await db.execute(select(Employee).where(Employee.email == email))
-        if result.scalar_one_or_none():
-            log.info("Auto-seed skipped — admin '%s' already exists", email)
-            return
-
-        emp = Employee(
-            company_id=company.id,
-            email=email,
-            name=s.SEED_NAME,
-            role="admin",
-            is_active=True,
-            is_approved=True,
-            password_hash=hash_password(s.SEED_PASSWORD),
-        )
-        db.add(emp)
-        await db.commit()
-
-        log.info("Auto-seed complete — admin '%s' created for company '%s'", email, s.SEED_COMPANY)
-        log.info("Enrollment token: %s", company.enrollment_token)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await _auto_seed()           # no-op if SEED_* vars are not set
-    await seed_rbac.run()        # idempotent — system roles (Super Admin, Viewer, Talent)
     await ingest_queue.start()   # start async worker pool
     yield
     await ingest_queue.stop()    # drain + shutdown workers cleanly
