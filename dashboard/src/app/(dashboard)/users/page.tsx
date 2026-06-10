@@ -2,15 +2,16 @@
 import { useState, useMemo, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import useSWR from "swr";
-import { Plus, Pencil, UserX, Search, X, UserCheck, Trash2, UserCheck2 } from "lucide-react";
+import { Plus, Pencil, UserX, Search, X, UserCheck, Trash2, UserCheck2, Monitor } from "lucide-react";
 import {
   getUsers, getPendingUsers, createUser, updateUser, deleteUser,
   deactivateUser, activateUser, approveUser, getRoles, getGroups,
+  getDevices, assignDevice,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
 import ConfirmDialog from "@/components/ConfirmDialog";
-import type { User, Role, Group } from "@/types";
+import type { User, Role, Group, Device } from "@/types";
 
 // ── Create / Edit modal ───────────────────────────────────────────────────────
 
@@ -29,6 +30,27 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
   const selectedRole = roles.find(r => r.id === roleId);
   const showGroups   = selectedRole?.scope_type === "groups";
 
+  // Devices panel — existing users only; attach/unlink needs devices.assign.
+  const { can } = useUser();
+  const showDevices = !!user && can("devices", "view");
+  const canAssign   = can("devices", "assign");
+  const [deviceBusy, setDeviceBusy] = useState(false);
+
+  const { data: allDevices, mutate: mutateDevices } = useSWR<Device[]>(
+    showDevices ? "devices" : null, getDevices,
+  );
+  const myDevices  = (allDevices ?? []).filter(d => d.employee_id === user?.id);
+  const unassigned = (allDevices ?? []).filter(d => !d.employee_id);
+
+  async function setDeviceOwner(deviceId: string, owner: string | null) {
+    setDeviceBusy(true);
+    try {
+      await assignDevice(deviceId, owner);
+      await mutateDevices();
+    } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
+    finally { setDeviceBusy(false); }
+  }
+
   async function save() {
     setSaving(true); setErr("");
     const body: Record<string, unknown> = {
@@ -45,12 +67,12 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
 
   return (
     <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md">
+      <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h2 className="font-semibold text-gray-900">{user ? "Edit user" : "Add user"}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
         </div>
-        <div className="p-5 space-y-3">
+        <div className="p-5 space-y-3 overflow-y-auto">
           <div>
             <label className="block text-xs font-medium text-gray-500 mb-1">Name</label>
             <input value={name} onChange={e => setName(e.target.value)}
@@ -92,6 +114,49 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
                     {g.name}
                   </label>
                 ))}
+              </div>
+            </div>
+          )}
+          {showDevices && (
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">
+                Devices ({myDevices.length})
+              </label>
+              <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
+                {myDevices.length === 0 && (
+                  <p className="text-xs text-gray-400 px-3 py-2.5">No devices linked yet.</p>
+                )}
+                {myDevices.map(d => (
+                  <div key={d.id} className="flex items-center gap-2 px-3 py-2">
+                    <Monitor size={13} className="text-gray-400 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm text-gray-800 truncate">{d.hostname}</p>
+                      <p className="text-[11px] text-gray-400 capitalize">
+                        {d.platform} · {d.is_online ? "online" : "offline"}
+                      </p>
+                    </div>
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${d.is_online ? "bg-green-500" : "bg-gray-300"}`} />
+                    {canAssign && (
+                      <button onClick={() => setDeviceOwner(d.id, null)} disabled={deviceBusy}
+                              className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-50 shrink-0"
+                              title="Unlink device">
+                        Unlink
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {canAssign && unassigned.length > 0 && (
+                  <div className="px-3 py-2">
+                    <select value="" disabled={deviceBusy}
+                            onChange={e => e.target.value && setDeviceOwner(e.target.value, user!.id)}
+                            className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-600 bg-white focus:outline-none focus:ring-2 focus:ring-brand-300 disabled:opacity-50">
+                      <option value="">+ Attach an unassigned device…</option>
+                      {unassigned.map(d => (
+                        <option key={d.id} value={d.id}>{d.hostname} ({d.platform})</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
             </div>
           )}
