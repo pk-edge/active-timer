@@ -212,17 +212,28 @@ async def update_user(
     db: AsyncSession = Depends(get_db),
 ):
     emp = await _get_user(user_id, user.company_id, db)
-    if body.name is not None:
+    changed: dict = {}
+    if body.name is not None and body.name != emp.name:
+        changed["name"] = {"from": emp.name, "to": body.name}
         emp.name = body.name
     if body.role_id is not None:
         role = await _resolve_role(body.role_id, user.company_id, db)
-        emp.role_id = role.id if role else None
+        new_role_id = role.id if role else None
+        if new_role_id != emp.role_id:
+            changed["role"] = role.name if role else None
+        emp.role_id = new_role_id
     if body.password:
+        changed["password"] = "changed"
         emp.password_hash = hash_password(body.password)
-    if body.is_active is not None:
+    if body.is_active is not None and body.is_active != emp.is_active:
+        changed["is_active"] = body.is_active
         emp.is_active = body.is_active
     if body.group_ids is not None:
+        changed["group_ids"] = body.group_ids
         await _set_group_access(emp.id, user.company_id, body.group_ids, db)
+    if changed:
+        await audit.record(db, user, "user.update", "user", user_id,
+                           {"email": emp.email, "changes": changed})
     await db.commit()
 
     fresh = await db.execute(

@@ -6,10 +6,10 @@ import { format } from "date-fns";
 import {
   Monitor, Globe, Lock, MousePointer,
   Search, X, ChevronDown } from "lucide-react";
-import { getLogs, getDevices, fmtTime, fmtSeconds } from "@/lib/api";
+import { getLogs, getDevices, getUsers, fmtTime, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
-import type { LogEvent, Device } from "@/types";
+import type { LogEvent, Device, User } from "@/types";
 import RefreshButton from "@/components/RefreshButton";
 
 const EVENT_ICON: Record<string, React.ReactNode> = {
@@ -94,6 +94,11 @@ function LogRow({ e }: { e: LogEvent }) {
           : <span className="text-gray-300">—</span>}
       </td>
       <td className="py-3 px-4 text-xs whitespace-nowrap">
+        {e.employee_name
+          ? <span className="font-medium text-gray-700">{e.employee_name}</span>
+          : <span className="text-gray-300">—</span>}
+      </td>
+      <td className="py-3 px-4 text-xs whitespace-nowrap">
         <Link
           href={`/devices/${e.device_id}`}
           className="text-gray-500 hover:text-brand-600 transition font-medium"
@@ -110,24 +115,27 @@ export default function LogsPage() {
   const today = format(new Date(), "yyyy-MM-dd");
   const [selDate,   setSelDate]   = useState(today);
   const [selDevice, setSelDevice] = useState("");
+  const [selUser,   setSelUser]   = useState("");
   const [selType,   setSelType]   = useState("");
   const [search,    setSearch]    = useState("");
 
   const { data: devices } = useSWR<Device[]>("devices", getDevices);
+  const { data: users }   = useSWR<User[]>("users-list", () => getUsers());
 
   const logsOpts = (() => {
-    const opts: { since?: number; until?: number; device_id?: string; event_type?: string } = {};
+    const opts: { since?: number; until?: number; device_id?: string; employee_id?: string; event_type?: string } = {};
     if (selDate) {
       opts.since = Math.floor(new Date(selDate + "T00:00:00").getTime() / 1000);
       opts.until = opts.since + 86400;
     }
-    if (selDevice) opts.device_id  = selDevice;
-    if (selType)   opts.event_type = selType;
+    if (selDevice) opts.device_id   = selDevice;
+    if (selUser)   opts.employee_id = selUser;
+    if (selType)   opts.event_type  = selType;
     return opts;
   })();
 
   const { data: logs, isLoading, mutate } = useSWR<LogEvent[]>(
-    ["logs", selDate, selDevice, selType],
+    ["logs", selDate, selDevice, selUser, selType],
     () => getLogs(logsOpts),
     { refreshInterval: 15_000 },
   );
@@ -138,9 +146,10 @@ export default function LogsPage() {
     const q = search.toLowerCase();
     return logs.filter(
       e =>
-        (e.app_name     ?? "").toLowerCase().includes(q) ||
-        (e.window_title ?? "").toLowerCase().includes(q) ||
-        (e.url          ?? "").toLowerCase().includes(q) ||
+        (e.app_name      ?? "").toLowerCase().includes(q) ||
+        (e.window_title  ?? "").toLowerCase().includes(q) ||
+        (e.url           ?? "").toLowerCase().includes(q) ||
+        (e.employee_name ?? "").toLowerCase().includes(q) ||
         e.hostname.toLowerCase().includes(q),
     );
   }, [logs, search]);
@@ -199,6 +208,24 @@ export default function LogsPage() {
             </div>
           </div>
 
+          {/* User */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500 font-medium">User</label>
+            <div className="relative">
+              <select
+                value={selUser}
+                onChange={e => { setSelUser(e.target.value); setSelDevice(""); }}
+                className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
+              >
+                <option value="">All users</option>
+                {users?.map(u => (
+                  <option key={u.id} value={u.id}>{u.name || u.email}</option>
+                ))}
+              </select>
+              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            </div>
+          </div>
+
           {/* Event type */}
           <div className="flex flex-col gap-1">
             <label className="text-xs text-gray-500 font-medium">Event type</label>
@@ -224,7 +251,7 @@ export default function LogsPage() {
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
               <input
                 type="text"
-                placeholder="App, window title, URL, hostname…"
+                placeholder="App, window title, URL, user, hostname…"
                 value={search}
                 onChange={e => setSearch(e.target.value)}
                 className="w-full pl-9 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
@@ -287,6 +314,7 @@ export default function LogsPage() {
                     <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Type</th>
                     <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Activity</th>
                     <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Duration</th>
+                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">User</th>
                     <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Device</th>
                   </tr>
                 </thead>

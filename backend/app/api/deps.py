@@ -89,8 +89,14 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     if user.role_obj:
-        user._perms = {(p.module, p.action) for p in user.role_obj.permissions}
         user._scope_type = user.role_obj.scope_type
+        # System roles with scope_type="all" (Super Admin) always get full access —
+        # matches the frontend can() shortcut and survives DB permission gaps when new
+        # modules are added to permissions.py before the server restarts.
+        if user.role_obj.scope_type == "all" and user.role_obj.is_system:
+            user._perms = set(all_permissions())
+        else:
+            user._perms = {(p.module, p.action) for p in user.role_obj.permissions}
     elif user.role in ("admin", "manager"):       # legacy fallback (pre-RBAC accounts)
         user._perms = set(all_permissions())
         user._scope_type = "all"

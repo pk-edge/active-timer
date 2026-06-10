@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from sqlalchemy import text
 from app.api.deps import get_db, require, get_current_admin, get_current_device
+from app.core import audit
 from app.db.models import BlockedUrl, Device, Employee
 from app.schemas.policy import BlockedUrlOut, BlockedUrlCreate, BlockedUrlUpdate, AgentPolicyItem
 
@@ -140,6 +141,9 @@ async def create_blocked_url(
         created_by=admin.id,
     )
     db.add(rule)
+    await db.flush()
+    await audit.record(db, admin, "policy.create", "policy", None,
+                       {"pattern": rule.pattern, "target_type": rule.target_type})
     await db.commit()
     await db.refresh(rule)
     return rule
@@ -164,6 +168,8 @@ async def update_blocked_url(
         raise HTTPException(status_code=404, detail="Rule not found")
     for field, val in body.model_dump(exclude_none=True).items():
         setattr(rule, field, val)
+    await audit.record(db, admin, "policy.update", "policy", rule_id,
+                       {"pattern": rule.pattern})
     await db.commit()
     await db.refresh(rule)
     return rule
@@ -186,4 +192,6 @@ async def delete_blocked_url(
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
     rule.is_deleted = True
+    await audit.record(db, admin, "policy.delete", "policy", rule_id,
+                       {"pattern": rule.pattern})
     await db.commit()

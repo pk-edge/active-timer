@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 
 from app.api.deps import get_db, require
+from app.core import audit
 from app.core.scoping import visible_device_ids, ALL
 from app.db.models import AppCategory, AppCategoryRule, Employee
 from app.schemas.tech import (
@@ -86,23 +87,20 @@ async def _scope_clause(admin: Employee, db: AsyncSession) -> tuple[str, dict]:
     return " AND ae.device_id = ANY(:vids)", {"vids": [str(i) for i in ids]}
 
 
-def _resolve_dates(days: int, since_date: Optional[str], until_date: Optional[str]) -> tuple[str, str]:
-    """Return (since_dt, until_dt) as YYYY-MM-DD strings.
-    Uses explicit dates when provided, otherwise derives them from `days` relative to today."""
+def _resolve_dates(days: int, since_date: Optional[str], until_date: Optional[str]) -> tuple[_date, _date]:
+    """Return (since_dt, until_dt) as date objects for asyncpg CAST(:x AS date) compatibility."""
     if since_date and until_date:
-        return since_date, until_date
+        return _date.fromisoformat(since_date), _date.fromisoformat(until_date)
     today = _date.today()
-    return str(today - _td(days=days - 1)), str(today)
+    return today - _td(days=days - 1), today
 
 
-def _prev_dates(since_dt: str, until_dt: str) -> tuple[str, str]:
+def _prev_dates(since_dt: _date, until_dt: _date) -> tuple[_date, _date]:
     """Return the immediately preceding period of equal length for comparison."""
-    sd = _date.fromisoformat(since_dt)
-    ud = _date.fromisoformat(until_dt)
-    dur = (ud - sd).days + 1
-    p_until = sd - _td(days=1)
+    dur = (until_dt - since_dt).days + 1
+    p_until = since_dt - _td(days=1)
     p_since = p_until - _td(days=dur - 1)
-    return str(p_since), str(p_until)
+    return p_since, p_until
 
 
 # ── Category CRUD ─────────────────────────────────────────────────────────────
@@ -159,6 +157,8 @@ async def create_category(
         is_system=False,
     )
     db.add(cat)
+    await db.flush()
+    await audit.record(db, admin, "category.create", "category", str(cat.id), {"name": cat.name})
     await db.commit()
     await db.refresh(cat)
     return CategoryOut(id=cat.id, name=cat.name, color=cat.color,
@@ -189,6 +189,7 @@ async def update_category(
         cat.color = body.color
     if body.description is not None:
         cat.description = body.description
+    await audit.record(db, admin, "category.update", "category", cat_id, {"name": cat.name})
     await db.commit()
     await db.refresh(cat)
     rules_res = await db.execute(select(AppCategoryRule).where(AppCategoryRule.category_id == cat.id))
@@ -218,8 +219,8 @@ async def delete_category(
         raise HTTPException(status_code=404, detail="Category not found")
     if cat.is_system:
         raise HTTPException(status_code=400, detail="Cannot delete system category")
-    # Soft-delete so category rules and analytics history are preserved
     cat.is_deleted = True
+    await audit.record(db, admin, "category.delete", "category", cat_id, {"name": cat.name})
     await db.commit()
 
 
@@ -310,7 +311,7 @@ async def tech_summary(
         WHERE d.company_id = :company_id
           AND ae.event_type = 'window_change'
           AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           {clause}
     """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
     row = total_res.fetchone()
@@ -324,7 +325,7 @@ async def tech_summary(
         WHERE d.company_id = :company_id
           AND ae.event_type = 'window_change'
           AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           {clause}
         GROUP BY c.name, c.color
         ORDER BY seconds DESC
@@ -339,7 +340,7 @@ async def tech_summary(
         WHERE d.company_id = :company_id
           AND ae.event_type = 'window_change'
           AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           {clause}
         GROUP BY ae.app_name
         ORDER BY seconds DESC
@@ -391,7 +392,7 @@ async def category_allocation(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {clause}
             GROUP BY c.id, c.name, c.color
         ),
@@ -407,7 +408,7 @@ async def category_allocation(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               AND NOT EXISTS (
                   SELECT 1 FROM app_category_rules r2
                   WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
@@ -436,7 +437,7 @@ async def category_allocation(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :prev_since_dt::date AND ae.timestamp < (:prev_until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
               {clause}
             GROUP BY c.name
         ),
@@ -450,7 +451,7 @@ async def category_allocation(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :prev_since_dt::date AND ae.timestamp < (:prev_until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
               AND NOT EXISTS (
                   SELECT 1 FROM app_category_rules r2
                   WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
@@ -465,7 +466,7 @@ async def category_allocation(
                c.users,
                ROUND(100.0 * c.seconds / NULLIF(t.t, 0), 1) AS pct
         FROM combined c, total t
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
+    """), {"company_id": str(admin.company_id), "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams})
     prev_rows = {r.category_name: r for r in prev_res.fetchall()}
 
     result = []
@@ -505,7 +506,8 @@ async def app_trends(
     await _ensure_default_categories(admin.company_id, db)
     clause, sparams = await _scope_clause(admin, db)
 
-    base_params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams}
+    base_params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
+                   "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams}
 
     current_res = await db.execute(text(f"""
         WITH app_data AS (
@@ -523,7 +525,7 @@ async def app_trends(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {clause}
             GROUP BY ae.app_name, c.id, c.name, c.color
         ),
@@ -544,7 +546,7 @@ async def app_trends(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :prev_since_dt::date AND ae.timestamp < (:prev_until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
               {clause}
             GROUP BY ae.app_name
         ),
@@ -623,7 +625,7 @@ async def app_list(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {cat_filter}
               {clause}
             GROUP BY ae.app_name, c.id, c.name, c.color
@@ -669,7 +671,7 @@ async def app_adoption(
         WHERE d.company_id = :company_id
           AND ae.event_type = 'window_change'
           AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           {clause}
         GROUP BY ae.app_name
         ORDER BY seconds DESC
@@ -689,7 +691,7 @@ async def app_adoption(
         WHERE d.company_id = :company_id
           AND ae.event_type = 'window_change'
           AND ae.app_name = ANY(:apps)
-          AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           {clause}
         GROUP BY day, ae.app_name
         ORDER BY day ASC
@@ -738,7 +740,7 @@ async def get_uncategorized(
         WHERE d.company_id = :company_id
           AND ae.event_type = 'window_change'
           AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           AND NOT EXISTS (
               SELECT 1 FROM app_category_rules r
               WHERE r.company_id = d.company_id
@@ -762,14 +764,14 @@ async def get_uncategorized(
         WHERE d.company_id = :company_id
           AND ae.event_type = 'url_visit'
           AND ae.url IS NOT NULL
-          AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           AND NOT EXISTS (
               SELECT 1 FROM app_category_rules r
               WHERE r.company_id = d.company_id
                 AND r.app_pattern = substring(ae.url FROM '^https?://([^/?#]+)')
           )
           {clause}
-        GROUP BY pattern
+        GROUP BY substring(ae.url FROM '^https?://([^/?#]+)')
         HAVING substring(ae.url FROM '^https?://([^/?#]+)') IS NOT NULL
         ORDER BY seconds DESC
         LIMIT :limit
@@ -784,6 +786,7 @@ async def get_uncategorized(
             last_seen=str(r.last_seen) if r.last_seen else None,
         )
         for r in apps_res.fetchall()
+        if r.pattern
     ]
     urls = [
         UncategorizedItem(
@@ -884,7 +887,7 @@ async def website_list(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'url_visit'
               AND ae.url IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined_clause}
         ),
         dur AS (
@@ -973,7 +976,7 @@ async def website_detail(
               AND LOWER(REGEXP_REPLACE(
                     COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), ''),
                     '^www\\.', '')) = LOWER(:host)
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY path ORDER BY visits DESC LIMIT 50
         """), params)
@@ -995,7 +998,7 @@ async def website_detail(
               AND LOWER(REGEXP_REPLACE(
                     COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), ''),
                     '^www\\.', '')) = LOWER(:host)
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY ae.url ORDER BY visits DESC LIMIT 100
         """), params)
@@ -1020,7 +1023,7 @@ async def website_detail(
                   AND LOWER(REGEXP_REPLACE(
                         COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), ''),
                         '^www\\.', '')) = LOWER(:host)
-                  AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   {combined}
             ),
             dur AS (
@@ -1055,7 +1058,7 @@ async def website_detail(
               AND LOWER(REGEXP_REPLACE(
                     COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), ''),
                     '^www\\.', '')) = LOWER(:host)
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY day ORDER BY day ASC
         """), params)
@@ -1100,7 +1103,7 @@ async def app_usage_list(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY ae.app_name
         ),
@@ -1166,7 +1169,7 @@ async def app_usage_detail(
               AND ae.event_type = 'window_change'
               AND ae.app_name = :app_name
               AND ae.window_title IS NOT NULL AND ae.window_title <> ''
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY ae.window_title
             ORDER BY total_secs DESC LIMIT 50
@@ -1188,7 +1191,7 @@ async def app_usage_detail(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name = :app_name
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY e.name, e.email
             ORDER BY total_secs DESC LIMIT 50
@@ -1209,7 +1212,7 @@ async def app_usage_detail(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name = :app_name
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY day ORDER BY day ASC
         """), params)
@@ -1253,7 +1256,7 @@ async def category_usage_list(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY c.id, c.name, c.color
         ),
@@ -1267,7 +1270,7 @@ async def category_usage_list(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               AND NOT EXISTS (
                   SELECT 1 FROM app_category_rules r2
                   WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
@@ -1343,7 +1346,7 @@ async def category_usage_detail(
             WHERE d.company_id = :company_id
               AND r.category_id = :cat_id
               AND ae.event_type = 'window_change'
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
         """), {**params, "cat_id": cat_id})
     else:
@@ -1354,7 +1357,7 @@ async def category_usage_detail(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               AND NOT EXISTS (
                   SELECT 1 FROM app_category_rules r2
                   WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
@@ -1374,7 +1377,7 @@ async def category_usage_detail(
                 WHERE d.company_id = :company_id
                   AND r.category_id = :cat_id
                   AND ae.event_type = 'window_change'
-                  AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   {combined}
                 GROUP BY ae.app_name ORDER BY total_secs DESC LIMIT 50
             """), {**params, "cat_id": cat_id})
@@ -1386,7 +1389,7 @@ async def category_usage_detail(
                 WHERE d.company_id = :company_id
                   AND ae.event_type = 'window_change'
                   AND ae.app_name IS NOT NULL
-                  AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   AND NOT EXISTS (
                       SELECT 1 FROM app_category_rules r2
                       WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
@@ -1414,7 +1417,7 @@ async def category_usage_detail(
                 WHERE d.company_id = :company_id
                   AND r.category_id = :cat_id
                   AND ae.event_type = 'window_change'
-                  AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   {combined}
                 GROUP BY e.name, e.email ORDER BY total_secs DESC LIMIT 100
             """), {**params, "cat_id": cat_id})
@@ -1427,7 +1430,7 @@ async def category_usage_detail(
                 WHERE d.company_id = :company_id
                   AND ae.event_type = 'window_change'
                   AND ae.app_name IS NOT NULL
-                  AND ae.timestamp >= :since_dt::date AND ae.timestamp < (:until_dt::date + INTERVAL '1 day')
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   AND NOT EXISTS (
                       SELECT 1 FROM app_category_rules r2
                       WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name

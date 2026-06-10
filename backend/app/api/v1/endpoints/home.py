@@ -6,10 +6,13 @@ Note: this product has no app/URL *productivity classification*, so these
 dashboards report ACTIVITY (active time, activity status, app/site usage by time)
 rather than ActivTrak-style productive/unproductive percentages.
 """
+import asyncio
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -140,9 +143,14 @@ async def overview(
     # ── Date range for stat cards ─────────────────────────────────────────────
     # When since_date/until_date provided use that range; otherwise "today".
     if since_date and until_date:
-        stat_filter = " AND ae.timestamp >= :stat_since::date AND ae.timestamp < (:stat_until::date + INTERVAL '1 day')"
-        params["stat_since"] = since_date
-        params["stat_until"] = until_date
+        try:
+            stat_since = datetime.strptime(since_date, "%Y-%m-%d").date()
+            stat_until = datetime.strptime(until_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Dates must be YYYY-MM-DD")
+        stat_filter = " AND ae.timestamp >= CAST(:stat_since AS date) AND ae.timestamp < (CAST(:stat_until AS date) + INTERVAL '1 day')"
+        params["stat_since"] = stat_since
+        params["stat_until"] = stat_until
     else:
         stat_filter = " AND ae.timestamp >= date_trunc('day', NOW())"
 
@@ -378,6 +386,80 @@ async def my_stats(
 
 
 # ── Device active-time sync — called by the agent on startup ──────────────────
+
+@router.get("/stream")
+async def stream(
+    group_id: str | None = Query(default=None),
+    user: Employee = Depends(require("home", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    SSE endpoint — pushes the realtime device list whenever ingest lands new data.
+
+    The client receives an initial snapshot immediately, then gets pushed updates
+    as agents report activity.  A heartbeat comment is sent every 25 s so proxies
+    and load-balancers don't kill idle connections.
+    """
+    from app.core import broadcaster
+    from app.core.ingest_queue import ingest_queue
+    from app.db.base import AsyncSessionLocal
+
+    ids        = await _resolve_ids(user, group_id, db)
+    company_id = user.company_id
+
+    async def _payload() -> str:
+        async with AsyncSessionLocal() as sess:
+            rows = await _status_rows(ids, company_id, sess)
+
+        cache  = ingest_queue.device_cache
+        now    = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+
+        for row in rows:
+            cached = cache.get(row["device_id"])
+            if not cached:
+                continue
+            cached_ts = cached.get("last_seen")
+            if cached_ts and cached_ts > cutoff:
+                if cached.get("current_app"):
+                    row["current_app"] = cached["current_app"]
+                row["status"] = (
+                    "passive" if cached.get("latest_type") in _PASSIVE_EVENTS
+                    else "active"
+                )
+
+        return f"data: {json.dumps(rows)}\n\n"
+
+    async def _event_generator():
+        q = broadcaster.subscribe()
+        try:
+            yield await _payload()
+
+            while True:
+                try:
+                    await asyncio.wait_for(q.get(), timeout=25.0)
+                    # Drain any burst that arrived in the same batch
+                    await asyncio.sleep(0.15)
+                    while not q.empty():
+                        q.get_nowait()
+                    yield await _payload()
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            broadcaster.unsubscribe(q)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
 
 @router.get("/device-today-active")
 async def device_today_active(

@@ -7,12 +7,17 @@ class DeviceOut(BaseModel):
     id:             str
     hostname:       str
     platform:       str
+    employee_id:    Optional[str] = None
     employee_name:  Optional[str]
     last_seen:      Optional[datetime]
     last_seen_unix: Optional[int]
     is_online:      bool
 
     model_config = {"from_attributes": True}
+
+
+class AssignDeviceRequest(BaseModel):
+    employee_id: Optional[str] = None   # null/omitted = unassign
 
 
 class TimelineEventOut(BaseModel):

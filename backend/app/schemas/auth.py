@@ -7,6 +7,9 @@ class EnrollRequest(BaseModel):
     hostname:         str
     platform:         str
     agent_version:    Optional[str] = None
+    # Plain str, NOT EmailStr — a malformed detected email must never 422 the
+    # enrollment; provisioning quietly ignores unusable values.
+    employee_email:   Optional[str] = None
 
 
 class EnrollResponse(BaseModel):

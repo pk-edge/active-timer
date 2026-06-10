@@ -41,7 +41,7 @@
 
     <ComponentGroup Id="AgentFiles">
       <Component Directory="dir_internal">
-        <File Source="$(var.DistDir)\_internal\api_base.txt" />
+        <File Source="$(var.DistDir)\_internal\backends.json" />
       </Component>
       <Component Directory="dir_internal">
         <File Source="$(var.DistDir)\_internal\base_library.zip" />

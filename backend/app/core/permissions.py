@@ -14,7 +14,7 @@ class ModuleDef(TypedDict):
 
 MODULES: list[ModuleDef] = [
     {"key": "home",        "label": "Home Dashboards", "actions": ["view"]},
-    {"key": "devices",     "label": "Devices",       "actions": ["view"]},
+    {"key": "devices",     "label": "Devices",       "actions": ["view", "assign"]},
     {"key": "logs",        "label": "Activity Logs", "actions": ["view"]},
     {"key": "reports",     "label": "Reports",       "actions": ["view"]},
     {"key": "screenshots", "label": "Screenshots",   "actions": ["view"]},
