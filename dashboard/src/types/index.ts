@@ -58,6 +58,8 @@ export interface LogEvent {
   timestamp_unix: number;
   device_id:      string;
   hostname:       string;
+  employee_id:    string | null;
+  employee_name:  string | null;
 }
 
 // ── RBAC ──────────────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 
 from app.api.deps import get_db, require
+from app.core import audit
 from app.core.scoping import visible_device_ids, ALL
 from app.db.models import AppCategory, AppCategoryRule, Employee
 from app.schemas.tech import (
@@ -159,6 +160,8 @@ async def create_category(
         is_system=False,
     )
     db.add(cat)
+    await db.flush()
+    await audit.record(db, admin, "category.create", "category", str(cat.id), {"name": cat.name})
     await db.commit()
     await db.refresh(cat)
     return CategoryOut(id=cat.id, name=cat.name, color=cat.color,
@@ -189,6 +192,7 @@ async def update_category(
         cat.color = body.color
     if body.description is not None:
         cat.description = body.description
+    await audit.record(db, admin, "category.update", "category", cat_id, {"name": cat.name})
     await db.commit()
     await db.refresh(cat)
     rules_res = await db.execute(select(AppCategoryRule).where(AppCategoryRule.category_id == cat.id))
@@ -218,8 +222,8 @@ async def delete_category(
         raise HTTPException(status_code=404, detail="Category not found")
     if cat.is_system:
         raise HTTPException(status_code=400, detail="Cannot delete system category")
-    # Soft-delete so category rules and analytics history are preserved
     cat.is_deleted = True
+    await audit.record(db, admin, "category.delete", "category", cat_id, {"name": cat.name})
     await db.commit()
 
 

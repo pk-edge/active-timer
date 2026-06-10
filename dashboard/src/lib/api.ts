@@ -119,12 +119,13 @@ export const getDeviceTopApps = (deviceId: string, days = 7) =>
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
 
-export const getLogs = (opts?: { since?: number; until?: number; device_id?: string; event_type?: string }) => {
+export const getLogs = (opts?: { since?: number; until?: number; device_id?: string; employee_id?: string; event_type?: string }) => {
   const params = new URLSearchParams();
-  if (opts?.since !== undefined) params.set("since",      String(opts.since));
-  if (opts?.until !== undefined) params.set("until",      String(opts.until));
-  if (opts?.device_id)           params.set("device_id",  opts.device_id);
-  if (opts?.event_type)          params.set("event_type", opts.event_type);
+  if (opts?.since !== undefined) params.set("since",        String(opts.since));
+  if (opts?.until !== undefined) params.set("until",        String(opts.until));
+  if (opts?.device_id)           params.set("device_id",    opts.device_id);
+  if (opts?.employee_id)         params.set("employee_id",  opts.employee_id);
+  if (opts?.event_type)          params.set("event_type",   opts.event_type);
   const qs = params.toString();
   return request<LogEvent[]>(`/v1/logs${qs ? `?${qs}` : ""}`);
 };
@@ -232,10 +233,39 @@ export async function uploadInstaller(form: {
 
 export interface AuditEntry {
   id: string; action: string; target_type: string | null; target_id: string | null;
-  metadata: Record<string, unknown> | null; actor_name: string | null; actor_email: string | null;
+  metadata: Record<string, unknown> | null;
+  actor_id: string | null; actor_name: string | null; actor_email: string | null; actor_role: string | null;
   created_at: string | null; created_at_unix: number | null;
 }
-export const getAudit = (limit = 100) => request<AuditEntry[]>(`/v1/audit?limit=${limit}`);
+
+export interface AuditPage { total: number; offset: number; limit: number; entries: AuditEntry[]; }
+
+export interface AuditFilters {
+  limit?: number; offset?: number;
+  action?: string; target_type?: string; actor_id?: string;
+  since?: string; until?: string; search?: string;
+}
+
+export interface AuditFilterOptions {
+  actions: string[];
+  target_types: string[];
+  actors: { id: string; name: string; email: string }[];
+}
+
+export function getAudit(filters: AuditFilters = {}) {
+  const p = new URLSearchParams();
+  if (filters.limit)       p.set("limit",       String(filters.limit));
+  if (filters.offset)      p.set("offset",      String(filters.offset));
+  if (filters.action)      p.set("action",      filters.action);
+  if (filters.target_type) p.set("target_type", filters.target_type);
+  if (filters.actor_id)    p.set("actor_id",    filters.actor_id);
+  if (filters.since)       p.set("since",       filters.since);
+  if (filters.until)       p.set("until",       filters.until);
+  if (filters.search)      p.set("search",      filters.search);
+  return request<AuditPage>(`/v1/audit?${p.toString()}`);
+}
+
+export const getAuditFilterOptions = () => request<AuditFilterOptions>("/v1/audit/filters");
 
 // ── Home dashboards ─────────────────────────────────────────────────────────
 

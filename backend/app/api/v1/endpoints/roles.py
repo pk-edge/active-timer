@@ -126,6 +126,10 @@ async def update_role(
     await db.flush()
     for p in body.permissions:
         db.add(RolePermission(role_id=role.id, module=p.module, action=p.action))
+    await audit.record(db, user, "role.update", "role", role_id, {
+        "name": body.name, "scope_type": body.scope_type,
+        "permissions": [f"{p.module}.{p.action}" for p in body.permissions],
+    })
     await db.commit()
     await db.refresh(role, attribute_names=["permissions"])
     return _role_out(role)

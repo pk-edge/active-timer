@@ -140,9 +140,14 @@ async def overview(
     # ── Date range for stat cards ─────────────────────────────────────────────
     # When since_date/until_date provided use that range; otherwise "today".
     if since_date and until_date:
-        stat_filter = " AND ae.timestamp >= :stat_since::date AND ae.timestamp < (:stat_until::date + INTERVAL '1 day')"
-        params["stat_since"] = since_date
-        params["stat_until"] = until_date
+        try:
+            stat_since = datetime.strptime(since_date, "%Y-%m-%d").date()
+            stat_until = datetime.strptime(until_date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Dates must be YYYY-MM-DD")
+        stat_filter = " AND ae.timestamp >= CAST(:stat_since AS date) AND ae.timestamp < (CAST(:stat_until AS date) + INTERVAL '1 day')"
+        params["stat_since"] = stat_since
+        params["stat_until"] = stat_until
     else:
         stat_filter = " AND ae.timestamp >= date_trunc('day', NOW())"
 
