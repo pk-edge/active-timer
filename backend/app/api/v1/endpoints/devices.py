@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload
 
 from app.api.deps import get_db, get_current_admin, require
 from app.core import audit, broadcaster
@@ -49,7 +49,7 @@ async def list_devices(
         return []
     q = (
         select(Device)
-        .options(selectinload(Device.employee))
+        .options(joinedload(Device.employee))  # many-to-one: one joined query, not two
         .where(Device.company_id == admin.company_id, Device.is_active == True)
         .order_by(Device.last_seen.desc().nullslast())
     )
@@ -207,7 +207,7 @@ async def get_daily_stats(
         text("""
             SELECT
                 DATE(timestamp) AS day,
-                SUM(CASE WHEN event_type NOT IN ('idle_start','lock') THEN duration ELSE 0 END) AS active,
+                SUM(CASE WHEN event_type = 'window_change' THEN duration ELSE 0 END) AS active,
                 SUM(CASE WHEN event_type = 'idle_start' THEN duration ELSE 0 END) AS idle
             FROM activity_events
             WHERE device_id = :device_id

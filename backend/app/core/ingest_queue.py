@@ -69,6 +69,9 @@ class IngestQueue:
         self._workers: list[asyncio.Task] = []
         self._monitor_task: asyncio.Task | None = None
         self._running = False
+        # Graceful scale-down: workers exit between batches when this is > 0,
+        # instead of being cancelled mid-DB-write (which would drop the batch).
+        self._shrink_pending = 0
 
         # In-memory device state cache: {device_id: {...}} used by realtime endpoint
         self.device_cache: dict[str, dict] = {}
@@ -139,10 +142,11 @@ class IngestQueue:
                 log.info("IngestQueue scaled UP → %d workers (queue depth %d)",
                          alive + 1, depth)
 
-            elif depth < SCALE_DOWN_AT and alive > MIN_WORKERS:
-                # Mark one worker for graceful exit on next empty wait
-                self._workers[0].cancel()
-                log.info("IngestQueue scaled DOWN → %d workers (queue depth %d)",
+            elif depth < SCALE_DOWN_AT and alive > MIN_WORKERS and self._shrink_pending == 0:
+                # Ask one worker to exit after its current batch — never cancel
+                # mid-write, or the batch it already popped would be lost.
+                self._shrink_pending = 1
+                log.info("IngestQueue scaling DOWN → %d workers (queue depth %d)",
                          alive - 1, depth)
 
     # ── Worker coroutine ──────────────────────────────────────────────────────
@@ -157,6 +161,13 @@ class IngestQueue:
         log.debug("Worker %d starting", worker_id)
         try:
             while True:
+                # Honour a pending scale-down between batches (safe exit point).
+                if self._shrink_pending > 0:
+                    alive = len([t for t in self._workers if not t.done()])
+                    if alive > MIN_WORKERS:
+                        self._shrink_pending -= 1
+                        break
+
                 batch: list[dict] = []
 
                 # Block until at least one item arrives
