@@ -18,9 +18,19 @@ async def record(
 ) -> None:
     """Write an audit row. Swallows errors so auditing never breaks a mutation."""
     try:
+        # Capture the role name at the time of the action — role assignments
+        # can change later, so we store it immutably here.
+        actor_role: str | None = None
+        role_obj = getattr(actor, "role_obj", None)
+        if role_obj:
+            actor_role = getattr(role_obj, "name", None)
+        if not actor_role:
+            actor_role = getattr(actor, "role", None)
+
         db.add(AuditLog(
             company_id=getattr(actor, "company_id", None),
             actor_employee_id=getattr(actor, "id", None),
+            actor_role=actor_role,
             action=action,
             target_type=target_type,
             target_id=target_id,

@@ -18,6 +18,11 @@ def test_all_permissions_is_sorted_and_unique():
     assert len(perms) == len(set(perms))
 
 
+def test_devices_assign_permission_exists():
+    assert is_valid("devices", "assign")
+    assert ("devices", "assign") in all_permissions()
+
+
 @pytest.mark.parametrize("perms,module,action,allowed", [
     ({("users", "view")}, "users", "view", True),
     ({("users", "view")}, "users", "delete", False),

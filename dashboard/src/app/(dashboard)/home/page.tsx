@@ -5,7 +5,7 @@ import useSWR from "swr";
 import {
   Monitor, BarChart2, Users2, DownloadCloud,
   Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon,
-  Laptop, AppWindow, Globe, ChevronDown, CalendarDays,
+  AppWindow, Globe, ChevronDown, CalendarDays,
 } from "lucide-react";
 import { format, subDays, startOfMonth, startOfYear, subMonths } from "date-fns";
 import {
@@ -14,8 +14,7 @@ import {
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, StatusDonut, UsagePie } from "@/components/charts";
-import RefreshButton from "@/components/RefreshButton";
-import type { Me, OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
+import type { OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
 
 // ── Stat period filter ────────────────────────────────────────────────────────
 
@@ -152,12 +151,9 @@ function StatCard({ label, value, sub, color = "text-gray-900" }: {
 
 // ── Admin / Manager home ──────────────────────────────────────────────────────
 
-function AdminHome({ me }: { me: Me }) {
+function AdminHome() {
   const { can } = useUser();
   const todayStr = format(new Date(), "yyyy-MM-dd");
-  const todayLabel = new Date().toLocaleDateString("en-US", {
-    weekday: "long", month: "long", day: "numeric",
-  });
 
   const [sinceDate, setSinceDate] = useState(todayStr);
   const [untilDate, setUntilDate] = useState(todayStr);
@@ -170,7 +166,7 @@ function AdminHome({ me }: { me: Me }) {
     ? "Avg active / device"
     : "Avg active / device (period)";
 
-  const { data: stats, mutate } = useSWR<OverviewStats>(
+  const { data: stats } = useSWR<OverviewStats>(
     ["home-overview", sinceDate, untilDate],
     () => getOverview(undefined, 7, sinceDate, untilDate),
     { refreshInterval: 60_000 },
@@ -201,19 +197,6 @@ function AdminHome({ me }: { me: Me }) {
 
   return (
     <div className="overflow-y-auto pr-1">
-      {/* Welcome header */}
-      <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">
-            Welcome back, {me.name}!
-          </h1>
-          <p className="text-sm text-gray-500 mt-0.5">
-            <span className="font-medium text-brand-600">{me.role_name}</span> · {todayLabel}
-          </p>
-        </div>
-        <RefreshButton onRefresh={() => mutate()} />
-      </div>
-
       {/* Quick actions */}
       <div className="flex flex-wrap gap-3 mb-6">
         {QUICK_ACTIONS.filter(a => can(a.module, "view")).map(({ href, label, icon: Icon }) => (
@@ -336,11 +319,7 @@ function AdminHome({ me }: { me: Me }) {
 
 // ── Employee home ─────────────────────────────────────────────────────────────
 
-function EmployeeHome({ me }: { me: Me }) {
-  const today = new Date().toLocaleDateString("en-US", {
-    weekday: "long", month: "long", day: "numeric",
-  });
-
+function EmployeeHome() {
   const { data: stats } = useSWR<MyStats>("my-stats", getMyStats, { refreshInterval: 30_000 });
 
   const activeHrs  = ((stats?.active_seconds_today ?? 0) / 3600).toFixed(1);
@@ -348,16 +327,6 @@ function EmployeeHome({ me }: { me: Me }) {
 
   return (
     <div className="overflow-y-auto pr-1">
-      {/* Welcome header */}
-      <div className="mb-6">
-        <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">
-          Welcome back, {me.name}!
-        </h1>
-        <p className="text-sm text-gray-500 mt-0.5">
-          <span className="font-medium text-brand-600">{me.role_name ?? "Employee"}</span> · {today}
-        </p>
-      </div>
-
       {/* Stat cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <StatCard label="Active today"   value={`${activeHrs}h`} color="text-brand-600" />
@@ -421,7 +390,7 @@ export default function HomePage() {
 
   if (loading || !me) return null;
 
-  if (me.scope_type === "own") return <EmployeeHome me={me} />;
+  if (me.scope_type === "own") return <EmployeeHome />;
   if (!can("home", "view"))   return <AccessDenied label={`${me.role_name} Home`} />;
-  return <AdminHome me={me} />;
+  return <AdminHome />;
 }

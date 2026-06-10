@@ -28,7 +28,11 @@ log = logging.getLogger("enrollment")
 from version import __version__
 
 
-def ensure_enrolled(max_attempts: int = 0, shared: dict | None = None) -> dict:
+def ensure_enrolled(
+    max_attempts: int = 0,
+    shared: dict | None = None,
+    employee_email: str | None = None,
+) -> dict:
     """
     Block until enrolled, then return the identity dict.
 
@@ -75,6 +79,7 @@ def ensure_enrolled(max_attempts: int = 0, shared: dict | None = None) -> dict:
                 "hostname":         platform.node(),
                 "platform":         sys.platform.lower(),
                 "agent_version":    __version__,
+                "employee_email":   employee_email,
             }
             try:
                 log.info(
@@ -93,10 +98,11 @@ def ensure_enrolled(max_attempts: int = 0, shared: dict | None = None) -> dict:
                 r.raise_for_status()
                 data = r.json()
                 identity.save(
-                    device_id     = data["device_id"],
-                    jwt_token     = data["jwt_token"],
-                    company_token = company_token,
-                    api_base      = backend_url,
+                    device_id      = data["device_id"],
+                    jwt_token      = data["jwt_token"],
+                    company_token  = company_token,
+                    api_base       = backend_url,
+                    employee_email = employee_email,
                 )
                 _apply_backend(backend_url)
                 log.info(

@@ -2,6 +2,7 @@ export interface Device {
   id:             string;
   hostname:       string;
   platform:       string;
+  employee_id:    string | null;
   employee_name:  string | null;
   last_seen:      string | null;
   last_seen_unix: number | null;
@@ -57,6 +58,8 @@ export interface LogEvent {
   timestamp_unix: number;
   device_id:      string;
   hostname:       string;
+  employee_id:    string | null;
+  employee_name:  string | null;
 }
 
 // ── RBAC ──────────────────────────────────────────────────────────────────────

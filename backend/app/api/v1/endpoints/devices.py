@@ -10,12 +10,12 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_db, get_current_admin, require
-from app.core import broadcaster
+from app.core import audit, broadcaster
 from app.core.config import get_settings
 from app.core.security import decode_token
 from app.core.scoping import visible_device_ids, ALL
 from app.db.models import Device, ActivityEvent, Employee
-from app.schemas.device import DeviceOut, TimelineEventOut, DailyStatOut
+from app.schemas.device import DeviceOut, TimelineEventOut, DailyStatOut, AssignDeviceRequest
 
 router   = APIRouter()
 settings = get_settings()
@@ -63,6 +63,7 @@ async def list_devices(
             id=str(d.id),
             hostname=d.hostname,
             platform=d.platform,
+            employee_id=str(d.employee_id) if d.employee_id else None,
             employee_name=d.employee.name if d.employee else None,
             last_seen=d.last_seen,
             last_seen_unix=int(d.last_seen.timestamp()) if d.last_seen else None,
@@ -70,6 +71,55 @@ async def list_devices(
         )
         for d in devices
     ]
+
+
+@router.patch("/{device_id}/assign", response_model=DeviceOut)
+async def assign_device(
+    device_id: str,
+    body: AssignDeviceRequest,
+    admin: Employee = Depends(require("devices", "assign")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Assign a device to an employee, or unassign with employee_id=null.
+    One employee may own any number of devices."""
+    device = await _get_device_for_admin(device_id, admin, db)
+
+    employee = None
+    if body.employee_id:
+        try:
+            emp_uuid = uuid.UUID(body.employee_id)
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid employee id")
+        employee = (await db.execute(
+            select(Employee).where(
+                Employee.id == emp_uuid,
+                Employee.company_id == admin.company_id,
+                Employee.is_deleted == False,  # noqa: E712
+            )
+        )).scalar_one_or_none()
+        if not employee:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found")
+
+    device.employee_id = employee.id if employee else None
+    await audit.record(
+        db, admin,
+        "device.assigned" if employee else "device.unassigned",
+        "device", str(device.id),
+        {"employee_id": str(employee.id) if employee else None, "source": "portal"},
+    )
+    await db.commit()
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+    return DeviceOut(
+        id=str(device.id),
+        hostname=device.hostname,
+        platform=device.platform,
+        employee_id=str(employee.id) if employee else None,
+        employee_name=employee.name if employee else None,
+        last_seen=device.last_seen,
+        last_seen_unix=int(device.last_seen.timestamp()) if device.last_seen else None,
+        is_online=bool(device.last_seen and device.last_seen > cutoff),
+    )
 
 
 @router.get("/stream")

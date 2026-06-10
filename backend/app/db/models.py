@@ -213,6 +213,7 @@ class AuditLog(Base):
     id:                Mapped[uuid.UUID]        = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
     company_id:        Mapped[uuid.UUID | None] = mapped_column(UUID, nullable=True)
     actor_employee_id: Mapped[uuid.UUID | None] = mapped_column(UUID, nullable=True)
+    actor_role:        Mapped[str | None]       = mapped_column(String, nullable=True)
     action:            Mapped[str]              = mapped_column(String, nullable=False)
     target_type:       Mapped[str | None]       = mapped_column(String, nullable=True)
     target_id:         Mapped[str | None]       = mapped_column(String, nullable=True)

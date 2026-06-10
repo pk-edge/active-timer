@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.api.deps import get_db, get_current_user
 from app.core import audit
+from app.core.provisioning import link_or_provision_employee
 from app.core.security import create_device_token, create_admin_token, verify_password, hash_password
 from app.db.models import Company, Device, Employee
 from app.schemas.auth import EnrollRequest, EnrollResponse, AdminLoginRequest, AdminLoginResponse
@@ -46,6 +47,15 @@ async def enroll_device(body: EnrollRequest, db: AsyncSession = Depends(get_db))
 
     token = create_device_token(str(device.id), str(company.id))
     device.jwt_token = token
+
+    # Auto-link to an employee (creates a Talent when the email is unknown).
+    # Linking must never break enrollment, and never overrides the portal.
+    if body.employee_email and device.employee_id is None:
+        try:
+            await link_or_provision_employee(device, body.employee_email, db)
+        except Exception as e:
+            log.warning("Auto-link failed for %s: %s", body.hostname, e)
+
     await db.commit()
 
     log.info("Device enrolled: %s (%s)", body.hostname, device.id)

@@ -154,6 +154,7 @@ async def update_group(
     g = await _get_group(group_id, user, db)
     g.name = body.name
     g.description = body.description
+    await audit.record(db, user, "group.update", "group", group_id, {"name": body.name})
     await db.commit()
     return _group_out(g, await _member_count(g.id, db))
 
@@ -213,6 +214,9 @@ async def add_member(
         raise HTTPException(status_code=400, detail="member_type must be 'employee' or 'device'")
 
     db.add(m)
+    await audit.record(db, user, "group.member.add", "group", group_id, {
+        "group_name": g.name, "member_type": body.member_type, "label": label,
+    })
     try:
         await db.commit()
     except Exception:
@@ -245,6 +249,11 @@ async def remove_member(
     m = row.scalar_one_or_none()
     if not m:
         raise HTTPException(status_code=404, detail="Member not found")
+    await audit.record(db, user, "group.member.remove", "group", group_id, {
+        "group_name": g.name, "member_type": m.member_type,
+        "employee_id": str(m.employee_id) if m.employee_id else None,
+        "device_id": str(m.device_id) if m.device_id else None,
+    })
     await db.delete(m)
     await db.commit()
 

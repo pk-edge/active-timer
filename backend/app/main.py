@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.ingest_queue import ingest_queue
+from app.db import seed_rbac
 from app.db.base import init_db
 
 logging.basicConfig(
@@ -42,6 +43,7 @@ def _cors_allow_origin(origin: str | None) -> str | None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await seed_rbac.run()        # idempotent — system roles (Super Admin, Viewer, Talent)
     await ingest_queue.start()   # start async worker pool
     yield
     await ingest_queue.stop()    # drain + shutdown workers cleanly
