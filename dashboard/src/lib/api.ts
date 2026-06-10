@@ -1,6 +1,6 @@
 import type {
   Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
-  Me, Role, ModuleDef, User, Group, GroupDetail, GroupMember, Installer,
+  Me, Role, ModuleDef, User, Group, GroupDetail, GroupMember, Installer, InstallerDownload,
   OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
   AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
@@ -202,6 +202,7 @@ export const activateInstaller = (id: string) =>
   request<Installer>(`/v1/installers/${id}/activate`, { method: "POST" });
 export const getInstallerDownload = (id: string) =>
   request<{ download_url: string; version: string; platform: string }>(`/v1/installers/${id}/download`);
+export const getInstallerDownloads = () => request<InstallerDownload[]>("/v1/installers/downloads");
 
 export async function uploadInstaller(form: {
   platform: string; installer_type: string; version: string; notes?: string; file: File;
@@ -390,6 +391,15 @@ export const getCategoryUsageDetail = (cat_id: string | null, tab: string, since
   if (group_id) p.set("group_id", group_id);
   return request<CategoryUsageDetailOut>(`/v1/tech/category-usage/detail?${p}`);
 };
+
+// ── Company ───────────────────────────────────────────────────────────────────
+
+export interface CompanyInfo {
+  name: string;
+  enrollment_token: string;
+}
+
+export const getCompanyInfo = () => request<CompanyInfo>("/v1/company/info");
 
 // ── URL Policies ─────────────────────────────────────────────────────────────
 

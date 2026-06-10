@@ -6,6 +6,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 
@@ -16,9 +17,11 @@ settings = get_settings()
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True,
+    poolclass=NullPool,
+    connect_args={
+        "timeout": 10,         # seconds before giving up on a new connection
+        "command_timeout": 30, # seconds before cancelling a hung query
+    },
 )
 
 AsyncSessionLocal = async_sessionmaker(

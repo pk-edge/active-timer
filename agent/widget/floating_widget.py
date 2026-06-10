@@ -1,17 +1,9 @@
 """
-FloatingWidget — Edge brand widget.
+FloatingWidget — Daylight theme, exact SVG colour scheme.
 
-Solid #4a0f70 tile, no glass/transparency.
-Thin 1.5 px animated "running light" border whose colour changes with
-sync status. The bright head sweeps clockwise; a fading tail follows.
-
-Running-light colours
-─────────────────────
-  Synced    → bright green   #22c55e
-  Syncing   → bright blue    #3b82f6
-  Idle      → bright amber   #f59e0b
-  Offline   → bright red     #ef4444
-  Enrolling → bright cyan    #06b6d4
+Card: 270×140 px, #FCFBF9 at 88 % opacity (solid enough to read, hint of glass).
+Clock: large #6D1C95 purple HH:MM + dimmer :SS.
+Progress bar, green accents, muted labels — all from the SVG palette.
 """
 
 import json
@@ -25,41 +17,40 @@ from PySide6.QtWidgets import (
     QWidget, QLabel, QGraphicsOpacityEffect, QGraphicsDropShadowEffect,
     QSystemTrayIcon, QMenu, QApplication, QMessageBox,
 )
-from PySide6.QtCore  import Qt, QTimer, QPoint, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui   import (
+from PySide6.QtCore import Qt, QTimer, QPoint, QPropertyAnimation, QEasingCurve, QRectF
+from PySide6.QtGui import (
     QFont, QColor, QPainter, QPainterPath, QPen,
-    QConicalGradient, QLinearGradient, QIcon, QPixmap, QBrush, QCursor,
+    QIcon, QPixmap, QBrush,
 )
 
 # ── Geometry ──────────────────────────────────────────────────────────────────
-PAD    = 6          # transparent padding — gives border room to glow
-W_CARD = 228
-H_CARD = 84
-W = W_CARD + PAD * 2   # 240
-H = H_CARD + PAD * 2   # 96
-RADIUS = 13
+PAD    = 12          # transparent shadow zone
+W_CARD = 270
+H_CARD = 140
+W      = W_CARD + PAD * 2   # 294
+H      = H_CARD + PAD * 2   # 164
+RADIUS = 16
 
-# ── Brand colour — slightly transparent so desktop shows through ──────────────
-BRAND   = QColor(0x4a, 0x0f, 0x70, 205)   # #4a0f70 at ~80 % opacity
+DAILY_GOAL_SECS = 8 * 3600
 
-# ── Running-light status colours ──────────────────────────────────────────────
-LIGHT = {
-    "active":    QColor(0x22, 0xc5, 0x5e),   # green
-    "syncing":   QColor(0x3b, 0x82, 0xf6),   # blue
-    "idle":      QColor(0xf5, 0x9e, 0x0b),   # amber
-    "offline":   QColor(0xef, 0x44, 0x44),   # red
-    "enrolling": QColor(0x06, 0xb6, 0xd4),   # cyan
-}
-# Dim ambient border (very subtle glow of the brand colour)
-DIM_BORDER = QColor(0x7a, 0x3f, 0xa0, 90)
+# ── SVG palette (exact) ───────────────────────────────────────────────────────
+CARD_BG     = QColor(0xFC, 0xFB, 0xF9, 224)   # #FCFBF9 @ 88 % — readable, light glass
+CARD_BORDER = QColor(0xEB, 0xE5, 0xDC, 255)   # #EBE5DC
 
-# ── Status-dot text colour ────────────────────────────────────────────────────
-DOT_TXT = {
-    "ok":        "#4ade80",
-    "syncing":   "#60a5fa",
-    "offline":   "#f87171",
-    "enrolling": "#34d399",
-    "error":     "#f87171",
+_C_HDR      = "#94897E"   # ACTIVE TODAY label
+_C_CLOK     = "#6D1C95"   # HH:MM — deep purple
+_C_CLOK_DIM = "#B09CC0"   # :SS  — purple @ ~50 % (SVG purple-dim)
+_C_GOAL_LBL = "#A8A096"   # "8hrs Daily Goal" / info label
+_C_DATE     = "#79716A"   # date footer left
+_C_PROG_BG  = "#EDE8E1"   # progress track
+_C_PROG_FG  = "#1C9540"   # progress fill + status green
+
+C_STATUS_MAP = {
+    "ok":        QColor("#1C9540"),
+    "syncing":   QColor("#3b82f6"),
+    "offline":   QColor("#ef4444"),
+    "enrolling": QColor("#06b6d4"),
+    "error":     QColor("#ef4444"),
 }
 STATUS_LABELS = {
     "ok":        "synced",
@@ -69,29 +60,22 @@ STATUS_LABELS = {
     "error":     "error",
 }
 
-# ── Text colours on the dark purple background ────────────────────────────────
-C_CLOCK = "#ffffff"
-C_SUB   = "rgba(233, 213, 255, 210)"   # lavender
-C_INFO  = "rgba(216, 196, 235, 160)"   # muted lavender
-
 # ── Fonts ─────────────────────────────────────────────────────────────────────
 if sys.platform == "darwin":
-    FONT_CLOCK = QFont("Menlo",          28, QFont.Bold)
-    FONT_SUB   = QFont("Helvetica Neue", 10)
-    FONT_INFO  = QFont("Helvetica Neue", 10)
+    _fam     = "Helvetica Neue"
+    _sz_big  = 28      # HH:MM
+    _sz_secs = 18      # :SS  (≈ 0.66 × 28)
+    _sz_ui   = 10
 else:
-    FONT_CLOCK = QFont("Consolas",       23, QFont.Bold)
-    FONT_SUB   = QFont("Segoe UI",       10)
-    FONT_INFO  = QFont("Segoe UI",       10)
+    _fam     = "Segoe UI"
+    _sz_big  = 22
+    _sz_secs = 15
+    _sz_ui   = 9
+
+FONT_UI = QFont(_fam, _sz_ui)
 
 
-def _glow(w: QLabel, color: QColor, radius: int) -> None:
-    fx = QGraphicsDropShadowEffect(w)
-    fx.setBlurRadius(radius)
-    fx.setColor(color)
-    fx.setOffset(0, 0)
-    w.setGraphicsEffect(fx)
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _tray_icon(c: QColor) -> QIcon:
     px = QPixmap(16, 16)
@@ -130,21 +114,24 @@ def _save_pos(pt: QPoint) -> None:
         pass
 
 
+# ── Widget ────────────────────────────────────────────────────────────────────
+
 class FloatingWidget(QWidget):
     def __init__(self, shared: dict):
         super().__init__()
-        self._shared      = shared
-        self._elapsed     = 0
-        self._drag_pos    = QPoint()
-        self._last_status = ""
-        self._last_app    = ""
-        self._is_idle     = False
-        self._light_key   = "syncing"   # drives the running-light colour
-        self._border_deg  = 0.0         # current head angle (degrees)
+        self._shared       = shared
+        self._elapsed      = 0
+        self._drag_pos     = QPoint()
+        self._last_status  = ""
+        self._is_idle      = False
+        self._status_clr   = C_STATUS_MAP["ok"]
+        self._progress     = 0.0
 
-        self._loaded_today = False
-        self._session_date = datetime.now().date()
-        self._last_tick    = int(time.time())
+        self._loaded_today   = False   # True once first value loaded from shared
+        self._correction_done = False  # True once server-reconciled value applied
+        self._init_unix      = int(time.time())
+        self._session_date   = datetime.now().date()
+        self._last_tick      = int(time.time())
 
         self._setup_window()
         self._build_ui()
@@ -159,23 +146,22 @@ class FloatingWidget(QWidget):
 
     def _setup_window(self):
         self.setWindowFlags(
-            Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.Window
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Window
         )
-        # Translucent so rounded corners are clipped cleanly
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(W, H)
 
-        saved = _load_pos()
-        if saved:
-            self.move(saved)
-        else:
-            screen = QApplication.primaryScreen()
-            if screen:
-                g = screen.availableGeometry()
-                self.move(g.right() - W - 20, g.top() + 20)
+        screen = QApplication.primaryScreen()
+        saved  = _load_pos()
+        if saved and screen:
+            g = screen.availableGeometry()
+            x = max(g.left(), min(saved.x(), g.right()  - W))
+            y = max(g.top(),  min(saved.y(), g.bottom() - H))
+            self.move(x, y)
+        elif screen:
+            g = screen.availableGeometry()
+            self.move(g.right() - W - 20, g.top() + 20)
 
         QTimer.singleShot(300, self._apply_macos_all_spaces)
 
@@ -192,135 +178,162 @@ class FloatingWidget(QWidget):
         except Exception:
             pass
 
-    # ── Paint ─────────────────────────────────────────────────────────────────
+    # ── Paint: card, shadow, progress bar, dots ───────────────────────────────
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
 
-        card = QPainterPath()
-        card.addRoundedRect(PAD, PAD, W_CARD, H_CARD, RADIUS, RADIUS)
+        # ── Two-layer drop shadow (SVG filter0_dd values) ─────────────────────
+        sh1 = QPainterPath()
+        sh1.addRoundedRect(QRectF(PAD - 1, PAD + 2, W_CARD + 2, H_CARD + 1), RADIUS, RADIUS)
+        p.fillPath(sh1, QColor(0x2A, 0x1A, 0x4A, 26))   # near, tight
 
-        # ── Solid brand-colour fill ───────────────────────────────────────────
+        for i in range(5, 0, -1):
+            sh2 = QPainterPath()
+            sh2.addRoundedRect(
+                QRectF(PAD - i, PAD + i * 2, W_CARD + i * 2, H_CARD + i),
+                RADIUS + i, RADIUS + i,
+            )
+            p.fillPath(sh2, QColor(0x2A, 0x1A, 0x4A, i * 2))  # deep, diffuse
+
+        # ── Card fill ─────────────────────────────────────────────────────────
+        card = QPainterPath()
+        card.addRoundedRect(QRectF(PAD, PAD, W_CARD, H_CARD), RADIUS, RADIUS)
         p.setClipPath(card)
-        p.fillPath(card, QBrush(BRAND))
+        p.fillPath(card, CARD_BG)
         p.setClipping(False)
 
-        # ── Dim ambient border (always visible, very faint) ───────────────────
-        p.setPen(QPen(DIM_BORDER, 1.0))
+        # ── Card border (#EBE5DC) ─────────────────────────────────────────────
+        p.setPen(QPen(CARD_BORDER, 1.0))
+        p.setBrush(Qt.NoBrush)
         p.drawPath(card)
 
-        # ── Running-light border (rotating conical gradient) ──────────────────
-        light_c = LIGHT.get(self._light_key, LIGHT["syncing"])
-        lr, lg, lb = light_c.red(), light_c.green(), light_c.blue()
+        # ── Header dot — green (#1C9540) or amber when idle ───────────────────
+        dot_clr = QColor("#f59e0b") if self._is_idle else C_STATUS_MAP["ok"]
+        p.setBrush(dot_clr)
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QRectF(PAD + 20 - 3.5, PAD + 18 - 3.5, 7.0, 7.0))
 
-        # QConicalGradient: angle is where colour-at-0 starts, sweeps CCW.
-        # We advance _border_deg clockwise so we negate it.
-        cx = PAD + W_CARD / 2.0
-        cy = PAD + H_CARD / 2.0
-        cg = QConicalGradient(cx, cy, -self._border_deg)
+        # ── Progress bar track (#EDE8E1) ──────────────────────────────────────
+        pb_x = PAD + 18
+        pb_y = PAD + 100
+        pb_w = W_CARD - 36   # 234 px
+        pb_h = 10
+        track = QPainterPath()
+        track.addRoundedRect(QRectF(pb_x, pb_y, pb_w, pb_h), pb_h / 2, pb_h / 2)
+        p.fillPath(track, QColor(_C_PROG_BG))
 
-        # Head: bright, sharp (covers ~8% of circumference)
-        # Tail: fades over ~20%
-        # Rest: dim ambient
-        cg.setColorAt(0.000, QColor(lr, lg, lb, 255))
-        cg.setColorAt(0.040, QColor(lr, lg, lb, 200))
-        cg.setColorAt(0.080, QColor(lr, lg, lb, 80))
-        cg.setColorAt(0.160, QColor(lr, lg, lb, 20))
-        cg.setColorAt(0.170, QColor(lr, lg, lb, 10))
-        cg.setColorAt(0.999, QColor(lr, lg, lb, 10))
-        cg.setColorAt(1.000, QColor(lr, lg, lb, 255))  # seamless wrap
+        # ── Progress fill (#1C9540) + SVG filter2_d glow ─────────────────────
+        fill_w = max(pb_h, int(pb_w * self._progress))
+        glow = QPainterPath()
+        glow.addRoundedRect(
+            QRectF(pb_x - 2, pb_y - 2, fill_w + 4, pb_h + 4),
+            (pb_h + 4) / 2, (pb_h + 4) / 2,
+        )
+        p.fillPath(glow, QColor(0x14, 0xB8, 0xA6, 45))  # teal glow
 
-        p.setPen(QPen(QBrush(cg), 1.8))
-        p.drawPath(card)
+        fill = QPainterPath()
+        fill.addRoundedRect(QRectF(pb_x, pb_y, fill_w, pb_h), pb_h / 2, pb_h / 2)
+        p.fillPath(fill, QColor(_C_PROG_FG))
 
-    # ── UI labels ─────────────────────────────────────────────────────────────
+        # ── Footer sync dot ───────────────────────────────────────────────────
+        p.setBrush(self._status_clr)
+        p.setPen(Qt.NoPen)
+        # sits just left of the status label
+        lbl_right = PAD + W_CARD - 18
+        p.drawEllipse(QRectF(lbl_right - 68 - 9, PAD + 122 - 3.5, 7.0, 7.0))
+
+        p.end()
+
+    # ── Labels ────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        px   = PAD
-        yclk = px + 4
-        ysub = px + 42
-        yinf = px + H_CARD - 21
+        # ── Header: "ACTIVE TODAY" (#94897E) — card-rel x=32, y=10, h=16
+        self._hdr_lbl = QLabel("ACTIVE TODAY", self)
+        self._hdr_lbl.setFont(FONT_UI)
+        self._hdr_lbl.setStyleSheet(
+            f"color:{_C_HDR}; background:transparent; font-weight:600; letter-spacing:2px;"
+        )
+        self._hdr_lbl.setGeometry(PAD + 32, PAD + 10, 200, 16)
+        self._hdr_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        # Clock
-        self._clock = QLabel("00:00:00", self)
-        self._clock.setFont(FONT_CLOCK)
-        self._clock.setStyleSheet(f"color:{C_CLOCK}; background:transparent;")
-        self._clock.setGeometry(px, yclk, W_CARD, 38)
-        self._clock.setAlignment(Qt.AlignCenter)
-        _glow(self._clock, QColor(255, 255, 255, 200), 20)
+        # ── Clock: HH:MM large + :SS dim — card-rel y=30, h=60 ───────────────
+        self._clock_lbl = QLabel(self)
+        self._clock_lbl.setTextFormat(Qt.RichText)
+        self._clock_lbl.setGeometry(PAD, PAD + 28, W_CARD, 60)
+        self._clock_lbl.setAlignment(Qt.AlignCenter)
+        self._clock_lbl.setStyleSheet("background:transparent;")
 
-        # Sub-label
-        self._sub_lbl = QLabel("Active Today", self)
-        self._sub_lbl.setFont(FONT_SUB)
-        self._sub_lbl.setStyleSheet(f"color:{C_SUB}; background:transparent;")
-        self._sub_lbl.setGeometry(px, ysub, W_CARD, 18)
-        self._sub_lbl.setAlignment(Qt.AlignCenter)
+        # Subtle purple glow matching SVG filter1_d
+        glow = QGraphicsDropShadowEffect(self._clock_lbl)
+        glow.setBlurRadius(20)
+        glow.setColor(QColor(0x7C, 0x3A, 0xED, 38))
+        glow.setOffset(0, 0)
+        self._clock_lbl.setGraphicsEffect(glow)
 
-        # ── Info strip layout ─────────────────────────────────────────────────
-        # Date   |   · synced (centred)   |   AppName (right, elided)
-        #  40px         100px centre            rest, right-aligned
+        # ── Goal row: "8hrs Daily Goal" (#A8A096) left — card-rel y=90, h=13
+        self._goal_lbl = QLabel("8hrs · daily goal", self)
+        self._goal_lbl.setFont(FONT_UI)
+        self._goal_lbl.setStyleSheet(
+            f"color:{_C_GOAL_LBL}; background:transparent; font-weight:500;"
+        )
+        self._goal_lbl.setGeometry(PAD + 18, PAD + 88, 140, 13)
+        self._goal_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        # Date — left edge
-        self._date_lbl = QLabel("", self)
-        self._date_lbl.setFont(FONT_INFO)
-        self._date_lbl.setStyleSheet(f"color:{C_INFO}; background:transparent;")
-        self._date_lbl.setGeometry(px + 8, yinf, 42, 17)
+        # ── Goal %: (#1C9540) right — same row
+        self._pct_lbl = QLabel("0%", self)
+        self._pct_lbl.setFont(FONT_UI)
+        self._pct_lbl.setStyleSheet(
+            f"color:{_C_PROG_FG}; background:transparent; font-weight:700;"
+        )
+        self._pct_lbl.setGeometry(PAD + W_CARD - 18 - 42, PAD + 88, 42, 13)
+        self._pct_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        # ── Date (#79716A) — card-rel y=118, h=13
+        self._date_lbl = QLabel(_date_str(), self)
+        self._date_lbl.setFont(FONT_UI)
+        self._date_lbl.setStyleSheet(
+            f"color:{_C_DATE}; background:transparent; font-weight:500;"
+        )
+        self._date_lbl.setGeometry(PAD + 18, PAD + 116, 70, 13)
         self._date_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        # Status section centred: dot (12px) + text (76px) = 88px block,
-        # centred inside W_CARD → starts at (W_CARD/2 - 44) from PAD
-        cx = px + W_CARD // 2          # centre x of card
-        dot_w   = 13
-        txt_w   = 78
-        block_w = dot_w + txt_w        # 91 px total
-        dot_x   = cx - block_w // 2
-        txt_x   = dot_x + dot_w
+        # ── Status text (#1C9540) — right side, after painted dot
+        self._status_lbl = QLabel("synced", self)
+        self._status_lbl.setFont(FONT_UI)
+        self._status_lbl.setStyleSheet(
+            f"color:{_C_PROG_FG}; background:transparent; font-weight:700;"
+        )
+        self._status_lbl.setGeometry(PAD + W_CARD - 18 - 60, PAD + 116, 60, 13)
+        self._status_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
-        # Dot (pulsing) — true centre of card
-        self._dot_lbl = QLabel("●", self)
-        self._dot_lbl.setFont(FONT_INFO)
-        self._dot_lbl.setStyleSheet(f"color:{DOT_TXT['ok']}; background:transparent;")
-        self._dot_lbl.setGeometry(dot_x, yinf, dot_w, 17)
-        self._dot_lbl.setAlignment(Qt.AlignCenter)
-
-        self._dot_opacity = QGraphicsOpacityEffect(self._dot_lbl)
+        # Pulse animation on status label (SVG dot--pulse equivalent)
+        self._dot_opacity = QGraphicsOpacityEffect(self._status_lbl)
         self._dot_opacity.setOpacity(1.0)
-        self._dot_lbl.setGraphicsEffect(self._dot_opacity)
+        self._status_lbl.setGraphicsEffect(self._dot_opacity)
 
         self._dot_anim = QPropertyAnimation(self._dot_opacity, b"opacity", self)
-        self._dot_anim.setDuration(1100)
+        self._dot_anim.setDuration(2200)
         self._dot_anim.setStartValue(1.0)
-        self._dot_anim.setEndValue(0.15)
+        self._dot_anim.setEndValue(0.25)
         self._dot_anim.setEasingCurve(QEasingCurve.InOutSine)
         self._dot_anim.setLoopCount(-1)
         self._dot_anim.start()
 
-        # Status text (static, immediately right of dot)
-        self._status_lbl = QLabel("synced", self)
-        self._status_lbl.setFont(FONT_INFO)
-        self._status_lbl.setStyleSheet(f"color:{DOT_TXT['ok']}; background:transparent;")
-        self._status_lbl.setGeometry(txt_x, yinf, txt_w, 17)
-        self._status_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        # App name — right side, elide if too long
-        app_x = px + W_CARD - 10 - 55  # 55 px wide, flush right
-        self._app_lbl = QLabel("", self)
-        self._app_lbl.setFont(FONT_INFO)
-        self._app_lbl.setStyleSheet(f"color:{C_INFO}; background:transparent;")
-        self._app_lbl.setGeometry(app_x, yinf, 55, 17)
-        self._app_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # Initial draw
+        self._redraw()
 
     # ── Tray ──────────────────────────────────────────────────────────────────
 
     def _setup_tray(self):
         try:
-            self._tray = QSystemTrayIcon(_tray_icon(BRAND), self)
+            self._tray = QSystemTrayIcon(_tray_icon(C_STATUS_MAP["ok"]), self)
             m = QMenu()
-            m.addAction("Show timer",          self._show_raise)
+            m.addAction("Show timer",               self._show_raise)
             m.addSeparator()
-            m.addAction("Restart Computer",    self._restart_computer)
-            m.addAction("Shut Down Computer",  self._shutdown_computer)
+            m.addAction("Restart Computer",         self._restart_computer)
+            m.addAction("Shut Down Computer",       self._shutdown_computer)
             m.addSeparator()
             m.addAction("Quit TimeTracker (admin)", self._quit_requires_admin)
             self._tray.setContextMenu(m)
@@ -355,7 +368,8 @@ class FloatingWidget(QWidget):
         if sys.platform == "win32":
             subprocess.run(["shutdown", "/s", "/t", "5"], check=False)
         elif sys.platform == "darwin":
-            subprocess.run(["osascript", "-e", 'tell application "System Events" to shut down'], check=False)
+            subprocess.run(["osascript", "-e",
+                'tell application "System Events" to shut down'], check=False)
         else:
             subprocess.run(["shutdown", "-h", "+0"], check=False)
 
@@ -367,7 +381,8 @@ class FloatingWidget(QWidget):
         if sys.platform == "win32":
             subprocess.run(["shutdown", "/r", "/t", "5"], check=False)
         elif sys.platform == "darwin":
-            subprocess.run(["osascript", "-e", 'tell application "System Events" to restart'], check=False)
+            subprocess.run(["osascript", "-e",
+                'tell application "System Events" to restart'], check=False)
         else:
             subprocess.run(["shutdown", "-r", "+0"], check=False)
 
@@ -376,12 +391,6 @@ class FloatingWidget(QWidget):
     def _start_timers(self):
         self._t1 = QTimer(self); self._t1.timeout.connect(self._tick_clock);  self._t1.start(1000)
         self._t2 = QTimer(self); self._t2.timeout.connect(self._tick_status); self._t2.start(3000)
-        # Border animation — 40 ms ≈ 25 fps, 3°/frame = ~120°/s ≈ 3 s/rotation
-        self._t3 = QTimer(self); self._t3.timeout.connect(self._advance_border); self._t3.start(40)
-
-    def _advance_border(self):
-        self._border_deg = (self._border_deg + 3.0) % 360.0
-        self.update()
 
     # ── Tick: clock ───────────────────────────────────────────────────────────
 
@@ -389,21 +398,43 @@ class FloatingWidget(QWidget):
         now   = int(time.time())
         today = datetime.now().date()
 
+        # ── Stage 1: wait for pre-loaded local value (set immediately in main.py) ─
         if not self._loaded_today:
             ts = self._shared.get("today_active_secs")
-            if ts is not None:
-                self._elapsed = ts; self._session_date = today
-                self._loaded_today = True; self._last_tick = now
-                self._redraw()
+            if ts is None:
+                return  # still waiting — show 00:00:00
+            self._elapsed      = ts
+            self._session_date = today
+            self._loaded_today = True
+            self._last_tick    = now
+            self._redraw()
+            return
 
+        # ── Stage 2: accept server-reconciled correction within 90s of launch ──
+        # Enrollment may update today_active_secs to a higher server value after
+        # the local pre-load. Apply it once if the server value is larger.
+        if not self._correction_done:
+            ts = self._shared.get("today_active_secs")
+            if ts is not None and ts > self._elapsed + 30:
+                self._elapsed   = ts
+                self._last_tick = now
+                self._correction_done = True
+                self._redraw()
+                return
+            # Close the correction window after 90s — enrollment is long done
+            if now - self._init_unix > 90:
+                self._correction_done = True
+
+        # ── Day rollover — reset elapsed and start a new attendance session ──
         if self._session_date and today > self._session_date:
             db = self._shared["db"]
             db.end_session(self._shared.get("current_session_id"), self._elapsed)
-            nid = db.start_session(); self._shared["current_session_id"] = nid
+            nid = db.start_session()
+            self._shared["current_session_id"] = nid
             self._elapsed = 0; self._session_date = today; self._last_tick = now
-            self._redraw()
             s = self._shared.get("new_session_event")
             if s: s.clear()
+            self._redraw()
             return
 
         s = self._shared.get("new_session_event")
@@ -411,9 +442,11 @@ class FloatingWidget(QWidget):
             s.clear()
             db = self._shared["db"]
             db.end_session(self._shared.get("current_session_id"), self._elapsed)
-            nid = db.start_session(); self._shared["current_session_id"] = nid
+            nid = db.start_session()
+            self._shared["current_session_id"] = nid
             self._elapsed = 0; self._session_date = today; self._last_tick = now
             self._redraw()
+            return
 
         pause = self._shared.get("pause_event")
         if pause and pause.is_set():
@@ -428,9 +461,19 @@ class FloatingWidget(QWidget):
     def _redraw(self):
         h, r = divmod(self._elapsed, 3600)
         m, s = divmod(r, 60)
-        self._clock.setText(f"{h:02d}:{m:02d}:{s:02d}")
+        big = (f"font-family:{_fam}; font-size:{_sz_big}pt;"
+               f" font-weight:800; color:{_C_CLOK};")
+        dim = (f"font-family:{_fam}; font-size:{_sz_secs}pt;"
+               f" font-weight:800; color:{_C_CLOK_DIM};")
+        self._clock_lbl.setText(
+            f'<span style="{big}">{h:02d}:{m:02d}</span>'
+            f'<span style="{dim}">:{s:02d}</span>'
+        )
+        self._progress = min(1.0, self._elapsed / DAILY_GOAL_SECS)
+        self._pct_lbl.setText(f"{int(self._progress * 100)}%")
+        self.update()
 
-    # ── Tick: status / date / app ─────────────────────────────────────────────
+    # ── Tick: status ──────────────────────────────────────────────────────────
 
     def _tick_status(self):
         self._date_lbl.setText(_date_str())
@@ -439,41 +482,24 @@ class FloatingWidget(QWidget):
         is_idle = bool(pause and pause.is_set())
         if is_idle != self._is_idle:
             self._is_idle = is_idle
-            self._light_key = "idle" if is_idle else self._status_to_key(
-                self._shared.get("sync_status", "syncing"))
-        if is_idle:
-            self._sub_lbl.setText("Idle")
-            self._sub_lbl.setStyleSheet("color:rgba(251,191,36,210); background:transparent;")
-        else:
-            self._sub_lbl.setText("Active Today")
-            self._sub_lbl.setStyleSheet(f"color:{C_SUB}; background:transparent;")
+            self._hdr_lbl.setText("IDLE" if is_idle else "ACTIVE TODAY")
+            self._hdr_lbl.setStyleSheet(
+                f"color:{'#f59e0b' if is_idle else _C_HDR}; background:transparent;"
+                f" font-weight:600; letter-spacing:2px;"
+            )
+            self.update()
 
         status = self._shared.get("sync_status", "syncing")
         if status != self._last_status:
             self._last_status = status
-            color = DOT_TXT.get(status, DOT_TXT["syncing"])
-            label = STATUS_LABELS.get(status, status)
-            self._dot_lbl.setStyleSheet(f"color:{color}; background:transparent;")
-            self._status_lbl.setText(label)
-            self._status_lbl.setStyleSheet(f"color:{color}; background:transparent;")
-            if not is_idle:
-                self._light_key = self._status_to_key(status)
-            self._tray.setIcon(_tray_icon(LIGHT.get(self._light_key, LIGHT["syncing"])))
-
-        app = self._shared.get("current_app", "")
-        # Elide using font metrics so it always fits the 55px label width
-        fm = self._app_lbl.fontMetrics()
-        app = fm.elidedText(app, Qt.ElideRight, 53)
-        if app != self._last_app:
-            self._last_app = app
-            self._app_lbl.setText(app)
-
-    @staticmethod
-    def _status_to_key(s: str) -> str:
-        if s in ("offline", "error"):   return "offline"
-        if s == "syncing":              return "syncing"
-        if s == "enrolling":            return "enrolling"
-        return "active"
+            self._status_clr  = C_STATUS_MAP.get(status, C_STATUS_MAP["ok"])
+            clr = self._status_clr.name()
+            self._status_lbl.setText(STATUS_LABELS.get(status, status))
+            self._status_lbl.setStyleSheet(
+                f"color:{clr}; background:transparent; font-weight:700;"
+            )
+            self._tray.setIcon(_tray_icon(self._status_clr))
+            self.update()
 
     # ── Drag + persist ────────────────────────────────────────────────────────
 
@@ -491,4 +517,5 @@ class FloatingWidget(QWidget):
         self._drag_pos = QPoint()
 
     def closeEvent(self, e):
-        e.ignore(); self.show()
+        e.ignore()
+        self.show()
