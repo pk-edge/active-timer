@@ -46,6 +46,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.config import get_settings
+
 log = logging.getLogger("ingest_queue")
 
 # ── Tuning constants ──────────────────────────────────────────────────────────
@@ -53,7 +55,7 @@ QUEUE_MAXSIZE   = 100_000   # drop back-pressure threshold
 BATCH_SIZE      = 200       # events per DB write cycle
 BATCH_WAIT      = 0.4       # seconds to wait for a full batch before flushing
 MIN_WORKERS     = 4         # always-on workers
-MAX_WORKERS     = 16        # hard ceiling
+MAX_WORKERS     = get_settings().INGEST_MAX_WORKERS  # env-driven; keep < DB pool
 SCALE_INTERVAL  = 5.0       # how often to check queue depth
 SCALE_UP_AT     = 500       # grow pool when queue exceeds this
 SCALE_DOWN_AT   = 50        # shrink pool when queue drops below this
