@@ -45,12 +45,28 @@ DEFAULT_RULES: dict[str, list[str]] = {
 }
 
 
+# Companies whose system categories were already verified/seeded by this process —
+# skips one SELECT on every analytics request after the first.
+_default_cats_ensured: set[uuid.UUID] = set()
+
+
 async def _ensure_default_categories(company_id: uuid.UUID, db: AsyncSession) -> None:
-    existing = await db.execute(
-        select(AppCategory).where(AppCategory.company_id == company_id, AppCategory.is_system == True)
-    )
-    if existing.scalars().first():
+    if company_id in _default_cats_ensured:
         return
+
+    existing = await db.execute(
+        select(AppCategory.id).where(AppCategory.company_id == company_id, AppCategory.is_system == True)
+        .limit(1)
+    )
+    if existing.first():
+        _default_cats_ensured.add(company_id)
+        return
+
+    # One query for all existing patterns instead of one per default rule.
+    rules_res = await db.execute(
+        select(AppCategoryRule.app_pattern).where(AppCategoryRule.company_id == company_id)
+    )
+    existing_patterns = {p for (p,) in rules_res.all()}
 
     for cat_def in DEFAULT_CATEGORIES:
         cat = AppCategory(
@@ -62,15 +78,9 @@ async def _ensure_default_categories(company_id: uuid.UUID, db: AsyncSession) ->
         db.add(cat)
         await db.flush()
 
-        patterns = DEFAULT_RULES.get(cat_def["name"], [])
-        for pattern in patterns:
-            existing_rule = await db.execute(
-                select(AppCategoryRule).where(
-                    AppCategoryRule.company_id == company_id,
-                    AppCategoryRule.app_pattern == pattern,
-                )
-            )
-            if not existing_rule.scalars().first():
+        for pattern in DEFAULT_RULES.get(cat_def["name"], []):
+            if pattern not in existing_patterns:
+                existing_patterns.add(pattern)
                 db.add(AppCategoryRule(
                     category_id=cat.id,
                     company_id=company_id,
@@ -78,6 +88,7 @@ async def _ensure_default_categories(company_id: uuid.UUID, db: AsyncSession) ->
                 ))
 
     await db.commit()
+    _default_cats_ensured.add(company_id)
 
 
 async def _scope_clause(admin: Employee, db: AsyncSession) -> tuple[str, dict]:
@@ -878,7 +889,7 @@ async def website_list(
         WITH url_data AS (
             SELECT
                 REGEXP_REPLACE(LOWER(
-                    COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), '')
+                    COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), '')
                 ), '^www\\.', '') AS host,
                 ae.device_id, ae.timestamp, d.employee_id,
                 LEAD(ae.timestamp) OVER (PARTITION BY ae.device_id ORDER BY ae.timestamp) AS next_ts
@@ -974,7 +985,7 @@ async def website_detail(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'url_visit'
               AND LOWER(REGEXP_REPLACE(
-                    COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), ''),
+                    COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
                     '^www\\.', '')) = LOWER(:host)
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
@@ -996,7 +1007,7 @@ async def website_detail(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'url_visit'
               AND LOWER(REGEXP_REPLACE(
-                    COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), ''),
+                    COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
                     '^www\\.', '')) = LOWER(:host)
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
@@ -1021,7 +1032,7 @@ async def website_detail(
                 WHERE d.company_id = :company_id
                   AND ae.event_type = 'url_visit'
                   AND LOWER(REGEXP_REPLACE(
-                        COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), ''),
+                        COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
                         '^www\\.', '')) = LOWER(:host)
                   AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   {combined}
@@ -1056,7 +1067,7 @@ async def website_detail(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'url_visit'
               AND LOWER(REGEXP_REPLACE(
-                    COALESCE(substring(ae.url FROM '^https?://(?:www\\.)?([^/?#]+)'), ''),
+                    COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
                     '^www\\.', '')) = LOWER(:host)
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}

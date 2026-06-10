@@ -110,8 +110,26 @@ def _fetch_today_active(jwt_token: str) -> int | None:
     return None
 
 
+def _preflight_macos_permissions() -> None:
+    """Window titles on macOS need Screen Recording access. Request it once —
+    without it, browser meeting/video detection falls back to AppleScript."""
+    if sys.platform != "darwin":
+        return
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess
+        if CGPreflightScreenCaptureAccess():
+            log.info("Screen Recording permission: granted")
+        else:
+            log.warning("Screen Recording permission missing — window titles limited "
+                        "(browser tabs fall back to AppleScript); requesting access")
+            CGRequestScreenCaptureAccess()
+    except Exception as e:
+        log.debug("Screen-capture preflight unavailable: %s", e)
+
+
 def main() -> None:
     log.info("TimeTracker agent starting")
+    _preflight_macos_permissions()
 
     # 1. Local DB — schema only, device_id set after enrollment
     db = LocalDB(Config.DB_PATH)
@@ -126,6 +144,9 @@ def main() -> None:
         "sync_trigger":        threading.Event(),
         "current_app":         "",
         "current_title":       "",   # kept current by WindowWatcher for idle media detection
+        "in_meeting":          False,  # published by WindowWatcher (native + browser meetings)
+        "media_active":        False,  # published by WindowWatcher (video/music playback)
+        "is_idle":             False,  # published by InputMonitor
         "sync_status":         "enrolling",
         "current_session_id":  None,
         "new_session_event":   threading.Event(),
@@ -140,12 +161,13 @@ def main() -> None:
     # 4. Daemon worker threads (silently skip DB writes until enrolled)
     workers = [
         WindowWatcher(shared),
-        # Screenshotter(shared),  # disabled — re-enable when needed
         InputMonitor(shared),
         UrlWatcher(shared),
         SyncWorker(shared),
         UpdateWorker(shared),
     ]
+    if Config.SCREENSHOTS_ENABLED:
+        workers.insert(1, Screenshotter(shared))
     for w in workers:
         t = threading.Thread(target=w.run, name=w.__class__.__name__, daemon=True)
         t.start()

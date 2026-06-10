@@ -8,6 +8,7 @@ rather than ActivTrak-style productive/unproductive percentages.
 """
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -336,7 +337,7 @@ async def my_stats(
     active_result = await db.execute(
         text("""
             SELECT COALESCE(SUM(
-                CASE WHEN event_type NOT IN ('idle_start','lock') THEN duration ELSE 0 END
+                CASE WHEN event_type = 'window_change' THEN duration ELSE 0 END
             ), 0) AS active
             FROM activity_events
             WHERE device_id = ANY(:ids) AND timestamp >= date_trunc('day', NOW())
@@ -430,19 +431,27 @@ async def stream(
 
         return f"data: {json.dumps(rows)}\n\n"
 
+    # Each push re-runs the device-status query, so cap the per-subscriber rate:
+    # under sustained ingest a dashboard tab refreshes at most every MIN_PUSH_INTERVAL
+    # instead of once per worker batch flush (which can be several times a second).
+    MIN_PUSH_INTERVAL = 2.0
+
     async def _event_generator():
         q = broadcaster.subscribe()
         try:
             yield await _payload()
+            last_push = time.monotonic()
 
             while True:
                 try:
                     await asyncio.wait_for(q.get(), timeout=25.0)
-                    # Drain any burst that arrived in the same batch
-                    await asyncio.sleep(0.15)
+                    # Coalesce the burst and enforce the minimum push interval
+                    delay = MIN_PUSH_INTERVAL - (time.monotonic() - last_push)
+                    await asyncio.sleep(max(delay, 0.15))
                     while not q.empty():
                         q.get_nowait()
                     yield await _payload()
+                    last_push = time.monotonic()
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
         except asyncio.CancelledError:

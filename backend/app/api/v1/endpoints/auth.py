@@ -7,7 +7,9 @@ from sqlalchemy import select
 from app.api.deps import get_db, get_current_user
 from app.core import audit
 from app.core.provisioning import link_or_provision_employee
-from app.core.security import create_device_token, create_admin_token, verify_password, hash_password
+from app.core.security import (
+    create_device_token, create_admin_token, hash_password_async, verify_password_async,
+)
 from app.db.models import Company, Device, Employee
 from app.schemas.auth import EnrollRequest, EnrollResponse, AdminLoginRequest, AdminLoginResponse
 from app.schemas.rbac import MeOut, PermissionItem, RegisterRequest, RegisterResponse
@@ -82,7 +84,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
         email=body.email.lower(),
         name=body.name,
         role="employee",
-        password_hash=hash_password(body.password),
+        password_hash=await hash_password_async(body.password),
         is_active=True,
         is_approved=False,
     )
@@ -109,7 +111,7 @@ async def admin_login(body: AdminLoginRequest, db: AsyncSession = Depends(get_db
         not employee
         or not employee.is_active
         or not employee.password_hash
-        or not verify_password(body.password, employee.password_hash)
+        or not await verify_password_async(body.password, employee.password_hash)
     ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 

@@ -177,6 +177,9 @@ class LocalDB:
             return ""
 
         row_id = str(uuid.uuid4())
+        # Honor the capture-time timestamp when provided (e.g. real browser
+        # visit time from history) — fall back to insert time.
+        ts = event.get("ts") or int(time.time())
         with self._lock, self._conn() as conn:
             conn.execute(
                 """INSERT INTO events
@@ -190,7 +193,7 @@ class LocalDB:
                     event.get("title"),
                     event.get("url"),
                     event.get("duration", 0),
-                    int(time.time()),
+                    int(ts),
                 ),
             )
         return row_id

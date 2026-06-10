@@ -184,7 +184,7 @@ async def device_summary(
     await _assert_device_visible(device, admin, db)
 
     result = await db.execute(
-        text("""
+        text(f"""
             SELECT
                 DATE(ae.timestamp) AS day,
                 SUM({_ACTIVE_CASE}) AS active,

@@ -125,17 +125,48 @@ def _safari_paths() -> list[Path]:
     return [p] if p.exists() else []
 
 
+def _can_read(path: Path) -> bool:
+    """True when the file can actually be opened (TCC may block despite mode bits)."""
+    try:
+        with open(path, "rb") as f:
+            f.read(16)
+        return True
+    except OSError:
+        return False
+
+
 # ── Query helpers ─────────────────────────────────────────────────────────────
 
 def _copy_locked_db(db_path: Path) -> str | None:
-    """Copy a browser's live DB to a temp file to avoid SQLITE_BUSY."""
+    """Copy a browser's live DB (plus WAL/journal sidecars) to a temp file.
+
+    Firefox and Safari run their history DBs in WAL mode — the most recent
+    visits live in the `-wal` sidecar, so copying only the main file silently
+    misses everything since the last checkpoint.
+    """
     try:
         tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         shutil.copy2(db_path, tmp.name)
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = Path(str(db_path) + suffix)
+            if sidecar.exists():
+                try:
+                    shutil.copy2(sidecar, tmp.name + suffix)
+                except Exception:
+                    pass
         return tmp.name
     except Exception as e:
         log.debug("Could not copy %s: %s", db_path, e)
         return None
+
+
+def _remove_db_copy(tmp: str) -> None:
+    import os
+    for path in (tmp, tmp + "-wal", tmp + "-shm", tmp + "-journal"):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _query_chromium(db_path: Path, since_ts: float) -> list[tuple[str, str, float]]:
@@ -162,12 +193,9 @@ def _query_chromium(db_path: Path, since_ts: float) -> list[tuple[str, str, floa
         conn.close()
         results = [(r[0], r[1] or "", r[2]) for r in rows]
     except Exception as e:
-        log.debug("Chromium history read error (%s): %s", db_path.name, e)
+        log.warning("Chromium history read error (%s): %s", db_path, e)
     finally:
-        try:
-            import os; os.remove(tmp)
-        except Exception:
-            pass
+        _remove_db_copy(tmp)
     return results
 
 
@@ -193,12 +221,9 @@ def _query_firefox(db_path: Path, since_ts: float) -> list[tuple[str, str, float
         conn.close()
         results = [(r[0], r[1] or "", r[2]) for r in rows]
     except Exception as e:
-        log.debug("Firefox history read error: %s", e)
+        log.warning("Firefox history read error (%s): %s", db_path, e)
     finally:
-        try:
-            import os; os.remove(tmp)
-        except Exception:
-            pass
+        _remove_db_copy(tmp)
     return results
 
 
@@ -225,12 +250,9 @@ def _query_safari(db_path: Path, since_ts: float) -> list[tuple[str, str, float]
         conn.close()
         results = [(r[0], r[1] or "", r[2]) for r in rows]
     except Exception as e:
-        log.debug("Safari history read error: %s", e)
+        log.warning("Safari history read error (%s): %s", db_path, e)
     finally:
-        try:
-            import os; os.remove(tmp)
-        except Exception:
-            pass
+        _remove_db_copy(tmp)
     return results
 
 
@@ -243,12 +265,20 @@ class UrlWatcher:
         self._pause      = shared["pause_event"]
         self._stop       = shared["stop_event"]
         self._last_seen: dict[str, float] = {}
+        self._logged_discovery = False
+        self._warned_safari    = False
 
     def run(self):
         log.info("UrlWatcher started (poll=%ds)", Config.URL_POLL_SECS)
         while not self._stop.is_set():
             if not self._pause.is_set():
-                self._poll()
+                # One bad poll (locked DB, schema change, disk hiccup) must
+                # never kill the thread — URL capture would be dead until the
+                # next agent restart.
+                try:
+                    self._poll()
+                except Exception as e:
+                    log.warning("URL poll failed — will retry next cycle: %s", e)
             for _ in range(Config.URL_POLL_SECS):
                 if self._stop.is_set():
                     break
@@ -256,25 +286,47 @@ class UrlWatcher:
         log.info("UrlWatcher stopped")
 
     def _poll(self):
-        for path in _chromium_paths():
+        chromium = _chromium_paths()
+        firefox  = _firefox_paths()
+        safari   = _safari_paths()
+
+        if not self._logged_discovery:
+            self._logged_discovery = True
+            log.info("Browser history DBs found: chromium=%d firefox=%d safari=%d",
+                     len(chromium), len(firefox), len(safari))
+            for p in chromium + firefox + safari:
+                log.info("  watching: %s", p)
+            if not (chromium or firefox or safari):
+                log.warning("No browser history DBs found — URL capture inactive")
+
+        for path in chromium:
             key   = str(path)
             since = self._last_seen.get(key, time.time() - 120)
             self._emit(_query_chromium(path, since), key)
 
-        for path in _firefox_paths():
+        for path in firefox:
             key   = str(path)
             since = self._last_seen.get(key, time.time() - 120)
             self._emit(_query_firefox(path, since), key)
 
-        for path in _safari_paths():
+        for path in safari:
             key   = str(path)
             since = self._last_seen.get(key, time.time() - 120)
-            self._emit(_query_safari(path, since), key)
+            visits = _query_safari(path, since)
+            if not visits and not self._warned_safari and not _can_read(path):
+                self._warned_safari = True
+                log.warning("Safari history exists but is unreadable — "
+                            "grant Full Disk Access to TimeTracker to capture Safari URLs")
+            self._emit(visits, key)
 
     def _emit(self, visits: list[tuple[str, str, float]], key: str):
+        if not visits:
+            return
         blocked_patterns = self._db.get_blocked_url_patterns()
+        emitted = 0
 
         for url, title, ts in visits:
+            self._last_seen[key] = max(self._last_seen.get(key, 0), ts)
             if not url:
                 continue
 
@@ -290,13 +342,18 @@ class UrlWatcher:
                 "duration": 0,
                 "ts":       int(ts),    # actual visit time — UTC Unix
             }
-            self._db.insert_event(event)
+            try:
+                self._db.insert_event(event)
+                emitted += 1
+            except Exception as e:
+                log.warning("Could not queue url event: %s", e)
 
             if is_blocked:
                 log.info("Blocked URL visited: %s", host)
-                self._shared["sync_trigger"].set()
 
-            self._last_seen[key] = max(self._last_seen.get(key, 0), ts)
+        if emitted:
+            log.debug("Queued %d url events from %s", emitted, key)
+            self._shared["sync_trigger"].set()
 
     @staticmethod
     def _check_blocked(url: str, host: str, patterns: list[str]) -> bool:
