@@ -50,11 +50,11 @@ async def get_logs(
         params["until"] = until
 
     if device_id:
-        where_clauses.append("d.id = :device_id::uuid")
+        where_clauses.append("d.id = CAST(:device_id AS uuid)")
         params["device_id"] = device_id
 
     if employee_id:
-        where_clauses.append("d.employee_id = :employee_id::uuid")
+        where_clauses.append("d.employee_id = CAST(:employee_id AS uuid)")
         params["employee_id"] = employee_id
 
     if event_type:

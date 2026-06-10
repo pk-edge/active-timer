@@ -38,7 +38,7 @@ async def list_audit(
         params["target_type"] = target_type
 
     if actor_id:
-        filters.append("a.actor_employee_id = :actor_id::uuid")
+        filters.append("a.actor_employee_id = CAST(:actor_id AS uuid)")
         params["actor_id"] = actor_id
 
     if since:

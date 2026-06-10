@@ -21,17 +21,6 @@ class Settings(BaseSettings):
     # few for HTTP requests) or a burst of workers re-exhausts the DB pool. Per-env.
     INGEST_MAX_WORKERS: int = 16
 
-    # Connection pool — set per-environment to fit the DB's max_connections.
-    # One task uses up to POOL_SIZE + MAX_OVERFLOW; a 2-task rolling deploy uses
-    # 2x that, so keep (DB_POOL_SIZE + DB_MAX_OVERFLOW) * 2 < the DB max_connections.
-    DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 10
-    DB_POOL_RECYCLE: int = 1800
-
-    # Ingest queue worker ceiling — keep it under the pool headroom (pool minus a
-    # few for HTTP requests) or a burst of workers re-exhausts the DB pool. Per-env.
-    INGEST_MAX_WORKERS: int = 16
-
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
