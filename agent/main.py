@@ -17,7 +17,9 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 import enrollment
+import identity
 import autostart
+from email_resolver import resolve_employee_email
 from db.local_db               import LocalDB
 from capture.window_watcher    import WindowWatcher
 from capture.screenshotter     import Screenshotter
@@ -46,7 +48,7 @@ def _enroll_background(shared: dict) -> None:
     log.info("Timer pre-loaded from local DB: %ds", local_early)
 
     try:
-        ident = enrollment.ensure_enrolled(shared=shared)
+        ident = enrollment.ensure_enrolled(shared=shared, employee_email=shared.get("employee_email"))
     except RuntimeError as e:
         # Invalid token / missing config — retrying will not help until fixed.
         log.error("Enrollment failed: %s", e)
@@ -148,17 +150,28 @@ def main() -> None:
         t = threading.Thread(target=w.run, name=w.__class__.__name__, daemon=True)
         t.start()
 
-    # 5. Background enrollment — widget shows before this finishes
+    # 5. First-run only: resolve the employee email (prompt → browser detect).
+    # Must happen on the main thread BEFORE Qt blocks and BEFORE enrollment
+    # starts. Already-enrolled devices skip this entirely.
+    employee_email = None
+    if not identity.load().get("device_id"):
+        try:
+            employee_email = resolve_employee_email()
+        except Exception as e:
+            log.warning("Email resolution failed — enrolling unlinked: %s", e)
+    shared["employee_email"] = employee_email
+
+    # 6. Background enrollment — widget shows before this finishes
     threading.Thread(target=_enroll_background, args=(shared,), daemon=True).start()
 
-    # 6. Lock detector
+    # 7. Lock detector
     lock_detector = LockDetector(
         on_lock=_make_lock_handler(shared),
         on_unlock=_make_unlock_handler(shared),
     )
     lock_detector.start()
 
-    # 7. SIGINT / SIGTERM → clean shutdown
+    # 8. SIGINT / SIGTERM → clean shutdown
     def _shutdown(sig, _frame):
         log.info("Shutdown signal %s received", sig)
         stop_event.set()
@@ -167,7 +180,7 @@ def main() -> None:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _shutdown)
 
-    # 8. Qt widget — BLOCKS until user quits via tray menu or SIGTERM
+    # 9. Qt widget — BLOCKS until user quits via tray menu or SIGTERM
     _run_widget(shared)
 
     # If Qt unavailable keep main alive

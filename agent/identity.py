@@ -42,17 +42,20 @@ def save(
     jwt_token: str,
     company_token: Optional[str] = None,
     api_base: Optional[str] = None,
+    employee_email: Optional[str] = None,
 ) -> None:
     """Atomically write the identity file, owner-only readable."""
-    existing      = load()
-    company_token = company_token or existing.get("company_token")
-    api_base      = api_base      or existing.get("api_base")
+    existing       = load()
+    company_token  = company_token  or existing.get("company_token")
+    api_base       = api_base       or existing.get("api_base")
+    employee_email = employee_email or existing.get("employee_email")
 
     data = {
-        "device_id":     device_id,
-        "jwt_token":     jwt_token,
-        "company_token": company_token,
-        "api_base":      api_base,
+        "device_id":      device_id,
+        "jwt_token":      jwt_token,
+        "company_token":  company_token,
+        "api_base":       api_base,
+        "employee_email": employee_email,
     }
 
     _IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)
