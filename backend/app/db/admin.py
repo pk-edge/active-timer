@@ -37,12 +37,14 @@ async def ensure_admin(
         emp.password_hash = hash_password(password)
         emp.role = "admin"
         emp.is_active = True
+        emp.is_approved = True  # clear the pending-approval gate so login works
         emp.name = name
     else:
         db.add(
             Employee(
                 company_id=company.id, email=email, name=name,
-                role="admin", is_active=True, password_hash=hash_password(password),
+                role="admin", is_active=True, is_approved=True,
+                password_hash=hash_password(password),
             )
         )
     return company, created
