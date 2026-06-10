@@ -5,9 +5,9 @@
 #
 # Usage:
 #   cd active-time\installer\windows
-#   .\build_windows.ps1                              — uses backends.json from agent dir if present
-#   .\build_windows.ps1 <token> [<api_url>]          — embeds given token and optional API URL
-#   .\build_windows.ps1 -SkipPyInstaller             — re-package existing dist\
+#   .\build_windows.ps1                              - uses backends.json from agent dir if present
+#   .\build_windows.ps1 <token> [<api_url>]          - embeds given token and optional API URL
+#   .\build_windows.ps1 -SkipPyInstaller             - re-package existing dist\
 #
 # Prerequisites (install once):
 #   1. Python 3.11 or 3.12 (python.org) — add to PATH
@@ -40,7 +40,7 @@ $FragFile   = Join-Path $WixObjDir "AgentFiles.wxs"
 if (-not $SkipPyInstaller) {
     Push-Location $AgentDir
     if (-not (Test-Path ".venv")) {
-        Write-Host "`n[1/3] Creating virtual environment…" -ForegroundColor Yellow
+        Write-Host "`n[1/3] Creating virtual environment..." -ForegroundColor Yellow
         python -m venv .venv
     }
     Write-Host "[1/3] Installing requirements…" -ForegroundColor Yellow
@@ -57,7 +57,7 @@ if (-not $SkipPyInstaller) {
 }
 
 if (-not (Test-Path $DistDir)) {
-    throw "Dist directory not found at $DistDir — run without -SkipPyInstaller"
+    throw "Dist directory not found at $DistDir - run without -SkipPyInstaller"
 }
 $DistDir = (Resolve-Path $DistDir).Path
 
@@ -72,7 +72,7 @@ if (-not $Version) {
     if (-not $Version) { $Version = "1.0.0" }
 }
 
-Write-Host "Building TimeTracker v$Version …"
+Write-Host "Building TimeTracker v$Version ..."
 
 # ── 2. Embed backends.json ────────────────────────────────────────────────────
 # backends.json is the single source of truth for URL + token.
@@ -88,7 +88,7 @@ if ($Token -and $ApiUrl) {
     $srcBackends = Join-Path $AgentDir "backends.json"
     if (Test-Path $srcBackends) {
         Copy-Item $srcBackends (Join-Path $InternalDir "backends.json") -Force
-        Write-Host "Embedded backends.json (token arg ignored — backends.json has its own token)."
+        Write-Host "Embedded backends.json (token arg ignored - backends.json has its own token)."
     } else {
         $tokenBytes = [System.Text.Encoding]::UTF8.GetBytes($Token)
         [System.IO.File]::WriteAllBytes((Join-Path $InternalDir "enrollment_token.txt"), $tokenBytes)
@@ -191,7 +191,7 @@ if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 $size = [math]::Round((Get-Item $MsiOut).Length / 1MB, 1)
 
 Write-Host ""
-Write-Host "✓ Built: $MsiOut ($size MB)" -ForegroundColor Green
+Write-Host "[OK] Built: $MsiOut ($size MB)" -ForegroundColor Green
 Write-Host "  Version : $Version"
 Write-Host ""
 Write-Host "User flow: msiexec /i `"$MsiOut`" /quiet /norestart"
