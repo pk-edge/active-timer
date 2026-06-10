@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     # ── Online detection ──────────────────────────────────────────────────────
     ONLINE_CUTOFF_SECS: int = 60
 
-    # ── Agent installer storage ─────────────────────────────────────────────────
+    # ── Agent installer storage ───────────────────────────────────────────────
     MAX_INSTALLER_MB: int = 600
 
-    # ── Bootstrap admin ─────────────────────────────────────────────────────────
+    # ── Bootstrap admin ───────────────────────────────────────────────────────
     # Idempotently created/repaired on startup from the tracker/admin-{env} secret,
     # so the admin login is seeded by deployment instead of a manual run-task.
     BOOTSTRAP_COMPANY: str = "Edge"
@@ -50,10 +50,19 @@ class Settings(BaseSettings):
     BOOTSTRAP_ADMIN_NAME: str = "Admin"
     BOOTSTRAP_ADMIN_PASSWORD: str = ""
 
+    # ── Remote setup endpoint ─────────────────────────────────────────────────
+    # POST /v1/setup/reset-admin  (requires X-Setup-Secret header)
+    # Leave blank to disable the endpoint entirely.
+    SETUP_SECRET: str = ""
+
     # ── CORS ──────────────────────────────────────────────────────────────────
-    # Default "*" allows any origin — restrict to your dashboard URL in production
-    # via CORS_ORIGINS env var (comma-separated or JSON array).
-    CORS_ORIGINS: List[str] = ["*"]
+    # *.onedge.co is permanently allowed via allow_origin_regex in main.py.
+    # This list covers localhost dev origins; override via CORS_ORIGINS env var
+    # (comma-separated or JSON array) for any other explicit origins.
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:3002",
+    ]
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

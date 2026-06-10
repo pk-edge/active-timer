@@ -35,6 +35,16 @@ stop_event  = threading.Event()
 def _enroll_background(shared: dict) -> None:
     """Run enrollment in a daemon thread so the widget appears immediately."""
     log.info("Background enrollment starting…")
+    db = shared["db"]
+
+    # ── Pre-load local DB time immediately ───────────────────────────────────
+    # Timer starts ticking from the correct value even while enrollment is in
+    # progress or when the backend is unreachable / token is invalid.
+    # Unix timestamp used throughout — date.today() boundary for day grouping.
+    local_early = db.get_today_active_secs_any_device()
+    shared["today_active_secs"] = local_early
+    log.info("Timer pre-loaded from local DB: %ds", local_early)
+
     try:
         ident = enrollment.ensure_enrolled(shared=shared)
     except RuntimeError as e:
@@ -50,16 +60,15 @@ def _enroll_background(shared: dict) -> None:
     device_id = ident["device_id"]
     log.info("Enrolled: device_id=%s", device_id)
 
-    db = shared["db"]
     db.set_device_id(device_id)
 
-    # ── Determine today's active seconds ─────────────────────────────────────
+    # ── Reconcile with server ────────────────────────────────────────────────
     # Rule: always use the LARGEST of (server, local).
     # • Server is authoritative for events already synced to this backend.
     # • Local accumulator covers the current session + events not yet uploaded.
     # • On re-enrollment (new device_id) the local accumulator may belong to
     #   the previous device_id, so scan ALL today entries regardless of id.
-    local_secs = db.get_today_active_secs_any_device()
+    local_secs  = db.get_today_active_secs_any_device()
     server_secs = _fetch_today_active(ident.get("jwt_token", ""))
 
     if server_secs is not None and server_secs > 0:
@@ -70,14 +79,16 @@ def _enroll_background(shared: dict) -> None:
         reason = "server returned 0" if server_secs == 0 else "server unreachable"
         log.info("Today active — %s, using local: %ds", reason, best)
 
-    # Store authoritative value so restarts resume from the right number
+    # Persist authoritative value so restarts resume correctly (unix-keyed by date)
     db.flush_daily_secs_absolute(best)
+
+    # Signal widget to apply server-corrected value if it differs from pre-load
     shared["today_active_secs"] = best
 
     session_id = db.start_session()
     shared["current_session_id"] = session_id
     shared["sync_status"] = "syncing"
-    log.info("Session started: %s (today so far: %ds)", session_id, shared["today_active_secs"])
+    log.info("Session started: %s (today so far: %ds)", session_id, best)
 
 
 def _fetch_today_active(jwt_token: str) -> int | None:
@@ -118,7 +129,7 @@ def main() -> None:
         "new_session_event":   threading.Event(),
         "lock_time":           None,
         "policy_manager":      policy_manager,
-        "today_active_secs":   0,    # populated after enrollment
+        "today_active_secs":   None,  # None until enrollment resolves the real value
     }
 
     # 3. Register auto-start on login
@@ -184,18 +195,21 @@ def _run_widget(shared: dict) -> None:
         widget.show()
 
         # ── Periodic daily flush — saves active seconds every 60s ────────────
-        # Guarantees time is not lost if the process is force-killed.
-        # IMPORTANT: baseline must match widget.elapsed at startup so the first
-        # flush only saves the NEW time, not the already-persisted baseline.
+        # Baseline is set to the pre-loaded daily total so only GENUINELY NEW
+        # seconds are persisted.  Negative deltas (day rollover) are ignored.
         from PySide6.QtCore import QTimer
-        _last_flushed_secs = [widget.elapsed]  # start at baseline, not 0
+
+        # Baseline = today's already-persisted seconds read synchronously from DB.
+        # Reading here (not from shared["today_active_secs"]) avoids a race with
+        # the background enrollment thread.  Only NEW seconds are flushed.
+        _last_flushed_secs = [shared["db"].get_today_active_secs_any_device()]
 
         def _flush_daily():
             current = widget.elapsed
             delta   = current - _last_flushed_secs[0]
-            if delta > 0:
+            if delta > 0:           # positive only — ignore day-rollover negatives
                 shared["db"].flush_daily_secs(delta)
-                _last_flushed_secs[0] = current
+            _last_flushed_secs[0] = current
 
         flush_timer = QTimer()
         flush_timer.setInterval(60_000)  # every 60 seconds
