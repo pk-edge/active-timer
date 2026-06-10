@@ -207,6 +207,8 @@ export async function importGroupsCsv(file: File) {
 export const getInstallers = () => request<Installer[]>("/v1/installers");
 export const activateInstaller = (id: string) =>
   request<Installer>(`/v1/installers/${id}/activate`, { method: "POST" });
+export const deleteInstaller = (id: string) =>
+  request<void>(`/v1/installers/${id}`, { method: "DELETE" });
 export const getInstallerDownload = (id: string) =>
   request<{ download_url: string; version: string; platform: string }>(`/v1/installers/${id}/download`);
 export const getInstallerDownloads = () => request<InstallerDownload[]>("/v1/installers/downloads");

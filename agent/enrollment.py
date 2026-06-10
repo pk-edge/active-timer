@@ -49,11 +49,29 @@ def ensure_enrolled(
 
     ident = identity.load()
     if ident.get("device_id") and ident.get("jwt_token"):
-        # Restore the backend URL that was used at enrollment time so all
-        # Config endpoints point to the correct server on subsequent runs.
-        if stored_base := ident.get("api_base"):
-            _apply_backend(stored_base)
-        return ident
+        # If backends.json was updated with a new URL or token, the stored
+        # identity is stale — clear it and re-enroll with the new backend.
+        primary     = Config.BACKENDS[0] if Config.BACKENDS else {}
+        primary_url = primary.get("url", "")
+        primary_tok = primary.get("token") or ""
+
+        url_changed   = bool(primary_url and primary_url != ident.get("api_base", ""))
+        token_changed = bool(primary_tok and primary_tok != ident.get("company_token", ""))
+
+        if url_changed or token_changed:
+            log.info(
+                "backends.json changed (url_changed=%s token_changed=%s) "
+                "— clearing identity for re-enrollment with %s",
+                url_changed, token_changed, primary_url or "(same)",
+            )
+            identity.clear()
+            ident = {}
+        else:
+            # Restore the backend URL that was used at enrollment time so all
+            # Config endpoints point to the correct server on subsequent runs.
+            if stored_base := ident.get("api_base"):
+                _apply_backend(stored_base)
+            return ident
 
     # Build the list of (url, token) pairs to try, in order.
     candidates = _build_candidates(ident)

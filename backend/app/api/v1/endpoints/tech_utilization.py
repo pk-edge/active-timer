@@ -466,7 +466,7 @@ async def category_allocation(
                c.users,
                ROUND(100.0 * c.seconds / NULLIF(t.t, 0), 1) AS pct
         FROM combined c, total t
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
+    """), {"company_id": str(admin.company_id), "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams})
     prev_rows = {r.category_name: r for r in prev_res.fetchall()}
 
     result = []
@@ -506,7 +506,8 @@ async def app_trends(
     await _ensure_default_categories(admin.company_id, db)
     clause, sparams = await _scope_clause(admin, db)
 
-    base_params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams}
+    base_params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
+                   "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams}
 
     current_res = await db.execute(text(f"""
         WITH app_data AS (
@@ -770,7 +771,7 @@ async def get_uncategorized(
                 AND r.app_pattern = substring(ae.url FROM '^https?://([^/?#]+)')
           )
           {clause}
-        GROUP BY pattern
+        GROUP BY substring(ae.url FROM '^https?://([^/?#]+)')
         HAVING substring(ae.url FROM '^https?://([^/?#]+)') IS NOT NULL
         ORDER BY seconds DESC
         LIMIT :limit
@@ -785,6 +786,7 @@ async def get_uncategorized(
             last_seen=str(r.last_seen) if r.last_seen else None,
         )
         for r in apps_res.fetchall()
+        if r.pattern
     ]
     urls = [
         UncategorizedItem(
