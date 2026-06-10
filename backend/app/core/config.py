@@ -19,7 +19,9 @@ class Settings(BaseSettings):
 
     # Ingest queue worker ceiling — keep it under the pool headroom (pool minus a
     # few for HTTP requests) or a burst of workers re-exhausts the DB pool. Per-env.
-    INGEST_MAX_WORKERS: int = 16
+    # Default pool is 5 + 10 overflow = 15 connections, so 8 workers leaves 7 for
+    # HTTP requests; raise this only together with DB_POOL_SIZE/DB_MAX_OVERFLOW.
+    INGEST_MAX_WORKERS: int = 8
 
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET: str = "change-me-in-production"

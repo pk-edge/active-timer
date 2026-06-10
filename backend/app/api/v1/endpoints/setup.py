@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.core.config import get_settings
-from app.core.security import hash_password
+from app.core.security import hash_password_async
 from app.db.models import Company, Employee
 
 log = logging.getLogger("setup")
@@ -128,7 +128,7 @@ async def reset_admin(
     emp = result.scalar_one_or_none()
 
     if emp:
-        emp.password_hash = hash_password(body.password)
+        emp.password_hash = await hash_password_async(body.password)
         emp.role          = "admin"
         emp.is_active     = True
         emp.is_approved   = True
@@ -142,7 +142,7 @@ async def reset_admin(
             role          = "admin",
             is_active     = True,
             is_approved   = True,
-            password_hash = hash_password(body.password),
+            password_hash = await hash_password_async(body.password),
         )
         db.add(emp)
         action = "created"

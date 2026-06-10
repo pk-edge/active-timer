@@ -2,7 +2,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -120,9 +120,10 @@ async def update_role(
     role.name = body.name
     role.description = body.description
     role.scope_type = body.scope_type
-    # Replace permission set
-    for p in list(role.permissions):
-        await db.delete(p)
+    # Replace permission set in one statement instead of one DELETE per row.
+    # The ORM-enabled delete also evicts the loaded objects from the session,
+    # and the trailing refresh reloads role.permissions for the response.
+    await db.execute(delete(RolePermission).where(RolePermission.role_id == role.id))
     await db.flush()
     for p in body.permissions:
         db.add(RolePermission(role_id=role.id, module=p.module, action=p.action))

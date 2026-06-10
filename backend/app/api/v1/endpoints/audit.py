@@ -62,11 +62,13 @@ async def list_audit(
 
     where = " AND ".join(filters)
 
-    # Count query for pagination metadata
+    # Count query for pagination metadata — the employees join is only needed
+    # when the search filter references e.* columns.
+    count_join = "LEFT JOIN employees e ON e.id = a.actor_employee_id" if search else ""
     count_result = await db.execute(
         text(f"""
             SELECT COUNT(*) FROM audit_log a
-            LEFT JOIN employees e ON e.id = a.actor_employee_id
+            {count_join}
             WHERE {where}
         """),
         params,

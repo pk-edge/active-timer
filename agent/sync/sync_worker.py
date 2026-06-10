@@ -149,6 +149,10 @@ class SyncWorker:
     # ── Screenshot sync ──────────────────────────────────────────────────────
 
     def _maybe_sync_screenshots(self) -> None:
+        # Feature switch — also stops devices with an old local backlog from
+        # uploading it (POST /v1/screenshots + S3 PUT per shot).
+        if not Config.SCREENSHOTS_ENABLED:
+            return
         now = time.time()
         if now - self._last_screenshot_sync < Config.SCREENSHOT_SYNC_SECS:
             return
