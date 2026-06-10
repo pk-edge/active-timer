@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.db.base import AsyncSessionLocal
 from app.db.models import Company, Employee, Role, RolePermission
 from app.core.permissions import all_permissions
+from app.core.provisioning import get_or_create_talent_role
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,9 @@ async def run() -> None:
                 for module in ("devices", "logs", "reports"):
                     db.add(RolePermission(role_id=viewer.id, module=module, action="view"))
                 log.info("Seeded Viewer role for company %s", company.name)
+
+            # ── Talent (own-scoped, auto-provisioned employees) ──────────────
+            await get_or_create_talent_role(company.id, db)
 
             # ── Link legacy admins/managers (no role_id) to Super Admin ──────
             legacy = (await db.execute(
