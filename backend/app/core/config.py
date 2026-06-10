@@ -10,6 +10,17 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://timetracker:timetracker@db:5432/timetracker"
 
+    # Connection pool — set per-environment to fit the DB's max_connections.
+    # One task uses up to POOL_SIZE + MAX_OVERFLOW; a 2-task rolling deploy uses
+    # 2x that, so keep (DB_POOL_SIZE + DB_MAX_OVERFLOW) * 2 < the DB max_connections.
+    DB_POOL_SIZE: int = 5
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_RECYCLE: int = 1800
+
+    # Ingest queue worker ceiling — keep it under the pool headroom (pool minus a
+    # few for HTTP requests) or a burst of workers re-exhausts the DB pool. Per-env.
+    INGEST_MAX_WORKERS: int = 16
+
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -30,6 +41,14 @@ class Settings(BaseSettings):
 
     # ── Agent installer storage ─────────────────────────────────────────────────
     MAX_INSTALLER_MB: int = 600
+
+    # ── Bootstrap admin ─────────────────────────────────────────────────────────
+    # Idempotently created/repaired on startup from the tracker/admin-{env} secret,
+    # so the admin login is seeded by deployment instead of a manual run-task.
+    BOOTSTRAP_COMPANY: str = "Edge"
+    BOOTSTRAP_ADMIN_EMAIL: str = ""
+    BOOTSTRAP_ADMIN_NAME: str = "Admin"
+    BOOTSTRAP_ADMIN_PASSWORD: str = ""
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     # Default "*" allows any origin — restrict to your dashboard URL in production
