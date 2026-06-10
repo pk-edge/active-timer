@@ -81,6 +81,12 @@ export function isAuthenticated(): boolean {
 
 export const getDevices = () => request<Device[]>("/v1/devices");
 
+export const assignDevice = (deviceId: string, employeeId: string | null) =>
+  request<Device>(`/v1/devices/${deviceId}/assign`, {
+    method: "PATCH",
+    body: JSON.stringify({ employee_id: employeeId }),
+  });
+
 export const getTimeline = (deviceId: string, since?: number, until?: number) => {
   const params = new URLSearchParams();
   if (since !== undefined) params.set("since", String(since));

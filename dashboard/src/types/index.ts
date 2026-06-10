@@ -2,6 +2,7 @@ export interface Device {
   id:             string;
   hostname:       string;
   platform:       string;
+  employee_id:    string | null;
   employee_name:  string | null;
   last_seen:      string | null;
   last_seen_unix: number | null;
