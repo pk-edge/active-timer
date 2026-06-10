@@ -4,7 +4,8 @@
   Version is passed via -dVersion="X.Y.Z" at build time.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <Package Name="TimeTracker" Language="1033"
            Version="$(var.Version)" Manufacturer="EDGE"
@@ -24,6 +25,10 @@
     <ui:WixUI Id="WixUI_InstallDir" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
     <WixVariable Id="WixUILicenseRtf" Value="license.rtf" Overridable="yes" />
+
+    <!-- Kill any running instance before install/upgrade to avoid locked-file errors -->
+    <util:CloseApplication Id="CloseTimeTracker" Target="timetracker.exe"
+                           CloseMessage="yes" RebootPrompt="no" />
 
     <!-- Directory structure -->
     <StandardDirectory Id="LocalAppDataFolder">
@@ -74,11 +79,28 @@
       <ComponentGroupRef Id="AgentFiles" />
     </Feature>
 
+    <!--
+      Clear stored identity on install/upgrade so the agent re-enrolls fresh
+      against the backend configured in backends.json. This ensures a URL or
+      token change in backends.json always takes effect without manual cleanup.
+      identity.json lives in %APPDATA%\TimeTracker\ (Config.BASE_DIR).
+    -->
+    <CustomAction Id="ClearIdentity" Script="jscript" Return="ignore">
+      <![CDATA[
+        try {
+          var fso = new ActiveXObject("Scripting.FileSystemObject");
+          var path = Session.Property("AppDataFolder") + "TimeTracker\\identity.json";
+          if (fso.FileExists(path)) fso.DeleteFile(path, true);
+        } catch(e) {}
+      ]]>
+    </CustomAction>
+
     <!-- Launch on finish -->
     <CustomAction Id="LaunchAgent" FileRef="TimeTrackerEXE" ExeCommand=""
                   Execute="immediate" Impersonate="yes" Return="asyncNoWait" />
 
     <InstallExecuteSequence>
+      <Custom Action="ClearIdentity" Before="InstallFiles" Condition="NOT REMOVE" />
       <Custom Action="LaunchAgent" After="InstallFinalize"
               Condition="NOT Installed AND NOT REMOVE" />
     </InstallExecuteSequence>
