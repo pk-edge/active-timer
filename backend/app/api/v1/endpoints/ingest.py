@@ -27,7 +27,7 @@ from app.api.deps import get_db, get_current_device
 from app.core import broadcaster
 from app.core.ingest_queue import ingest_queue
 from app.db.models import Device, ActivityEvent
-from app.schemas.event import IngestRequest, IngestResponse
+from app.schemas.event import ALLOWED_EVENT_TYPES, IngestRequest, IngestResponse
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -49,6 +49,9 @@ async def ingest_events(
 
     rows, skipped = [], 0
     for e in payload.events:
+        if e.event_type not in ALLOWED_EVENT_TYPES:
+            skipped += 1
+            continue
         try:
             if isinstance(e.timestamp, int):
                 ts = datetime.fromtimestamp(e.timestamp, tz=timezone.utc)

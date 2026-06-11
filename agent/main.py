@@ -17,7 +17,9 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 import enrollment
+import identity
 import autostart
+from email_resolver import resolve_employee_email
 from db.local_db               import LocalDB
 from capture.window_watcher    import WindowWatcher
 from capture.screenshotter     import Screenshotter
@@ -46,7 +48,7 @@ def _enroll_background(shared: dict) -> None:
     log.info("Timer pre-loaded from local DB: %ds", local_early)
 
     try:
-        ident = enrollment.ensure_enrolled(shared=shared)
+        ident = enrollment.ensure_enrolled(shared=shared, employee_email=shared.get("employee_email"))
     except RuntimeError as e:
         # Invalid token / missing config — retrying will not help until fixed.
         log.error("Enrollment failed: %s", e)
@@ -108,8 +110,26 @@ def _fetch_today_active(jwt_token: str) -> int | None:
     return None
 
 
+def _preflight_macos_permissions() -> None:
+    """Window titles on macOS need Screen Recording access. Request it once —
+    without it, browser meeting/video detection falls back to AppleScript."""
+    if sys.platform != "darwin":
+        return
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess
+        if CGPreflightScreenCaptureAccess():
+            log.info("Screen Recording permission: granted")
+        else:
+            log.warning("Screen Recording permission missing — window titles limited "
+                        "(browser tabs fall back to AppleScript); requesting access")
+            CGRequestScreenCaptureAccess()
+    except Exception as e:
+        log.debug("Screen-capture preflight unavailable: %s", e)
+
+
 def main() -> None:
     log.info("TimeTracker agent starting")
+    _preflight_macos_permissions()
 
     # 1. Local DB — schema only, device_id set after enrollment
     db = LocalDB(Config.DB_PATH)
@@ -124,6 +144,9 @@ def main() -> None:
         "sync_trigger":        threading.Event(),
         "current_app":         "",
         "current_title":       "",   # kept current by WindowWatcher for idle media detection
+        "in_meeting":          False,  # published by WindowWatcher (native + browser meetings)
+        "media_active":        False,  # published by WindowWatcher (video/music playback)
+        "is_idle":             False,  # published by InputMonitor
         "sync_status":         "enrolling",
         "current_session_id":  None,
         "new_session_event":   threading.Event(),
@@ -138,27 +161,39 @@ def main() -> None:
     # 4. Daemon worker threads (silently skip DB writes until enrolled)
     workers = [
         WindowWatcher(shared),
-        # Screenshotter(shared),  # disabled — re-enable when needed
         InputMonitor(shared),
         UrlWatcher(shared),
         SyncWorker(shared),
         UpdateWorker(shared),
     ]
+    if Config.SCREENSHOTS_ENABLED:
+        workers.insert(1, Screenshotter(shared))
     for w in workers:
         t = threading.Thread(target=w.run, name=w.__class__.__name__, daemon=True)
         t.start()
 
-    # 5. Background enrollment — widget shows before this finishes
+    # 5. First-run only: resolve the employee email (prompt → browser detect).
+    # Must happen on the main thread BEFORE Qt blocks and BEFORE enrollment
+    # starts. Already-enrolled devices skip this entirely.
+    employee_email = None
+    if not identity.load().get("device_id"):
+        try:
+            employee_email = resolve_employee_email()
+        except Exception as e:
+            log.warning("Email resolution failed — enrolling unlinked: %s", e)
+    shared["employee_email"] = employee_email
+
+    # 6. Background enrollment — widget shows before this finishes
     threading.Thread(target=_enroll_background, args=(shared,), daemon=True).start()
 
-    # 6. Lock detector
+    # 7. Lock detector
     lock_detector = LockDetector(
         on_lock=_make_lock_handler(shared),
         on_unlock=_make_unlock_handler(shared),
     )
     lock_detector.start()
 
-    # 7. SIGINT / SIGTERM → clean shutdown
+    # 8. SIGINT / SIGTERM → clean shutdown
     def _shutdown(sig, _frame):
         log.info("Shutdown signal %s received", sig)
         stop_event.set()
@@ -167,7 +202,7 @@ def main() -> None:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _shutdown)
 
-    # 8. Qt widget — BLOCKS until user quits via tray menu or SIGTERM
+    # 9. Qt widget — BLOCKS until user quits via tray menu or SIGTERM
     _run_widget(shared)
 
     # If Qt unavailable keep main alive

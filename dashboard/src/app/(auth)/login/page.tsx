@@ -3,7 +3,8 @@ import { useState, FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { adminLogin } from "@/lib/api";
-import { Timer, Clock } from "lucide-react";
+import { Clock } from "lucide-react";
+import EdgeLogo from "@/components/EdgeLogo";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -37,10 +38,8 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="w-10 h-10 bg-brand-600 rounded-xl flex items-center justify-center">
-            <Timer size={20} className="text-white" />
-          </div>
-          <span className="text-xl font-semibold text-gray-900">TimeTracker</span>
+          <EdgeLogo variant="icon" size={40} />
+          <span className="text-xl font-semibold text-gray-900">Time Tracker</span>
         </div>
 
         <div className="bg-white border border-gray-200 rounded-2xl p-8 shadow-sm">

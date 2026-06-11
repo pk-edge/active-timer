@@ -188,8 +188,8 @@ export default function ReportsPage() {
             )}
           </div>
 
-          <div className="space-y-2.5">
-            {filteredApps.slice(0, 15).map((app, i) => {
+          <div className="max-h-80 overflow-y-auto pr-1 space-y-2.5">
+            {filteredApps.map((app, i) => {
               const pct = Math.round((app.seconds / (apps[0]?.seconds || 1)) * 100);
               return (
                 <div key={app.app_name} className="flex items-center gap-3">

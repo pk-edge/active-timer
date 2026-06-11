@@ -41,7 +41,7 @@ def _cors_allow_origin(origin: str | None) -> str | None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    await init_db()              # migrations + RBAC seed + bootstrap admin (all idempotent)
     await ingest_queue.start()   # start async worker pool
     yield
     await ingest_queue.stop()    # drain + shutdown workers cleanly

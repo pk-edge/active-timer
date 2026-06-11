@@ -28,7 +28,11 @@ log = logging.getLogger("enrollment")
 from version import __version__
 
 
-def ensure_enrolled(max_attempts: int = 0, shared: dict | None = None) -> dict:
+def ensure_enrolled(
+    max_attempts: int = 0,
+    shared: dict | None = None,
+    employee_email: str | None = None,
+) -> dict:
     """
     Block until enrolled, then return the identity dict.
 
@@ -45,11 +49,29 @@ def ensure_enrolled(max_attempts: int = 0, shared: dict | None = None) -> dict:
 
     ident = identity.load()
     if ident.get("device_id") and ident.get("jwt_token"):
-        # Restore the backend URL that was used at enrollment time so all
-        # Config endpoints point to the correct server on subsequent runs.
-        if stored_base := ident.get("api_base"):
-            _apply_backend(stored_base)
-        return ident
+        # If backends.json was updated with a new URL or token, the stored
+        # identity is stale — clear it and re-enroll with the new backend.
+        primary     = Config.BACKENDS[0] if Config.BACKENDS else {}
+        primary_url = primary.get("url", "")
+        primary_tok = primary.get("token") or ""
+
+        url_changed   = bool(primary_url and primary_url != ident.get("api_base", ""))
+        token_changed = bool(primary_tok and primary_tok != ident.get("company_token", ""))
+
+        if url_changed or token_changed:
+            log.info(
+                "backends.json changed (url_changed=%s token_changed=%s) "
+                "— clearing identity for re-enrollment with %s",
+                url_changed, token_changed, primary_url or "(same)",
+            )
+            identity.clear()
+            ident = {}
+        else:
+            # Restore the backend URL that was used at enrollment time so all
+            # Config endpoints point to the correct server on subsequent runs.
+            if stored_base := ident.get("api_base"):
+                _apply_backend(stored_base)
+            return ident
 
     # Build the list of (url, token) pairs to try, in order.
     candidates = _build_candidates(ident)
@@ -75,6 +97,7 @@ def ensure_enrolled(max_attempts: int = 0, shared: dict | None = None) -> dict:
                 "hostname":         platform.node(),
                 "platform":         sys.platform.lower(),
                 "agent_version":    __version__,
+                "employee_email":   employee_email,
             }
             try:
                 log.info(
@@ -93,10 +116,11 @@ def ensure_enrolled(max_attempts: int = 0, shared: dict | None = None) -> dict:
                 r.raise_for_status()
                 data = r.json()
                 identity.save(
-                    device_id     = data["device_id"],
-                    jwt_token     = data["jwt_token"],
-                    company_token = company_token,
-                    api_base      = backend_url,
+                    device_id      = data["device_id"],
+                    jwt_token      = data["jwt_token"],
+                    company_token  = company_token,
+                    api_base       = backend_url,
+                    employee_email = employee_email,
                 )
                 _apply_backend(backend_url)
                 log.info(

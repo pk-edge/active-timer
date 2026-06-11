@@ -19,11 +19,12 @@ router = APIRouter()
 
 @router.get("", response_model=list[dict])
 async def get_logs(
-    since:      Optional[int] = Query(default=None),
-    until:      Optional[int] = Query(default=None),
-    device_id:  Optional[str] = Query(default=None),
-    event_type: Optional[str] = Query(default=None),
-    limit:      int = Query(default=200, le=1000),
+    since:       Optional[int] = Query(default=None),
+    until:       Optional[int] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    event_type:  Optional[str] = Query(default=None),
+    limit:       int = Query(default=200, le=1000),
     admin: Employee = Depends(require("logs", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -49,8 +50,12 @@ async def get_logs(
         params["until"] = until
 
     if device_id:
-        where_clauses.append("d.id = :device_id::uuid")
+        where_clauses.append("d.id = CAST(:device_id AS uuid)")
         params["device_id"] = device_id
+
+    if employee_id:
+        where_clauses.append("d.employee_id = CAST(:employee_id AS uuid)")
+        params["employee_id"] = employee_id
 
     if event_type:
         where_clauses.append("ae.event_type = :event_type")
@@ -65,9 +70,12 @@ async def get_logs(
                 ae.url, ae.duration, ae.timestamp,
                 COALESCE(EXTRACT(EPOCH FROM ae.timestamp)::bigint, 0) AS timestamp_unix,
                 d.id       AS device_id,
-                d.hostname AS hostname
+                d.hostname AS hostname,
+                e.id       AS employee_id,
+                e.name     AS employee_name
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
+            LEFT JOIN employees e ON e.id = d.employee_id
             WHERE {where_sql}
             ORDER BY ae.timestamp DESC
             LIMIT :limit
@@ -88,6 +96,8 @@ async def get_logs(
             "timestamp_unix": r.timestamp_unix,
             "device_id":      str(r.device_id),
             "hostname":       r.hostname,
+            "employee_id":    str(r.employee_id) if r.employee_id else None,
+            "employee_name":  r.employee_name,
         }
         for r in rows
     ]

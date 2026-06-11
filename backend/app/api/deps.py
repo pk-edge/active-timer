@@ -11,7 +11,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload
 
 from app.core.security import decode_token
 from app.core.permissions import all_permissions
@@ -79,18 +79,26 @@ async def get_current_user(
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
 
+    # One joined query instead of three round-trips (employee → role → permissions);
+    # this dependency runs on every authenticated request, so round-trips dominate.
     result = await db.execute(
         select(Employee)
-        .options(selectinload(Employee.role_obj).selectinload(Role.permissions))
+        .options(joinedload(Employee.role_obj).joinedload(Role.permissions))
         .where(Employee.id == user_uuid, Employee.is_active == True)
     )
-    user = result.scalar_one_or_none()
+    user = result.unique().scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     if user.role_obj:
-        user._perms = {(p.module, p.action) for p in user.role_obj.permissions}
         user._scope_type = user.role_obj.scope_type
+        # System roles with scope_type="all" (Super Admin) always get full access —
+        # matches the frontend can() shortcut and survives DB permission gaps when new
+        # modules are added to permissions.py before the server restarts.
+        if user.role_obj.scope_type == "all" and user.role_obj.is_system:
+            user._perms = set(all_permissions())
+        else:
+            user._perms = {(p.module, p.action) for p in user.role_obj.permissions}
     elif user.role in ("admin", "manager"):       # legacy fallback (pre-RBAC accounts)
         user._perms = set(all_permissions())
         user._scope_type = "all"

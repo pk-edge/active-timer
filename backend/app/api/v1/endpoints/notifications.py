@@ -80,12 +80,13 @@ async def mark_read(
     if not body.keys:
         return
 
-    for key in body.keys:
-        stmt = (
-            pg_insert(NotificationRead)
-            .values(employee_id=user.id, notification_key=key)
-            .on_conflict_do_nothing()
-        )
-        await db.execute(stmt)
-
+    # Single multi-row insert; dedupe so the same key isn't sent twice.
+    await db.execute(
+        pg_insert(NotificationRead)
+        .values([
+            {"employee_id": user.id, "notification_key": key}
+            for key in dict.fromkeys(body.keys)
+        ])
+        .on_conflict_do_nothing()
+    )
     await db.commit()
