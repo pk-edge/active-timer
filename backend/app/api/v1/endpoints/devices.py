@@ -135,10 +135,8 @@ async def stream_device_status(
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    # Validate in a SHORT-LIVED session. Do NOT take Depends(get_db) here: this is a
-    # long-lived SSE stream, and a get_db connection would stay checked out for the
-    # whole stream lifetime (one per open dashboard tab) → pool exhaustion. The stream
-    # loop below uses only the broadcaster, no DB.
+    # Short-lived session for auth only — no Depends(get_db): on a long-lived SSE
+    # stream it would hold a pooled connection per open tab → pool exhaustion.
     from app.db.base import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
