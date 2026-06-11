@@ -408,6 +408,10 @@ async def stream(
     ids        = await _resolve_ids(user, group_id, db)
     company_id = user.company_id
 
+    # Release the pooled connection before the long-lived SSE stream: the get_db
+    # session (shared by `require` + the db param) would otherwise leak one conn per open tab.
+    await db.close()
+
     async def _payload() -> str:
         async with AsyncSessionLocal() as sess:
             rows = await _status_rows(ids, company_id, sess)
