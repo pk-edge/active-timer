@@ -230,21 +230,22 @@ def _run_widget(shared: dict) -> None:
         widget.show()
 
         # ── Periodic daily flush — saves active seconds every 60s ────────────
-        # Baseline is set to the pre-loaded daily total so only GENUINELY NEW
-        # seconds are persisted.  Negative deltas (day rollover) are ignored.
+        # The delta is computed against the PERSISTED total (not an in-memory
+        # baseline) so the accumulator always converges on widget.elapsed: the
+        # server-reconciled absolute write at enrollment can never be double-
+        # counted, and a same-day restart resumes the timer exactly where it
+        # left off.
+        from datetime import date
         from PySide6.QtCore import QTimer
 
-        # Baseline = today's already-persisted seconds read synchronously from DB.
-        # Reading here (not from shared["today_active_secs"]) avoids a race with
-        # the background enrollment thread.  Only NEW seconds are flushed.
-        _last_flushed_secs = [shared["db"].get_today_active_secs_any_device()]
-
         def _flush_daily():
-            current = widget.elapsed
-            delta   = current - _last_flushed_secs[0]
-            if delta > 0:           # positive only — ignore day-rollover negatives
+            # Day rollover pending: the widget tick resets elapsed first.
+            # Flushing now would write yesterday's total into today's row.
+            if widget.session_date and widget.session_date != date.today():
+                return
+            delta = widget.elapsed - shared["db"].get_today_active_secs_any_device()
+            if delta > 0:
                 shared["db"].flush_daily_secs(delta)
-            _last_flushed_secs[0] = current
 
         flush_timer = QTimer()
         flush_timer.setInterval(60_000)  # every 60 seconds

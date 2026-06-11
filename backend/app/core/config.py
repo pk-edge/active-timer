@@ -10,18 +10,25 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://timetracker:timetracker@db:5432/timetracker"
 
-    # Connection pool — set per-environment to fit the DB's max_connections.
-    # One task uses up to POOL_SIZE + MAX_OVERFLOW; a 2-task rolling deploy uses
-    # 2x that, so keep (DB_POOL_SIZE + DB_MAX_OVERFLOW) * 2 < the DB max_connections.
+    # Connection budget — TWO isolated pools so background ingest writes can
+    # never starve HTTP auth lookups (the "QueuePool limit reached" jam):
+    #   HTTP requests : DB_POOL_SIZE + DB_MAX_OVERFLOW          (default 5+5 = 10)
+    #   ingest writers: INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW (default 2+2 = 4)
+    # One task therefore holds at most 14 connections; a 2-task rolling deploy
+    # spikes to 2x that (28), which fits even the smallest RDS/Postgres tiers
+    # (max_connections >= 60). Raise per-environment only with the math above.
     DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 10
+    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_TIMEOUT: int = 10   # fail fast instead of stacking 30s waits
     DB_POOL_RECYCLE: int = 1800
 
-    # Ingest queue worker ceiling — keep it under the pool headroom (pool minus a
-    # few for HTTP requests) or a burst of workers re-exhausts the DB pool. Per-env.
-    # Default pool is 5 + 10 overflow = 15 connections, so 8 workers leaves 7 for
-    # HTTP requests; raise this only together with DB_POOL_SIZE/DB_MAX_OVERFLOW.
-    INGEST_MAX_WORKERS: int = 8
+    # Dedicated ingest-writer pool (see budget above).
+    INGEST_DB_POOL_SIZE: int = 2
+    INGEST_DB_MAX_OVERFLOW: int = 2
+
+    # Ingest queue worker ceiling — sized to its OWN pool now: more workers than
+    # ingest connections just queue on checkout, so keep these two in step.
+    INGEST_MAX_WORKERS: int = 4
 
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET: str = "change-me-in-production"

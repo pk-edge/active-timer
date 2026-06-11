@@ -45,6 +45,9 @@ async def lifespan(app: FastAPI):
     await ingest_queue.start()   # start async worker pool
     yield
     await ingest_queue.stop()    # drain + shutdown workers cleanly
+    from app.db.base import engine, ingest_engine
+    await ingest_engine.dispose()
+    await engine.dispose()
 
 
 def create_app() -> FastAPI:

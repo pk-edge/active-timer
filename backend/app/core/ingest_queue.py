@@ -152,7 +152,8 @@ class IngestQueue:
     # ── Worker coroutine ──────────────────────────────────────────────────────
 
     async def _worker(self, worker_id: int) -> None:
-        from app.db.base import AsyncSessionLocal
+        # Dedicated writer pool — never competes with HTTP requests for connections.
+        from app.db.base import IngestSessionLocal
         from app.core import broadcaster
         from app.db.models import ActivityEvent
         from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -195,7 +196,7 @@ class IngestQueue:
                 device_ids = list({b["device_id"] for b in batch})
 
                 try:
-                    async with AsyncSessionLocal() as db:
+                    async with IngestSessionLocal() as db:
                         # Bulk insert events
                         stmt = (
                             pg_insert(ActivityEvent)
@@ -250,7 +251,7 @@ class IngestQueue:
             return
         log.info("Flushing %d remaining items on shutdown", remaining)
         try:
-            from app.db.base import AsyncSessionLocal
+            from app.db.base import IngestSessionLocal
             from app.db.models import ActivityEvent
             from sqlalchemy.dialects.postgresql import insert as pg_insert
             from sqlalchemy import text
@@ -266,7 +267,7 @@ class IngestQueue:
                     break
 
             if rows:
-                async with AsyncSessionLocal() as db:
+                async with IngestSessionLocal() as db:
                     stmt = (
                         pg_insert(ActivityEvent)
                         .values(rows)

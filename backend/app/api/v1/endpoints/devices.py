@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
@@ -127,7 +128,16 @@ async def stream_device_status(
     token: str = Query(..., description="Admin JWT — passed as query param because EventSource cannot set headers"),
     db: AsyncSession = Depends(get_db),
 ):
-    """SSE endpoint — pushes 'devices_updated' whenever any device syncs."""
+    """SSE endpoint — pushes 'devices_updated' whenever any device syncs.
+
+    Industrial-standard pattern:
+    - Auth and DB work happen before streaming starts; connection released immediately.
+    - Hard cap: 503 when broadcaster is at MAX_SUBSCRIBERS.
+    - Burst coalescing: rapid ingest flushes are merged so the frontend receives
+      at most one push every MIN_PUSH_INTERVAL seconds (same as home/stream).
+    - 25 s heartbeat keeps proxies and load-balancers from killing idle connections.
+    - CancelledError caught explicitly so client disconnect is always clean.
+    """
     try:
         payload = decode_token(token)
         if payload.get("type") != "admin":
@@ -142,23 +152,57 @@ async def stream_device_status(
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
+    # Reject early if the broadcaster is at capacity — before we release the DB
+    # connection, so the session is still properly closed by the dependency.
+    if broadcaster.subscriber_count() >= broadcaster.MAX_SUBSCRIBERS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SSE capacity reached, try again later",
+        )
+
+    # Release the pooled connection before streaming — this response lives for
+    # the whole dashboard session and does no further DB work.
+    await db.close()
+
+    MIN_PUSH_INTERVAL = 2.0  # seconds — matches home/stream throttle
+
     async def event_stream():
         q = broadcaster.subscribe()
+        if q is None:
+            # Capacity was grabbed between the check above and subscribe() —
+            # yield a one-shot error event so the client knows to back off.
+            yield "event: error\ndata: capacity\n\n"
+            return
         try:
             yield "event: connected\ndata: ok\n\n"
+            last_push = time.monotonic()
             while True:
                 try:
-                    msg = await asyncio.wait_for(q.get(), timeout=25)
+                    msg = await asyncio.wait_for(q.get(), timeout=25.0)
+                    # Coalesce any burst that arrived while we were sleeping
+                    # and enforce the minimum push interval.
+                    delay = MIN_PUSH_INTERVAL - (time.monotonic() - last_push)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    while not q.empty():
+                        msg = q.get_nowait()  # keep the most recent event name
                     yield f"event: {msg}\ndata: 1\n\n"
+                    last_push = time.monotonic()
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
+        except asyncio.CancelledError:
+            pass  # client disconnected — finally block handles cleanup
         finally:
             broadcaster.unsubscribe(q)
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
