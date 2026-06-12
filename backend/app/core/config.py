@@ -51,6 +51,18 @@ class Settings(BaseSettings):
     # ── Agent installer storage ───────────────────────────────────────────────
     MAX_INSTALLER_MB: int = 600
 
+    # ── Google OAuth ─────────────────────────────────────────────────────────
+    # Credentials: loaded from secrets/google_credentials.enc when SECRETS_KEY is set,
+    # otherwise read from GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env vars.
+    GOOGLE_CLIENT_ID:     str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    # Must match a URI registered in Google Cloud Console.
+    GOOGLE_REDIRECT_URI:  str = "http://localhost:8000/v1/auth/google/callback"
+    # Where the browser lands after the backend processes the OAuth callback.
+    DASHBOARD_URL:        str = "http://localhost:3002"
+    # Only this email domain is permitted to sign in via Google.
+    ALLOWED_EMAIL_DOMAIN: str = "onedge.co"
+
     # ── Bootstrap admin ───────────────────────────────────────────────────────
     # Idempotently created/repaired on startup from the tracker/admin-{env} secret,
     # so the admin login is seeded by deployment instead of a manual run-task.

@@ -1,4 +1,5 @@
 "use client";
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -11,6 +12,7 @@ import EdgeLogo from "@/components/EdgeLogo";
 import clsx from "clsx";
 import { adminLogout } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
+import ConfirmDialog from "@/components/ConfirmDialog";
 
 type NavItem = { href: string; label: string; icon: React.ElementType; module: string };
 type NavGroup = { title: string | null; items: NavItem[] };
@@ -80,6 +82,7 @@ interface SidebarProps {
 export default function Sidebar({ open = false, onClose }: SidebarProps) {
   const path = usePathname();
   const { me, can } = useUser();
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
 
   return (
     <>
@@ -161,7 +164,7 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
             </div>
           )}
           <button
-            onClick={adminLogout}
+            onClick={() => setConfirmSignOut(true)}
             className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition w-full"
           >
             <LogOut size={16} />
@@ -169,6 +172,16 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           </button>
         </div>
       </aside>
+
+      <ConfirmDialog
+        open={confirmSignOut}
+        variant="warning"
+        title="Sign out?"
+        message="You'll be returned to the login screen and will need to sign in again to continue."
+        confirmLabel="Sign out"
+        onConfirm={adminLogout}
+        onCancel={() => setConfirmSignOut(false)}
+      />
     </>
   );
 }

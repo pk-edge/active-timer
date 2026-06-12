@@ -21,6 +21,11 @@ desktop.ini
 !**/.env.example
 agent/enrollment_token.txt
 agent/identity.json
+# Raw (unencrypted) credential files — only .enc counterparts are safe to commit
+backend/secrets/*.json
+backend/secrets/*.p12
+backend/secrets/*.pem
+backend/secrets/*.key
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/

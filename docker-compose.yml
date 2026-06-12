@@ -7,10 +7,8 @@
 #   dashboard — Next.js                → localhost:3002
 #
 # Quick start:
-#   cp .env.example .env
+#   cp .env.example .env          # fill in secrets
 #   docker compose up --build -d
-#   docker compose exec backend python -m app.scripts.seedAdmin \
-#     --company "Demo Co" --email admin@demo.com --name "Admin"
 #   open http://localhost:3002
 services:
   # ── PostgreSQL ──────────────────────────────────────────────────────────────
@@ -20,7 +18,7 @@ services:
     environment:
       POSTGRES_DB:       timetracker
       POSTGRES_USER:     timetracker
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-timetracker_dev} 
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-timetracker_dev}
     ports:
       - "15432:5432"
     volumes:
@@ -30,6 +28,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
   # ── MinIO (local S3 for screenshots) ───────────────────────────────────────
   minio:
     image: minio/minio:latest
@@ -47,6 +46,7 @@ services:
       test: ["CMD", "mc", "ready", "local"]
       interval: 10s
       retries: 5
+
   # MinIO bucket setup (runs once then exits)
   minio-init:
     image: minio/mc:latest
@@ -59,6 +59,7 @@ services:
         mc mb --ignore-existing local/${S3_BUCKET:-timetracker-screenshots} &&
         mc anonymous set download local/${S3_BUCKET:-timetracker-screenshots}
       "
+
   # ── FastAPI backend ─────────────────────────────────────────────────────────
   backend:
     build:
@@ -71,55 +72,67 @@ services:
       minio:
         condition: service_healthy
     environment:
-      DATABASE_URL:          postgresql+asyncpg://timetracker:${POSTGRES_PASSWORD:-timetracker_dev}@db:5432/timetracker
-      JWT_SECRET:            ${JWT_SECRET:-dev_jwt_secret_change_in_production}
-      JWT_ALGORITHM:         HS256
+      DATABASE_URL:           postgresql+asyncpg://timetracker:${POSTGRES_PASSWORD:-timetracker_dev}@db:5432/timetracker
+      JWT_SECRET:             ${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      JWT_ALGORITHM:          HS256
       JWT_DEVICE_EXPIRE_DAYS: 365
       JWT_ADMIN_EXPIRE_HOURS: 12
       # Screenshot storage — MinIO (S3-compatible)
-      AWS_REGION:            us-east-1
-      AWS_ACCESS_KEY_ID:     ${MINIO_ROOT_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      S3_BUCKET:             ${S3_BUCKET:-timetracker-screenshots}
+      AWS_REGION:             us-east-1
+      AWS_ACCESS_KEY_ID:      ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY:  ${MINIO_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET:              ${S3_BUCKET:-timetracker-screenshots}
       S3_ENDPOINT_URL:        http://minio:9000
-      S3_PUBLIC_ENDPOINT_URL: http://localhost:9002
+      S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9002}
       PRESIGNED_URL_EXPIRY:   3600
-      ONLINE_CUTOFF_SECS:    90
-      CORS_ORIGINS:          "${CORS_ORIGINS:-http://localhost:3000,http://localhost:3002,http://10.10.21.230:3002,http://10.10.20.77:3002}"
+      ONLINE_CUTOFF_SECS:     90
+      CORS_ORIGINS:           "${CORS_ORIGINS:-http://localhost:3000,http://localhost:3002,http://10.10.21.230:3002,http://10.10.20.77:3002}"
       # ── Auto-seed first admin (leave blank to disable) ──────────────────
-      SEED_COMPANY:          ${SEED_COMPANY:-}
-      SEED_EMAIL:            ${SEED_EMAIL:-}
-      SEED_NAME:             ${SEED_NAME:-Admin}
-      SETUP_SECRET:          ${SETUP_SECRET:-}
-      SEED_PASSWORD:         ${SEED_PASSWORD:-}
+      SEED_COMPANY:           ${SEED_COMPANY:-}
+      SEED_EMAIL:             ${SEED_EMAIL:-}
+      SEED_NAME:              ${SEED_NAME:-Admin}
+      SETUP_SECRET:           ${SETUP_SECRET:-}
+      SEED_PASSWORD:          ${SEED_PASSWORD:-}
+      # ── Google OAuth ─────────────────────────────────────────────────────
+      # Credentials: set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET in .env,
+      # OR encrypt credentials.json and set SECRETS_KEY (see backend/app/core/secrets.py).
+      SECRETS_KEY:            ${SECRETS_KEY:-}
+      GOOGLE_CLIENT_ID:       ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET:   ${GOOGLE_CLIENT_SECRET:-}
+      # Must be registered in Google Cloud Console for each environment.
+      GOOGLE_REDIRECT_URI:    ${GOOGLE_REDIRECT_URI:-http://localhost:8000/v1/auth/google/callback}
+      # Where the browser lands after OAuth completes.
+      DASHBOARD_URL:          ${DASHBOARD_URL:-http://localhost:3002}
+      ALLOWED_EMAIL_DOMAIN:   ${ALLOWED_EMAIL_DOMAIN:-onedge.co}
     ports:
       - "8000:8000"
     healthcheck:
-      # curl is no longer installed in the backend image — use the venv Python.
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
       interval: 15s
       timeout: 5s
       start_period: 20s
       retries: 5
+
   # ── Next.js dashboard ───────────────────────────────────────────────────────
   dashboard:
     build:
       context: ./dashboard
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_API_URL:          ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        # Override this when NEXT_PUBLIC_API_URL is a LAN IP but only localhost:8000
+        # is registered in Google Cloud Console.
+        NEXT_PUBLIC_GOOGLE_OAUTH_BASE: ${NEXT_PUBLIC_GOOGLE_OAUTH_BASE:-http://localhost:8000}
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_API_URL:           ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_GOOGLE_OAUTH_BASE: ${NEXT_PUBLIC_GOOGLE_OAUTH_BASE:-http://localhost:8000}
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
     ports:
       - "3002:3000"
+
 volumes:
   pg_data:
   minio_data:
-
-
-
-

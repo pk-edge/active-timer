@@ -77,6 +77,17 @@ export function isAuthenticated(): boolean {
   return Boolean(getToken());
 }
 
+export function loginWithToken(token: string) {
+  localStorage.setItem("tt_token", token);
+}
+
+export async function setPassword(password: string): Promise<void> {
+  await request<void>("/v1/auth/set-password", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+}
+
 // ── Devices ───────────────────────────────────────────────────────────────────
 
 export const getDevices = () => request<Device[]>("/v1/devices");
