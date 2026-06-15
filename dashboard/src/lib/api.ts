@@ -1,6 +1,7 @@
 import type {
   Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
-  Me, Role, ModuleDef, User, Group, GroupDetail, GroupMember, Installer, InstallerDownload,
+  Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
+  Group, GroupDetail, GroupMember, Installer, InstallerDownload,
   OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
   AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
@@ -158,6 +159,10 @@ export const deleteRole = (id: string) =>
 
 export const getUsers = (search?: string) =>
   request<User[]>(`/v1/users${search ? `?search=${encodeURIComponent(search)}` : ""}`);
+export const getUserActivity = () =>
+  request<UserActivity[]>("/v1/users/activity");
+export const getUserActivityDetail = (id: string) =>
+  request<UserActivityDetail>(`/v1/users/${id}/activity`);
 export const getPendingUsers = () =>
   request<User[]>("/v1/users?pending=true");
 export const createUser = (body: Record<string, unknown>) =>
