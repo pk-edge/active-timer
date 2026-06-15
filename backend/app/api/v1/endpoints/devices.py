@@ -126,7 +126,6 @@ async def assign_device(
 @router.get("/stream")
 async def stream_device_status(
     token: str = Query(..., description="Admin JWT — passed as query param because EventSource cannot set headers"),
-    db: AsyncSession = Depends(get_db),
 ):
     """SSE endpoint — pushes 'devices_updated' whenever any device syncs.
 
@@ -146,11 +145,16 @@ async def stream_device_status(
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    result = await db.execute(
-        select(Employee).where(Employee.id == user_uuid, Employee.is_active == True)
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    # Short-lived session for auth only — no Depends(get_db): on a long-lived SSE
+    # stream it would hold a pooled connection per open tab → pool exhaustion.
+    from app.db.base import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(Employee).where(Employee.id == user_uuid, Employee.is_active == True)
+        )
+        if not result.scalar_one_or_none():
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     # Reject early if the broadcaster is at capacity — before we release the DB
     # connection, so the session is still properly closed by the dependency.
