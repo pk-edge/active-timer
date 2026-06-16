@@ -473,9 +473,16 @@ async def test_09_roles_crud(client):
     })
     assert r.status_code == 400
 
-    # A role still assigned to users cannot be deleted.
+    # No restriction: deleting a role still assigned to users succeeds and
+    # clears it from those users (role_id → NULL) rather than being blocked.
     r = await client.delete(f"/v1/roles/{CTX['rm_role_id']}", headers=_admin_h())
-    assert r.status_code == 409
+    assert r.status_code == 204
+    r = await client.get("/v1/roles", headers=_admin_h())
+    assert CTX["rm_role_id"] not in {x["id"] for x in r.json()}
+    # The RM user previously holding that role no longer points at it.
+    r = await client.get(f"/v1/users/{CTX['rm_id']}", headers=_admin_h())
+    assert r.status_code == 200
+    assert r.json().get("role_id") in (None, "")
 
     r = await client.delete(f"/v1/roles/{rid}", headers=_admin_h())
     assert r.status_code == 204
@@ -703,16 +710,16 @@ async def test_16_sse_streams_release_db_connections():
         )
 
     # ── /v1/devices/stream ────────────────────────────────────────────────────
-    async with AsyncSessionLocal() as db:
-        await db.execute(sa_text("SELECT 1"))
-        held = engine.pool.checkedout()
-        assert held >= 1
-
-        resp = await stream_device_status(token=CTX["admin_token"], db=db)
-        assert resp.media_type == "text/event-stream"
-        assert engine.pool.checkedout() == held - 1, (
-            "devices /stream must release its pooled connection before streaming"
-        )
+    # This handler takes no injected session: it opens a short-lived
+    # AsyncSessionLocal for auth only and releases it before constructing the
+    # StreamingResponse. So a successful call must pin ZERO net connections —
+    # the long-lived stream below holds nothing from the pool.
+    baseline = engine.pool.checkedout()
+    resp = await stream_device_status(token=CTX["admin_token"])
+    assert resp.media_type == "text/event-stream"
+    assert engine.pool.checkedout() == baseline, (
+        "devices /stream must release its auth connection before streaming"
+    )
 
 
 # ── 99 · Tear down everything this suite committed ────────────────────────────

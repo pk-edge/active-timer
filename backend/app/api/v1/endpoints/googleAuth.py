@@ -12,11 +12,20 @@ Configuration (.env)
 ────────────────────
 GOOGLE_CLIENT_ID      — from Google Cloud Console
 GOOGLE_CLIENT_SECRET  — from Google Cloud Console (or use encrypted secrets file)
-GOOGLE_REDIRECT_URI   — must be registered in Google Cloud Console
-                        e.g. http://localhost:8000/v1/auth/google/callback
-DASHBOARD_URL         — where the browser lands after auth
-                        e.g. http://localhost:3002
+GOOGLE_REDIRECT_URI   — OPTIONAL. Blank → derived from the request
+                        (request.url_for). Whatever value is used MUST be
+                        registered in Google Cloud Console.
+DASHBOARD_URL         — OPTIONAL fallback. The user is normally returned to the
+                        allowlisted origin they signed in from, so one backend
+                        serves localhost / staging / prod without per-env hosts.
 ALLOWED_EMAIL_DOMAIN  — only this domain is accepted (default: onedge.co)
+
+Multi-environment redirects
+───────────────────────────
+Both the Google callback URL and the post-login dashboard URL are derived from
+the live request (the dashboard origin is validated against CORS_ORIGINS so the
+token can never be redirected off-allowlist). This requires uvicorn to run with
+--proxy-headers so the public https host behind the load balancer is seen.
 
 Security
 ────────
@@ -31,10 +40,10 @@ import hmac
 import logging
 import secrets
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
@@ -55,25 +64,92 @@ _GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 _GOOGLE_USER_URL  = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
+# ── Environment URLs ──────────────────────────────────────────────────────────
+# Hard-coded per-environment endpoints. The environment is chosen by matching
+# the dashboard origin the user signed in from, so one backend image serves
+# localhost, staging and prod with the EXACT URLs registered in Google Cloud
+# Console — no dependence on the proxy forwarding the Host header. The Google
+# callback URL for the matched env is used as-is, and the user is returned to
+# that env's dashboard. (Add a row here for any new environment.)
+_ENVIRONMENTS = [
+    {"dashboard": "https://tracker.onedge.co",
+     "api":       "https://api.tracker.onedge.co"},
+    {"dashboard": "https://tracker.staging.onedge.co",
+     "api":       "https://api.tracker.staging.onedge.co"},
+    {"dashboard": "http://localhost:3002",
+     "api":       "http://localhost:8000"},
+]
+
+
+def _allowed_origins() -> set[str]:
+    # Hard-coded dashboards are always trusted; CORS_ORIGINS covers LAN/dev too.
+    return {e["dashboard"].rstrip("/") for e in _ENVIRONMENTS} | {
+        o.rstrip("/") for o in settings.CORS_ORIGINS
+    }
+
+
+def _safe_origin(candidate: str) -> str:
+    """Return `candidate`'s scheme://host IF it is an allowlisted origin, else ""
+    (caller falls back to settings.DASHBOARD_URL). Prevents the token redirect
+    from being pointed at an arbitrary attacker origin."""
+    if not candidate:
+        return ""
+    p = urlsplit(candidate)
+    if not p.scheme or not p.netloc:
+        return ""
+    origin = f"{p.scheme}://{p.netloc}"
+    return origin if origin in _allowed_origins() else ""
+
+
+def _match_env(dashboard_origin: str) -> dict | None:
+    o = dashboard_origin.rstrip("/")
+    return next((e for e in _ENVIRONMENTS if e["dashboard"].rstrip("/") == o), None)
+
+
+def _redirect_uri(request: Request, dashboard_origin: str = "") -> str:
+    """The Google OAuth callback URL. Priority:
+       1. explicit GOOGLE_REDIRECT_URI override (if set);
+       2. the hard-coded api host for the matched environment;
+       3. derived from the request (last-resort fallback).
+    MUST be byte-identical at /google start and at the token exchange."""
+    if settings.GOOGLE_REDIRECT_URI:
+        return settings.GOOGLE_REDIRECT_URI
+    env = _match_env(dashboard_origin)
+    if env:
+        return f"{env['api']}/v1/auth/google/callback"
+    return str(request.url_for("google_oauth_callback"))
+
+
 # ── CSRF state ────────────────────────────────────────────────────────────────
+# State carries the (already allowlist-validated) dashboard origin so the
+# callback knows where to send the user back, tamper-proofed by the HMAC. The
+# field delimiter is "." — safe because every field is digits / base64url / hex
+# and none can contain a dot.
 
-def _make_state() -> str:
-    ts    = str(int(time.time()))
-    nonce = secrets.token_urlsafe(16)
-    msg   = f"{ts}:{nonce}".encode()
-    sig   = hmac.new(settings.JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:24]
-    return f"{ts}:{nonce}:{sig}"
+def _make_state(dashboard_origin: str = "") -> str:
+    ts      = str(int(time.time()))
+    nonce   = secrets.token_urlsafe(16)
+    org_b64 = base64.urlsafe_b64encode(dashboard_origin.encode()).decode().rstrip("=")
+    msg     = f"{ts}.{nonce}.{org_b64}".encode()
+    sig     = hmac.new(settings.JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:24]
+    return f"{ts}.{nonce}.{org_b64}.{sig}"
 
 
-def _verify_state(state: str, max_age: int = 600) -> None:
+def _verify_state(state: str, max_age: int = 600) -> str:
+    """Validate the signed state and return the dashboard origin embedded at
+    start ("" if none). Raises HTTPException on tamper / expiry / malformed."""
     try:
-        ts_str, nonce, sig = state.split(":", 2)
+        ts_str, nonce, org_b64, sig = state.split(".")
         if time.time() - int(ts_str) > max_age:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "OAuth state expired")
-        msg      = f"{ts_str}:{nonce}".encode()
+        msg      = f"{ts_str}.{nonce}.{org_b64}".encode()
         expected = hmac.new(settings.JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:24]
         if not hmac.compare_digest(sig, expected):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid OAuth state")
+        if not org_b64:
+            return ""
+        pad = "=" * (-len(org_b64) % 4)
+        return base64.urlsafe_b64decode(org_b64 + pad).decode()
     except HTTPException:
         raise
     except Exception:
@@ -83,25 +159,30 @@ def _verify_state(state: str, max_age: int = 600) -> None:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/google")
-async def google_oauth_start():
+async def google_oauth_start(request: Request, origin: str = Query(default="")):
     creds = load_google_credentials()
     if not creds["client_id"]:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Google OAuth not configured")
 
+    # Remember where to send the user back: the dashboard passes its own origin
+    # (?origin=), with the Referer as a fallback. Either way it is allowlisted.
+    dash_origin = _safe_origin(origin or request.headers.get("referer", ""))
+
     params = urlencode({
         "client_id":     creds["client_id"],
-        "redirect_uri":  settings.GOOGLE_REDIRECT_URI,
+        "redirect_uri":  _redirect_uri(request, dash_origin),
         "response_type": "code",
         "scope":         "openid email profile",
         "access_type":   "online",
         "prompt":        "select_account",
-        "state":         _make_state(),
+        "state":         _make_state(dash_origin),
     })
     return RedirectResponse(f"{_GOOGLE_AUTH_URL}?{params}")
 
 
 @router.get("/google/callback")
 async def google_oauth_callback(
+    request: Request,
     code:  str = Query(...),
     state: str = Query(...),
     db:    AsyncSession = Depends(get_db),
@@ -109,7 +190,11 @@ async def google_oauth_callback(
     dash = settings.DASHBOARD_URL
 
     try:
-        _verify_state(state)
+        # Prefer the origin the user actually signed in from (carried tamper-proof
+        # in the signed state); re-check the allowlist in case it changed.
+        origin = _verify_state(state)
+        if origin and origin in _allowed_origins():
+            dash = origin
     except HTTPException:
         return RedirectResponse(f"{dash}/login?error=invalid_state")
 
@@ -124,7 +209,9 @@ async def google_oauth_callback(
                 "code":          code,
                 "client_id":     creds["client_id"],
                 "client_secret": creds["client_secret"],
-                "redirect_uri":  settings.GOOGLE_REDIRECT_URI,
+                # MUST be byte-identical to the redirect_uri sent at /google start
+                # — same origin from state → same matched environment → same URL.
+                "redirect_uri":  _redirect_uri(request, origin),
                 "grant_type":    "authorization_code",
             })
         if token_resp.status_code != 200:
@@ -155,6 +242,12 @@ async def google_oauth_callback(
 
     if not email or not google_sub:
         return RedirectResponse(f"{dash}/login?error=google_missing_email")
+
+    # Only accept emails Google itself has verified — never trust an unverified
+    # address (it could be a value the account holder set but does not own).
+    if not info.get("email_verified", False):
+        log.warning("Rejected unverified Google email: %s", email)
+        return RedirectResponse(f"{dash}/login?error=email_unverified")
 
     # ── Domain enforcement ────────────────────────────────────────────────────
     if not email.endswith(f"@{settings.ALLOWED_EMAIL_DOMAIN}"):

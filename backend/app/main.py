@@ -39,8 +39,32 @@ def _cors_allow_origin(origin: str | None) -> str | None:
     return None
 
 
+log = logging.getLogger(__name__)
+
+# Known weak/placeholder secrets that must never reach a real deployment — a
+# guessable JWT_SECRET lets anyone forge admin JWTs and OAuth state tokens.
+_WEAK_SECRETS = {"", "change-me-in-production", "dev_jwt_secret_change_in_production"}
+
+
+def _assert_secure_config() -> None:
+    """Fail fast on a dangerous secret misconfiguration. Hard-stops a real
+    deployment (ENVIRONMENT != development) booted with a default/dev JWT_SECRET;
+    always warns so the weak secret is visible even in local development."""
+    if settings.JWT_SECRET in _WEAK_SECRETS:
+        if settings.ENVIRONMENT.lower() != "development":
+            raise RuntimeError(
+                f"Refusing to start in ENVIRONMENT={settings.ENVIRONMENT!r}: "
+                "JWT_SECRET is a known default/dev value. A weak JWT_SECRET lets "
+                "anyone forge admin JWTs and OAuth state. Set a strong, unique "
+                "JWT_SECRET (e.g. `openssl rand -hex 32`)."
+            )
+        log.warning("JWT_SECRET is a known dev default — set a strong secret "
+                    "before deploying (ENVIRONMENT=development, so allowed here).")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _assert_secure_config()      # refuse to boot a real deployment with a weak secret
     await init_db()              # migrations + RBAC seed + bootstrap admin (all idempotent)
     await ingest_queue.start()   # start async worker pool
     yield

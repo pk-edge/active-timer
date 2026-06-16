@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     INGEST_MIN_WORKERS: int = 2
     INGEST_MAX_WORKERS: int = 4
 
+    # ── Runtime environment ────────────────────────────────────────────────────
+    # "development" | "staging" | "production". Anything other than development
+    # is treated as a real deployment and enforces secure-secret checks at boot.
+    ENVIRONMENT: str = "development"
+
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
@@ -60,9 +65,13 @@ class Settings(BaseSettings):
     # otherwise read from GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env vars.
     GOOGLE_CLIENT_ID:     str = ""
     GOOGLE_CLIENT_SECRET: str = ""
-    # Must match a URI registered in Google Cloud Console.
-    GOOGLE_REDIRECT_URI:  str = "http://localhost:8000/v1/auth/google/callback"
-    # Where the browser lands after the backend processes the OAuth callback.
+    # Both auto-derive from the live request when blank, so one image works on
+    # localhost, staging and prod. Set them only to pin an exact value.
+    #   GOOGLE_REDIRECT_URI : blank → request.url_for(callback); whatever value
+    #                         is used MUST be registered in Google Cloud Console.
+    #   DASHBOARD_URL       : blank → the allowlisted origin the user signed in
+    #                         from; used as the final fallback if that is absent.
+    GOOGLE_REDIRECT_URI:  str = ""
     DASHBOARD_URL:        str = "http://localhost:3002"
     # Only this email domain is permitted to sign in via Google.
     ALLOWED_EMAIL_DOMAIN: str = "onedge.co"
