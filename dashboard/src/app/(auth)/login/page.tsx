@@ -196,13 +196,20 @@ export default function LoginPage() {
   /* ── Google sign-in ──────────────────────────────────────────────────── */
   function handleGoogleSignIn() {
     setGoogleLoading(true);
-    // Use NEXT_PUBLIC_GOOGLE_OAUTH_BASE when the registered redirect URI in
-    // Google Cloud Console differs from NEXT_PUBLIC_API_URL (e.g. LAN IP vs localhost).
-    const oauthBase = process.env.NEXT_PUBLIC_GOOGLE_OAUTH_BASE ?? BASE;
+    // Always start OAuth on the SAME backend the rest of the app talks to
+    // (BASE = NEXT_PUBLIC_API_URL). A separate OAuth-base var used to default to
+    // localhost at build time and sent staging/prod sign-ins to the wrong host.
+    // If BASE is somehow empty, derive it from the current host
+    // (tracker.* → api.tracker.*) so staging/prod still work.
+    let base = BASE;
+    if (!base) {
+      const { protocol, host } = window.location;
+      base = host.startsWith("tracker.") ? `${protocol}//api.${host}` : "";
+    }
     // Tell the backend where to send us back, so it returns to THIS dashboard
     // (staging/prod/local) instead of a hardcoded URL. Allowlisted server-side.
     const origin = encodeURIComponent(window.location.origin);
-    window.location.href = `${oauthBase}/v1/auth/google?origin=${origin}`;
+    window.location.href = `${base}/v1/auth/google?origin=${origin}`;
   }
 
   return (

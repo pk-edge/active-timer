@@ -106,6 +106,18 @@ def _match_env(dashboard_origin: str) -> dict | None:
     return next((e for e in _ENVIRONMENTS if e["dashboard"].rstrip("/") == o), None)
 
 
+def _dashboard_for_request(request: Request) -> str:
+    """Best-effort dashboard for THIS backend — used as the error/fallback target
+    when there is no validated origin from state (so an error never bounces to
+    localhost on staging/prod). Maps the backend's own host to its environment's
+    dashboard, then falls back to settings.DASHBOARD_URL."""
+    host = request.url.netloc
+    for e in _ENVIRONMENTS:
+        if urlsplit(e["api"]).netloc == host:
+            return e["dashboard"]
+    return settings.DASHBOARD_URL or _ENVIRONMENTS[-1]["dashboard"]
+
+
 def _redirect_uri(request: Request, dashboard_origin: str = "") -> str:
     """The Google OAuth callback URL. Priority:
        1. explicit GOOGLE_REDIRECT_URI override (if set);
@@ -187,7 +199,9 @@ async def google_oauth_callback(
     state: str = Query(...),
     db:    AsyncSession = Depends(get_db),
 ):
-    dash = settings.DASHBOARD_URL
+    # Fallback dashboard for error paths = THIS backend's own environment, so a
+    # failure never bounces the user to localhost on staging/prod.
+    dash = _dashboard_for_request(request)
 
     try:
         # Prefer the origin the user actually signed in from (carried tamper-proof
