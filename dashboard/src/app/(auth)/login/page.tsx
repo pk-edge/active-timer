@@ -129,6 +129,7 @@ const OAUTH_ERRORS: Record<string, string> = {
   google_token_failed:   "Google sign-in failed. Please try again.",
   google_unreachable:    "Could not reach Google. Check your connection and try again.",
   google_missing_email:  "Google did not return an email address. Try a different account.",
+  email_unverified:      "Your Google email is not verified. Verify it with Google and try again.",
   invalid_state:         "OAuth session expired. Please try again.",
   oauth_not_configured:  "Google sign-in is not yet configured. Use email login.",
   company_not_found:     "System not set up yet. Contact an administrator.",
@@ -198,7 +199,10 @@ export default function LoginPage() {
     // Use NEXT_PUBLIC_GOOGLE_OAUTH_BASE when the registered redirect URI in
     // Google Cloud Console differs from NEXT_PUBLIC_API_URL (e.g. LAN IP vs localhost).
     const oauthBase = process.env.NEXT_PUBLIC_GOOGLE_OAUTH_BASE ?? BASE;
-    window.location.href = `${oauthBase}/v1/auth/google`;
+    // Tell the backend where to send us back, so it returns to THIS dashboard
+    // (staging/prod/local) instead of a hardcoded URL. Allowlisted server-side.
+    const origin = encodeURIComponent(window.location.origin);
+    window.location.href = `${oauthBase}/v1/auth/google?origin=${origin}`;
   }
 
   return (

@@ -73,6 +73,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL:           postgresql+asyncpg://timetracker:${POSTGRES_PASSWORD:-timetracker_dev}@db:5432/timetracker
+      # development | staging | production. On staging/production the backend
+      # refuses to boot with a default/dev JWT_SECRET (forge-admin-token guard).
+      ENVIRONMENT:            ${ENVIRONMENT:-development}
       JWT_SECRET:             ${JWT_SECRET:-dev_jwt_secret_change_in_production}
       JWT_ALGORITHM:          HS256
       JWT_DEVICE_EXPIRE_DAYS: 365
@@ -99,9 +102,12 @@ services:
       SECRETS_KEY:            ${SECRETS_KEY:-}
       GOOGLE_CLIENT_ID:       ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET:   ${GOOGLE_CLIENT_SECRET:-}
-      # Must be registered in Google Cloud Console for each environment.
-      GOOGLE_REDIRECT_URI:    ${GOOGLE_REDIRECT_URI:-http://localhost:8000/v1/auth/google/callback}
-      # Where the browser lands after OAuth completes.
+      # Blank → the backend derives the callback URL from the request, so one
+      # image works on localhost/staging/prod. Whatever value is used must be
+      # registered in Google Cloud Console. Set only to pin an exact value.
+      GOOGLE_REDIRECT_URI:    ${GOOGLE_REDIRECT_URI:-}
+      # Fallback only — users are normally returned to the allowlisted origin
+      # they signed in from. Used on the rare error/invalid-state path.
       DASHBOARD_URL:          ${DASHBOARD_URL:-http://localhost:3002}
       ALLOWED_EMAIL_DOMAIN:   ${ALLOWED_EMAIL_DOMAIN:-onedge.co}
     ports:
