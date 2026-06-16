@@ -125,13 +125,15 @@ services:
       context: ./dashboard
       dockerfile: Dockerfile
       args:
+        # REQUIRED per environment — baked into the bundle at build time and used
+        # for ALL backend calls, including Google sign-in (the OAuth button now
+        # uses this same base). Staging/prod MUST set this to their api host, e.g.
+        #   NEXT_PUBLIC_API_URL=https://api.tracker.staging.onedge.co
+        # Leaving it at the localhost default is what sent staging sign-ins to
+        # localhost. Build with:  NEXT_PUBLIC_API_URL=… docker compose build dashboard
         NEXT_PUBLIC_API_URL:          ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-        # Override this when NEXT_PUBLIC_API_URL is a LAN IP but only localhost:8000
-        # is registered in Google Cloud Console.
-        NEXT_PUBLIC_GOOGLE_OAUTH_BASE: ${NEXT_PUBLIC_GOOGLE_OAUTH_BASE:-http://localhost:8000}
     environment:
       NEXT_PUBLIC_API_URL:           ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-      NEXT_PUBLIC_GOOGLE_OAUTH_BASE: ${NEXT_PUBLIC_GOOGLE_OAUTH_BASE:-http://localhost:8000}
     restart: unless-stopped
     depends_on:
       backend:
