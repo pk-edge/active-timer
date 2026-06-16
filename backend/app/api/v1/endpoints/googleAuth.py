@@ -44,7 +44,7 @@ from app.api.deps import get_current_user, get_db
 from app.core.config import get_settings
 from app.core.secrets import load_google_credentials
 from app.core.security import create_admin_token, hash_password_async
-from app.db.models import Company, Employee
+from app.db.models import Company, Employee, Role
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -162,7 +162,11 @@ async def google_oauth_callback(
         return RedirectResponse(f"{dash}/login?error=domain_not_allowed")
 
     # ── Find or create employee ───────────────────────────────────────────────
-    company_row = await db.execute(select(Company).limit(1))
+    # Deterministic company pick (oldest = the founding company) so a new user
+    # is never attached to an arbitrary tenant under multi-company deployments.
+    company_row = await db.execute(
+        select(Company).order_by(Company.created_at.asc()).limit(1)
+    )
     company     = company_row.scalar_one_or_none()
     if not company:
         return RedirectResponse(f"{dash}/login?error=company_not_found")
@@ -172,26 +176,39 @@ async def google_oauth_callback(
     new_user = False
 
     if employee:
+        # Reject disabled accounts BEFORE persisting anything — never mutate a
+        # deactivated/deleted record's identity (it could later be reactivated).
+        if not employee.is_active or employee.is_deleted:
+            return RedirectResponse(f"{dash}/login?error=account_inactive")
         if employee.google_sub != google_sub:
             employee.google_sub = google_sub
             await db.commit()
-        if not employee.is_active or employee.is_deleted:
-            return RedirectResponse(f"{dash}/login?error=account_inactive")
     else:
         new_user = True
+        # New SSO users default to VIEWER (read-only, group-scoped). They are
+        # NEVER auto-provisioned as admin and get no edit access — an existing
+        # admin must explicitly elevate the role before they can change anything.
+        viewer_role = (await db.execute(
+            select(Role).where(
+                Role.company_id == company.id,
+                Role.name == "Viewer",
+                Role.is_deleted == False,  # noqa: E712
+            )
+        )).scalar_one_or_none()
         employee = Employee(
             company_id=company.id,
             email=email,
             name=name,
             google_sub=google_sub,
-            role="admin",
+            role="viewer",
+            role_id=viewer_role.id if viewer_role else None,
             is_active=True,
             is_approved=True,
         )
         db.add(employee)
         await db.commit()
         await db.refresh(employee)
-        log.info("Auto-provisioned Google user: %s", email)
+        log.info("Auto-provisioned Google user as Viewer (read-only): %s", email)
 
     jwt_token = create_admin_token(str(employee.id), employee.role, str(employee.company_id))
     return RedirectResponse(

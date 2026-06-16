@@ -156,17 +156,14 @@ async def stream_device_status(
         if not result.scalar_one_or_none():
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
-    # Reject early if the broadcaster is at capacity — before we release the DB
-    # connection, so the session is still properly closed by the dependency.
+    # The auth session above is already released (its `async with` block exited),
+    # so the long-lived stream below holds NO pooled connection — no per-tab leak.
+    # Reject early if the broadcaster is at capacity before we start streaming.
     if broadcaster.subscriber_count() >= broadcaster.MAX_SUBSCRIBERS:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="SSE capacity reached, try again later",
         )
-
-    # Release the pooled connection before streaming — this response lives for
-    # the whole dashboard session and does no further DB work.
-    await db.close()
 
     MIN_PUSH_INTERVAL = 2.0  # seconds — matches home/stream throttle
 

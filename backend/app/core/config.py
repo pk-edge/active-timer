@@ -26,8 +26,12 @@ class Settings(BaseSettings):
     INGEST_DB_POOL_SIZE: int = 2
     INGEST_DB_MAX_OVERFLOW: int = 2
 
-    # Ingest queue worker ceiling — sized to its OWN pool now: more workers than
-    # ingest connections just queue on checkout, so keep these two in step.
+    # Ingest queue worker pool — bounded by its OWN connection pool so workers
+    # can NEVER overflow it: more workers than connections just block on checkout
+    # and time out. At startup MAX is hard-clamped to
+    # (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW), and MIN is kept below MAX so
+    # the pool has room to scale up under load and back down when idle.
+    INGEST_MIN_WORKERS: int = 2
     INGEST_MAX_WORKERS: int = 4
 
     # ── JWT ───────────────────────────────────────────────────────────────────

@@ -24,10 +24,13 @@ Architecture
 
 Pool sizing
 ───────────
-• Starts with MIN_WORKERS (4).
+• Starts with MIN_WORKERS (INGEST_MIN_WORKERS, default 2).
 • Every SCALE_INTERVAL seconds a monitor coroutine checks queue depth.
-  – depth >  SCALE_UP_AT   → spin up one worker  (up to MAX_WORKERS = 16)
+  – depth >  SCALE_UP_AT   → spin up one worker  (up to MAX_WORKERS)
   – depth <  SCALE_DOWN_AT → shut down one worker (down to MIN_WORKERS)
+• MAX_WORKERS is hard-clamped to the ingest pool's connection count
+  (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW) so workers can never
+  outnumber connections and block on checkout.
 • Workers drain in BATCH_SIZE chunks (default 200) so each DB round-trip
   is as cheap as possible.
 
@@ -54,8 +57,13 @@ log = logging.getLogger("ingest_queue")
 QUEUE_MAXSIZE   = 100_000   # drop back-pressure threshold
 BATCH_SIZE      = 200       # events per DB write cycle
 BATCH_WAIT      = 0.4       # seconds to wait for a full batch before flushing
-MIN_WORKERS     = 4         # always-on workers
-MAX_WORKERS     = get_settings().INGEST_MAX_WORKERS  # env-driven; keep < DB pool
+_settings        = get_settings()
+MIN_WORKERS     = _settings.INGEST_MIN_WORKERS   # always-on workers
+# Hard ceiling: never run more workers than the ingest pool has connections, or
+# the surplus workers block on checkout and time out (the pool "overflow" jam).
+# Keep MAX >= MIN so the pool is always at least its floor size.
+_INGEST_CONN_CAP = _settings.INGEST_DB_POOL_SIZE + _settings.INGEST_DB_MAX_OVERFLOW
+MAX_WORKERS     = max(MIN_WORKERS, min(_settings.INGEST_MAX_WORKERS, _INGEST_CONN_CAP))
 SCALE_INTERVAL  = 5.0       # how often to check queue depth
 SCALE_UP_AT     = 500       # grow pool when queue exceeds this
 SCALE_DOWN_AT   = 50        # shrink pool when queue drops below this
