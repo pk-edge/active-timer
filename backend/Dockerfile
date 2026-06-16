@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ── Stage 1: install dependencies into an isolated venv ───────────────────────
 # All requirements ship prebuilt wheels for slim/linux, so no compiler is needed.
 FROM python:3.12-slim AS builder

@@ -82,6 +82,10 @@ async def upload_installer(
     await file.seek(0)
 
     s3_key = f"installers/{user.company_id}/{platform}/{version}/TimeTracker.{_EXT[installer_type]}"
+    # Release the pooled DB connection for the duration of the transfer — a
+    # multi-hundred-MB upload takes minutes and must not pin a connection.
+    # The session transparently re-acquires one for the INSERT afterwards.
+    await db.close()
     try:
         # boto3 upload is blocking — a multi-hundred-MB installer would freeze the
         # event loop (and every other request) for the whole transfer. Run it in a thread.
