@@ -24,7 +24,8 @@ async def run(company_name: str, email: str, name: str, password: str) -> None:
     await init_db()
     async with AsyncSessionLocal() as db:
         company, created = await ensure_admin(
-            db, company_name=company_name, email=email, name=name, password=password
+            db, company_name=company_name, email=email, name=name,
+            password=password, reset_password=True,
         )
         await db.commit()
 

@@ -172,7 +172,7 @@ export default function DevicesPage() {
 
       {/* Device grid */}
       {view === "all" && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
           {filtered.map(d => (
             <DeviceCard key={d.id} device={d} employees={employees}
                         canAssign={canAssign} onAssigned={() => mutate()} />
@@ -200,7 +200,7 @@ export default function DevicesPage() {
                   {group.devices.length} device{group.devices.length !== 1 ? "s" : ""}
                 </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
                 {group.devices.map(d => (
                   <DeviceCard key={d.id} device={d} employees={employees}
                               canAssign={canAssign} onAssigned={() => mutate()} />
