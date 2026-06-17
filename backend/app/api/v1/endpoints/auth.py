@@ -122,12 +122,16 @@ async def admin_login(body: AdminLoginRequest, db: AsyncSession = Depends(get_db
             detail="Account pending admin approval",
         )
 
-    # Step 3 — require a dashboard role.
-    has_dashboard_role = (
-        employee.role_id is not None or employee.role in ("admin", "manager")
-    )
-    if not has_dashboard_role:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    # Step 3 — block talent (device-only) and role-less accounts from portal access.
+    # Talent employees have role_obj.is_system=True (auto-provisioned via device enrollment).
+    # They can have devices and be tracked, but they must never reach the dashboard.
+    is_talent = employee.role_obj is not None and getattr(employee.role_obj, "is_system", False)
+    has_no_role = employee.role_id is None and employee.role not in ("admin", "manager", "viewer")
+    if is_talent or has_no_role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Portal access restricted. This account is not authorized to access the dashboard. Contact your administrator.",
+        )
 
     role_name = employee.role_obj.name if employee.role_obj else employee.role
     token = create_admin_token(str(employee.id), employee.role, str(employee.company_id))
