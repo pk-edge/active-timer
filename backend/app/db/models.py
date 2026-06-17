@@ -29,6 +29,7 @@ class Employee(Base):
     name:          Mapped[str]        = mapped_column(String, nullable=False)
     role:          Mapped[str]        = mapped_column(String, default="employee")
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    google_sub:    Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     is_active:     Mapped[bool]       = mapped_column(Boolean, default=True)
     is_approved:   Mapped[bool]       = mapped_column(Boolean, default=True)
     is_deleted:    Mapped[bool]       = mapped_column(Boolean, default=False)

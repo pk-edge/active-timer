@@ -39,6 +39,24 @@ class LockDetector:
 
     # ── Windows ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _windows_is_locked() -> bool:
+        """Return True if the Windows workstation is currently locked.
+
+        OpenInputDesktop returns NULL (0) when the interactive desktop is
+        not the current thread's desktop — i.e. when the screen is locked.
+        """
+        try:
+            import ctypes
+            DESKTOP_SWITCHDESKTOP = 0x0100
+            hDesk = ctypes.windll.user32.OpenInputDesktop(0, False, DESKTOP_SWITCHDESKTOP)
+            if hDesk:
+                ctypes.windll.user32.CloseDesktop(hDesk)
+                return False
+            return True
+        except Exception:
+            return False
+
     def _run_windows(self):
         try:
             import win32api
@@ -49,6 +67,14 @@ class LockDetector:
             WM_WTSSESSION_CHANGE  = 0x02B1
             WTS_SESSION_LOCK      = 0x7
             WTS_SESSION_UNLOCK    = 0x8
+
+            # Check initial state BEFORE registering for session-change events.
+            # WTSRegisterSessionNotification only fires on transitions, so if
+            # the screen is already locked when the agent starts, pause_event
+            # would never be set without this explicit check.
+            if self._windows_is_locked():
+                log.info("Screen already locked at agent start (Windows)")
+                self._on_lock()
 
             class _Listener:
                 def __init__(self, on_lock, on_unlock):
@@ -91,17 +117,26 @@ class LockDetector:
             log.warning("Quartz unavailable — macOS lock detection disabled")
             return
 
-        was_locked = False
+        def _read_locked() -> bool:
+            try:
+                session = CGSessionCopyCurrentDictionary()
+                return bool(session.get("CGSSessionScreenIsLocked", 0)) if session else False
+            except Exception:
+                return False
+
+        # Check initial state BEFORE the first sleep so that if the agent
+        # starts while the screen is already locked, pause_event is set
+        # immediately — not 2 seconds later — preventing the WindowWatcher
+        # from tracking loginwindow during that gap.
+        was_locked = _read_locked()
+        if was_locked:
+            log.info("Screen already locked at agent start")
+            self._on_lock()
+
         log.info("LockDetector polling CGSession every 2 s")
         while True:
             time.sleep(2)
-            try:
-                session = CGSessionCopyCurrentDictionary()
-                locked = bool(
-                    session.get("CGSSessionScreenIsLocked", 0)
-                ) if session else False
-            except Exception:
-                locked = False
+            locked = _read_locked()
 
             if locked and not was_locked:
                 was_locked = True
@@ -126,6 +161,23 @@ class LockDetector:
             on_lock   = self._on_lock
             on_unlock = self._on_unlock
 
+            session_obj = bus.get_object(
+                "org.freedesktop.login1",
+                "/org/freedesktop/login1/session/auto",
+            )
+
+            # Check initial LockedHint BEFORE subscribing to changes so that
+            # if the agent starts while the session is already locked, on_lock()
+            # fires immediately rather than waiting for the next transition.
+            try:
+                props_iface = dbus.Interface(session_obj, "org.freedesktop.DBus.Properties")
+                locked_hint = props_iface.Get("org.freedesktop.login1.Session", "LockedHint")
+                if bool(locked_hint):
+                    log.info("Screen already locked at agent start (Linux)")
+                    on_lock()
+            except Exception:
+                pass
+
             def _props_changed(iface, changed, invalidated):
                 if "LockedHint" in changed:
                     if bool(changed["LockedHint"]):
@@ -133,10 +185,6 @@ class LockDetector:
                     else:
                         on_unlock()
 
-            session_obj = bus.get_object(
-                "org.freedesktop.login1",
-                "/org/freedesktop/login1/session/auto",
-            )
             session_obj.connect_to_signal(
                 "PropertiesChanged",
                 _props_changed,

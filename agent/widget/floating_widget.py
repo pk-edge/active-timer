@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (
     QWidget, QLabel, QGraphicsOpacityEffect, QGraphicsDropShadowEffect,
     QSystemTrayIcon, QMenu, QApplication, QMessageBox,
 )
-from PySide6.QtCore import Qt, QTimer, QPoint, QPropertyAnimation, QEasingCurve, QRectF
+from PySide6.QtCore import (
+    Qt, QTimer, QPoint, QPropertyAnimation, QEasingCurve, QRectF, QEvent,
+)
 from PySide6.QtGui import (
     QFont, QColor, QPainter, QPainterPath, QPen,
     QIcon, QPixmap, QBrush,
@@ -132,15 +134,47 @@ class FloatingWidget(QWidget):
         self._init_unix      = int(time.time())
         self._session_date   = datetime.now().date()
         self._last_tick      = int(time.time())
+        self._allow_close    = False   # True when an OS shutdown/restart is in progress
 
         self._setup_window()
         self._build_ui()
         self._setup_tray()
         self._start_timers()
+        self._hook_session_end()
+
+    # ── OS shutdown/restart must never be blocked ─────────────────────────────
+    # The widget normally vetoes close events (the timer hides instead of
+    # quitting), but the SAME close path is used by Windows logoff/shutdown and
+    # by macOS termination — vetoing there makes the OS report "TimeTracker is
+    # preventing shutdown". These hooks detect a session end and lift the veto.
+
+    def _hook_session_end(self):
+        app = QApplication.instance()
+        if app is None:
+            return
+        try:
+            # Windows/X11: emitted while the OS is committing the session.
+            app.commitDataRequest.connect(self._on_session_end)
+        except Exception:
+            pass
+        # macOS: a shutdown/restart arrives as a Quit event on the application.
+        app.installEventFilter(self)
+
+    def _on_session_end(self, *_a):
+        self._allow_close = True
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Quit:
+            self._allow_close = True
+        return super().eventFilter(obj, ev)
 
     @property
     def elapsed(self) -> int:
         return self._elapsed
+
+    @property
+    def session_date(self):
+        return self._session_date
 
     # ── Window ────────────────────────────────────────────────────────────────
 
@@ -360,31 +394,50 @@ class FloatingWidget(QWidget):
                 return
         QApplication.quit()
 
+    # Restart/shutdown are available to EVERY user — admin and non-admin alike.
+    # Only quitting the agent is admin-gated (see _quit_requires_admin); the
+    # power actions ask a plain yes/no confirmation and never prompt for
+    # elevation (Windows grants SeShutdownPrivilege to standard users, and the
+    # macOS System Events route needs no privileges beyond the one-time
+    # Automation consent).
+
     def _shutdown_computer(self):
         if QMessageBox.question(None, "Shut Down", "Shut down this computer?",
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
-        self._shared["db"].end_session(self._shared.get("current_session_id"), self._elapsed)
-        if sys.platform == "win32":
-            subprocess.run(["shutdown", "/s", "/t", "5"], check=False)
-        elif sys.platform == "darwin":
-            subprocess.run(["osascript", "-e",
-                'tell application "System Events" to shut down'], check=False)
-        else:
-            subprocess.run(["shutdown", "-h", "+0"], check=False)
+        self._power_command(restart=False)
 
     def _restart_computer(self):
         if QMessageBox.question(None, "Restart", "Restart this computer?",
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
-        self._shared["db"].end_session(self._shared.get("current_session_id"), self._elapsed)
+        self._power_command(restart=True)
+
+    def _power_command(self, *, restart: bool) -> None:
+        """Issue the OS restart/shutdown, then quit the agent immediately.
+
+        Fire-and-forget (Popen, NOT run): on macOS the AppleScript round-trip
+        only returns once every app — including this one — has quit, so a
+        blocking call on the Qt main thread deadlocks the shutdown. Quitting
+        right after gives the OS a clean exit (session end + daily flush run
+        in the aboutToQuit handler) and guarantees the agent never blocks the
+        power action it just requested. Autostart brings it back on login.
+        """
         if sys.platform == "win32":
-            subprocess.run(["shutdown", "/r", "/t", "5"], check=False)
+            cmd = ["shutdown", "/r" if restart else "/s", "/t", "5"]
         elif sys.platform == "darwin":
-            subprocess.run(["osascript", "-e",
-                'tell application "System Events" to restart'], check=False)
+            verb = "restart" if restart else "shut down"
+            cmd = ["osascript", "-e", f'tell application "System Events" to {verb}']
         else:
-            subprocess.run(["shutdown", "-r", "+0"], check=False)
+            cmd = ["shutdown", "-r" if restart else "-h", "+0"]
+        try:
+            subprocess.Popen(cmd)
+        except Exception:
+            QMessageBox.warning(self, "TimeTracker",
+                "Could not start the power action — please use the system menu.")
+            return
+        self._allow_close = True
+        QApplication.quit()
 
     # ── Timers ────────────────────────────────────────────────────────────────
 
@@ -517,5 +570,10 @@ class FloatingWidget(QWidget):
         self._drag_pos = QPoint()
 
     def closeEvent(self, e):
-        e.ignore()
+        app = QApplication.instance()
+        session_ending = bool(app and app.isSavingSession())
+        if self._allow_close or session_ending:
+            e.accept()           # OS shutdown/restart/logoff — never stand in the way
+            return
+        e.ignore()               # casual Alt+F4 / ⌘W — keep the timer alive
         self.show()

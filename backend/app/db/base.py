@@ -14,22 +14,44 @@ log = logging.getLogger(__name__)
 
 settings = get_settings()
 
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=False,
-    # Per-environment env vars so each task stays under the DB max_connections,
-    # leaving room for the 2x spike during a rolling deploy.
-    pool_size=settings.DB_POOL_SIZE,
-    max_overflow=settings.DB_MAX_OVERFLOW,
-    pool_pre_ping=True,
-    pool_recycle=settings.DB_POOL_RECYCLE,
-    connect_args={
-        "timeout": 10,  # seconds before giving up on establishing a new connection
-    },
-)
+def _make_engine(pool_size: int, max_overflow: int):
+    return create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_pre_ping=True,
+        pool_recycle=settings.DB_POOL_RECYCLE,
+        # Fail fast: waiting the old 30s default just builds a convoy of stuck
+        # requests when the pool is briefly exhausted — better a quick 500 on
+        # the odd request than the whole app jammed for half a minute each.
+        pool_timeout=settings.DB_POOL_TIMEOUT,
+        # LIFO keeps a hot core of connections busy and lets the rest idle out
+        # via pool_recycle — fewer open connections on small DB instances.
+        pool_use_lifo=True,
+        connect_args={
+            "timeout": 10,  # seconds before giving up on establishing a new connection
+        },
+    )
+
+
+# Two ISOLATED pools so background ingest writes can never starve the
+# connection an HTTP request needs for its auth lookup (and vice versa).
+# Per-task connection budget = (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+#                            + (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW);
+# keep 2x that under the DB max_connections to survive rolling deploys.
+engine = _make_engine(settings.DB_POOL_SIZE, settings.DB_MAX_OVERFLOW)
+ingest_engine = _make_engine(settings.INGEST_DB_POOL_SIZE, settings.INGEST_DB_MAX_OVERFLOW)
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+# Sessions for the ingest worker pool — bound to the dedicated writer engine.
+IngestSessionLocal = async_sessionmaker(
+    ingest_engine,
     class_=AsyncSession,
     expire_on_commit=False,
 )

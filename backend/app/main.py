@@ -39,12 +39,55 @@ def _cors_allow_origin(origin: str | None) -> str | None:
     return None
 
 
+log = logging.getLogger(__name__)
+
+# Known weak/placeholder secrets that must never reach a real deployment — a
+# guessable JWT_SECRET lets anyone forge admin JWTs and OAuth state tokens.
+_WEAK_SECRETS = {"", "change-me-in-production", "dev_jwt_secret_change_in_production"}
+
+
+def _assert_secure_config() -> None:
+    """Fail fast on a dangerous secret misconfiguration. Hard-stops a real
+    deployment (ENVIRONMENT != development) booted with a default/dev JWT_SECRET;
+    always warns so the weak secret is visible even in local development."""
+    if settings.JWT_SECRET in _WEAK_SECRETS:
+        if settings.ENVIRONMENT.lower() != "development":
+            raise RuntimeError(
+                f"Refusing to start in ENVIRONMENT={settings.ENVIRONMENT!r}: "
+                "JWT_SECRET is a known default/dev value. A weak JWT_SECRET lets "
+                "anyone forge admin JWTs and OAuth state. Set a strong, unique "
+                "JWT_SECRET (e.g. `openssl rand -hex 32`)."
+            )
+        log.warning("JWT_SECRET is a known dev default — set a strong secret "
+                    "before deploying (ENVIRONMENT=development, so allowed here).")
+
+
+def _log_oauth_status() -> None:
+    """One-line startup signal so a missing Google config is obvious in the logs
+    at deploy time, instead of surfacing only when a user clicks 'Sign in'."""
+    from app.core.secrets import load_google_credentials
+    creds = load_google_credentials()
+    if creds.get("client_id") and creds.get("client_secret"):
+        log.info("Google OAuth: configured")
+    else:
+        log.warning(
+            "Google OAuth: NOT configured — /v1/auth/google will return 503. Set "
+            "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (or SECRETS_KEY + "
+            "secrets/google_credentials.enc) in this backend's environment."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _assert_secure_config()      # refuse to boot a real deployment with a weak secret
+    _log_oauth_status()          # surface missing Google OAuth config at startup
     await init_db()              # migrations + RBAC seed + bootstrap admin (all idempotent)
     await ingest_queue.start()   # start async worker pool
     yield
     await ingest_queue.stop()    # drain + shutdown workers cleanly
+    from app.db.base import engine, ingest_engine
+    await ingest_engine.dispose()
+    await engine.dispose()
 
 
 def create_app() -> FastAPI:

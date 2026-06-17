@@ -156,11 +156,14 @@ async def overview(
         stat_filter = " AND ae.timestamp >= date_trunc('day', NOW())"
 
     # Active working time = window_change events for real user apps ONLY.
-    # Excludes: System Idle Process / LockApp (Windows OS placeholders that
-    # appear as foreground window while the user is actually idle), and any
-    # event whose app_name is NULL/blank.
+    # Excludes OS lock/login screen apps that appear as the foreground window
+    # while the screen is locked, and any event whose app_name is NULL/blank.
     SYSTEM_IDLE_APPS = (
-        "System Idle Process", "LockApp", "LogonUI",
+        "loginwindow",          # macOS lock screen
+        "ScreenSaverEngine",    # macOS screen saver
+        "System Idle Process",  # Windows idle placeholder
+        "LockApp",              # Windows 10/11 lock screen
+        "LogonUI",              # Windows login/credential UI
         "Idle", "screensaver",
     )
     placeholders = ", ".join(f":ex{i}" for i in range(len(SYSTEM_IDLE_APPS)))
@@ -397,9 +400,14 @@ async def stream(
     """
     SSE endpoint — pushes the realtime device list whenever ingest lands new data.
 
-    The client receives an initial snapshot immediately, then gets pushed updates
-    as agents report activity.  A heartbeat comment is sent every 25 s so proxies
-    and load-balancers don't kill idle connections.
+    Industrial-standard pattern:
+    - Auth and scope resolved before streaming; DB connection released immediately.
+    - Hard cap: 503 when broadcaster is at MAX_SUBSCRIBERS.
+    - Initial snapshot sent on connect so the client never shows a blank state.
+    - Burst coalescing: rapid ingest flushes are merged so the DB query runs at
+      most once every MIN_PUSH_INTERVAL seconds per subscriber.
+    - 25 s heartbeat keeps proxies and load-balancers from killing idle connections.
+    - CancelledError caught explicitly so client disconnect is always clean.
     """
     from app.core import broadcaster
     from app.core.ingest_queue import ingest_queue
@@ -408,8 +416,18 @@ async def stream(
     ids        = await _resolve_ids(user, group_id, db)
     company_id = user.company_id
 
-    # Release the pooled connection before the long-lived SSE stream: the get_db
-    # session (shared by `require` + the db param) would otherwise leak one conn per open tab.
+    # Reject early (before releasing DB connection) if broadcaster is at capacity.
+    if broadcaster.subscriber_count() >= broadcaster.MAX_SUBSCRIBERS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SSE capacity reached, try again later",
+        )
+
+    # CRITICAL: release the request's pooled connection NOW. This response
+    # streams for the life of the dashboard tab — holding the dependency
+    # session would pin one connection per viewer and drain the pool (the
+    # "QueuePool limit reached" production jam). Payload queries below use
+    # their own short-lived sessions.
     await db.close()
 
     async def _payload() -> str:
@@ -442,6 +460,10 @@ async def stream(
 
     async def _event_generator():
         q = broadcaster.subscribe()
+        if q is None:
+            # Capacity was grabbed between the check above and subscribe().
+            yield "event: error\ndata: capacity\n\n"
+            return
         try:
             yield await _payload()
             last_push = time.monotonic()
@@ -451,7 +473,8 @@ async def stream(
                     await asyncio.wait_for(q.get(), timeout=25.0)
                     # Coalesce the burst and enforce the minimum push interval
                     delay = MIN_PUSH_INTERVAL - (time.monotonic() - last_push)
-                    await asyncio.sleep(max(delay, 0.15))
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                     while not q.empty():
                         q.get_nowait()
                     yield await _payload()
@@ -459,7 +482,7 @@ async def stream(
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
         except asyncio.CancelledError:
-            pass
+            pass  # client disconnected — finally block handles cleanup
         finally:
             broadcaster.unsubscribe(q)
 
@@ -493,6 +516,7 @@ async def device_today_active(
                     WHEN ae.event_type = 'window_change'
                      AND ae.app_name IS NOT NULL
                      AND ae.app_name NOT IN (
+                         'loginwindow','ScreenSaverEngine',
                          'System Idle Process','LockApp','LogonUI','Idle','screensaver'
                      )
                     THEN ae.duration ELSE 0

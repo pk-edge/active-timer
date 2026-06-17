@@ -164,6 +164,18 @@ class LocalDB:
 
     def set_device_id(self, device_id: str) -> None:
         self._device_id = device_id
+        if not device_id:
+            return
+        # Adopt rows buffered while offline/unenrolled (first run without
+        # connectivity): they were queued under a placeholder id so nothing is
+        # lost, and from here on they sync exactly like normal rows.
+        with self._lock, self._conn() as conn:
+            conn.execute("UPDATE events SET device_id=? WHERE device_id='unenrolled'",
+                         (device_id,))
+            conn.execute("UPDATE screenshots SET device_id=? WHERE device_id='unenrolled'",
+                         (device_id,))
+            conn.execute("UPDATE daily_totals SET device_id=? WHERE device_id='unenrolled'",
+                         (device_id,))
 
     @property
     def device_id(self) -> str:
@@ -172,10 +184,6 @@ class LocalDB:
     # ── Events ────────────────────────────────────────────────────────────
 
     def insert_event(self, event: dict) -> str:
-        if not self._device_id:
-            log.debug("insert_event skipped — not yet enrolled")
-            return ""
-
         row_id = str(uuid.uuid4())
         # Honor the capture-time timestamp when provided (e.g. real browser
         # visit time from history) — fall back to insert time.
@@ -187,7 +195,11 @@ class LocalDB:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     row_id,
-                    self._device_id,
+                    # Offline-first: buffer under a placeholder before enrollment —
+                    # set_device_id() adopts these rows the moment we enroll. The
+                    # sync worker holds them anyway until a JWT exists, and the
+                    # ingest payload never sends device_id (the JWT carries it).
+                    self._device_id or "unenrolled",
                     event.get("type", "unknown"),
                     event.get("app"),
                     event.get("title"),
@@ -215,20 +227,51 @@ class LocalDB:
                 f"UPDATE events SET synced=1 WHERE id IN ({placeholders})", ids
             )
 
-    def purge_synced_events(self, keep_recent: int = 5000) -> None:
-        """Keep the most recent N synced events; delete older."""
+    def purge_synced_records(self, days: int = 3) -> dict:
+        """Retention policy: keep ALL local records for `days`; after that flush
+        only what the backend has confirmed — synced events, synced sessions,
+        and uploaded screenshots (including their local PNG files). UNSYNCED
+        records are never deleted, no matter how old: they wait offline until
+        a sync succeeds. Stale daily_totals rows (pure local accumulator; only
+        today's row is ever read) are dropped with the same window.
+
+        Returns per-table delete counts for logging.
+        """
+        import os
+        from datetime import date, timedelta
+
+        cutoff_ts   = int(time.time()) - days * 86400
+        cutoff_date = str(date.today() - timedelta(days=days))
+        removed: dict[str, int] = {}
+
+        # Uploaded screenshots: remove the local files first, then the rows.
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, local_path FROM screenshots WHERE uploaded=1 AND captured_at < ?",
+                (cutoff_ts,),
+            ).fetchall()
+        for row in rows:
+            try:
+                os.remove(row["local_path"])
+            except OSError:
+                pass
+
         with self._lock, self._conn() as conn:
-            conn.execute(
-                """DELETE FROM events
-                   WHERE synced=1
-                   AND id NOT IN (
-                       SELECT id FROM events
-                       WHERE synced=1
-                       ORDER BY ts DESC
-                       LIMIT ?
-                   )""",
-                (keep_recent,),
-            )
+            removed["events"] = conn.execute(
+                "DELETE FROM events WHERE synced=1 AND ts < ?", (cutoff_ts,)
+            ).rowcount
+            removed["sessions"] = conn.execute(
+                "DELETE FROM attendance_sessions WHERE synced=1 AND ended_at IS NOT NULL AND ended_at < ?",
+                (cutoff_ts,),
+            ).rowcount
+            removed["screenshots"] = conn.execute(
+                "DELETE FROM screenshots WHERE uploaded=1 AND captured_at < ?",
+                (cutoff_ts,),
+            ).rowcount
+            removed["daily_totals"] = conn.execute(
+                "DELETE FROM daily_totals WHERE date < ?", (cutoff_date,)
+            ).rowcount
+        return removed
 
     def unsynced_count(self) -> int:
         with self._conn() as conn:
@@ -266,24 +309,6 @@ class LocalDB:
                 "UPDATE screenshots SET uploaded=1, s3_key=? WHERE id=?",
                 (s3_key, screenshot_id),
             )
-
-    def purge_old_screenshots(self, days: int = 30) -> None:
-        """Delete local screenshot files older than N days after upload."""
-        import os
-        with self._conn() as conn:
-            rows = conn.execute(
-                """SELECT id, local_path FROM screenshots
-                   WHERE uploaded=1
-                   AND created_at < datetime('now', ?)""",
-                (f"-{days} days",),
-            ).fetchall()
-        for row in rows:
-            try:
-                os.remove(row["local_path"])
-            except FileNotFoundError:
-                pass
-            with self._lock, self._conn() as conn:
-                conn.execute("DELETE FROM screenshots WHERE id=?", (row["id"],))
 
     # ── Attendance sessions ───────────────────────────────────────────────
 
@@ -372,8 +397,13 @@ class LocalDB:
     def flush_daily_secs(self, active_delta: int, idle_delta: int = 0) -> None:
         """Add active/idle seconds to today's persistent accumulator.
         Called periodically by the widget so time is not lost on crash.
+
+        Persists even BEFORE enrollment (placeholder device id): if the backend
+        is unreachable at boot the timer must still resume from where it left
+        off on the same day — the resume read (get_today_active_secs_any_device)
+        ignores the device id on purpose.
         """
-        if not self._device_id or active_delta < 0:
+        if active_delta <= 0:
             return
         from datetime import date
         today = str(date.today())
@@ -385,7 +415,7 @@ class LocalDB:
                     active_secs = active_secs + excluded.active_secs,
                     idle_secs   = idle_secs   + excluded.idle_secs,
                     updated_at  = excluded.updated_at
-            """, (today, self._device_id, active_delta, idle_delta, int(time.time())))
+            """, (today, self._device_id or "unenrolled", active_delta, idle_delta, int(time.time())))
 
     def flush_daily_secs_absolute(self, active_secs: int) -> None:
         """Overwrite (not add) today's accumulated value with an authoritative figure.
