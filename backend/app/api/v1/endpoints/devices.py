@@ -252,7 +252,15 @@ async def get_daily_stats(
         text("""
             SELECT
                 DATE(timestamp) AS day,
-                SUM(CASE WHEN event_type = 'window_change' THEN duration ELSE 0 END) AS active,
+                SUM(CASE
+                    WHEN event_type = 'window_change'
+                     AND app_name IS NOT NULL
+                     AND app_name NOT IN (
+                         'loginwindow','ScreenSaverEngine',
+                         'System Idle Process','LockApp','LogonUI','Idle','screensaver'
+                     )
+                    THEN duration ELSE 0
+                END) AS active,
                 SUM(CASE WHEN event_type = 'idle_start' THEN duration ELSE 0 END) AS idle
             FROM activity_events
             WHERE device_id = :device_id

@@ -156,11 +156,14 @@ async def overview(
         stat_filter = " AND ae.timestamp >= date_trunc('day', NOW())"
 
     # Active working time = window_change events for real user apps ONLY.
-    # Excludes: System Idle Process / LockApp (Windows OS placeholders that
-    # appear as foreground window while the user is actually idle), and any
-    # event whose app_name is NULL/blank.
+    # Excludes OS lock/login screen apps that appear as the foreground window
+    # while the screen is locked, and any event whose app_name is NULL/blank.
     SYSTEM_IDLE_APPS = (
-        "System Idle Process", "LockApp", "LogonUI",
+        "loginwindow",          # macOS lock screen
+        "ScreenSaverEngine",    # macOS screen saver
+        "System Idle Process",  # Windows idle placeholder
+        "LockApp",              # Windows 10/11 lock screen
+        "LogonUI",              # Windows login/credential UI
         "Idle", "screensaver",
     )
     placeholders = ", ".join(f":ex{i}" for i in range(len(SYSTEM_IDLE_APPS)))
@@ -513,6 +516,7 @@ async def device_today_active(
                     WHEN ae.event_type = 'window_change'
                      AND ae.app_name IS NOT NULL
                      AND ae.app_name NOT IN (
+                         'loginwindow','ScreenSaverEngine',
                          'System Idle Process','LockApp','LogonUI','Idle','screensaver'
                      )
                     THEN ae.duration ELSE 0
