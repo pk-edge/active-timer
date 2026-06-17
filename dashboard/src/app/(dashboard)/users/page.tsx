@@ -1,17 +1,17 @@
 "use client";
 import { useState, useMemo, useEffect, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import useSWR from "swr";
 import { Plus, Pencil, UserX, Search, X, UserCheck, Trash2, UserCheck2, Monitor } from "lucide-react";
 import {
   getUsers, getPendingUsers, createUser, updateUser, deleteUser,
   deactivateUser, activateUser, approveUser, getRoles, getGroups,
-  getDevices, assignDevice,
+  getDevices, assignDevice, getUserActivity, fmtSeconds,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
 import ConfirmDialog from "@/components/ConfirmDialog";
-import type { User, Role, Group, Device } from "@/types";
+import type { User, UserActivity, Role, Group, Device } from "@/types";
 
 // ── Create / Edit modal ───────────────────────────────────────────────────────
 
@@ -257,6 +257,7 @@ type Tab = "active" | "pending";
 
 function UsersPageInner() {
   const { loading, can } = useUser();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<Tab>(() =>
     searchParams.get("tab") === "pending" ? "pending" : "active"
@@ -273,6 +274,16 @@ function UsersPageInner() {
   const { data: pending, mutate: mutatePending }  = useSWR<User[]>("users-pending", getPendingUsers);
   const { data: roles }  = useSWR<Role[]>("roles-for-users",  getRoles);
   const { data: groups } = useSWR<Group[]>("groups-for-users", getGroups);
+
+  // One batched call for ALL users' live status + time spent; refresh keeps the
+  // online dots current without per-user requests.
+  const { data: activity } = useSWR<UserActivity[]>("users-activity", getUserActivity, {
+    refreshInterval: 30_000,
+  });
+  const actById = useMemo(
+    () => new Map((activity ?? []).map(a => [a.id, a])),
+    [activity],
+  );
 
   const filteredActive = useMemo(() => {
     if (!users) return [];
@@ -359,26 +370,56 @@ function UsersPageInner() {
       {tab === "active" && (
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
           <div className="overflow-x-auto">
-            <table className="w-full text-sm min-w-[720px]">
+            <table className="w-full text-sm min-w-[920px]">
             <thead>
               <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
                 <th className="text-left px-4 py-3 font-semibold">Name</th>
-                <th className="text-left px-4 py-3 font-semibold">Email</th>
                 <th className="text-left px-4 py-3 font-semibold">Role</th>
+                <th className="text-left px-4 py-3 font-semibold">Online</th>
+                <th className="text-left px-4 py-3 font-semibold">Time today</th>
+                <th className="text-left px-4 py-3 font-semibold">Last 7 days</th>
                 <th className="text-left px-4 py-3 font-semibold">Devices</th>
                 <th className="text-left px-4 py-3 font-semibold">Status</th>
                 <th className="px-4 py-3" />
               </tr>
             </thead>
             <tbody>
-              {filteredActive.map(u => (
-                <tr key={u.id} className="border-t border-gray-100 hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-800">{u.name}</td>
-                  <td className="px-4 py-3 text-gray-500">{u.email}</td>
+              {filteredActive.map(u => {
+                const act = actById.get(u.id);
+                return (
+                <tr
+                  key={u.id}
+                  onClick={() => router.push(`/users/${u.id}`)}
+                  className="border-t border-gray-100 hover:bg-gray-50 cursor-pointer"
+                  title="View activity"
+                >
+                  <td className="px-4 py-3">
+                    <p className="font-medium text-gray-800">{u.name}</p>
+                    <p className="text-xs text-gray-400">{u.email}</p>
+                  </td>
                   <td className="px-4 py-3">
                     {u.role_name
                       ? <span className="text-xs bg-brand-50 text-brand-700 px-2 py-0.5 rounded-full">{u.role_name}</span>
                       : <span className="text-xs text-gray-400">monitored only</span>}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="flex items-center gap-1.5 text-xs">
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${act?.is_online ? "bg-green-500" : "bg-gray-300"}`} />
+                      <span className={act?.is_online ? "text-green-600 font-medium" : "text-gray-400"}>
+                        {act?.is_online ? "Online" : "Offline"}
+                      </span>
+                    </span>
+                    {act?.is_online && act.current_app && (
+                      <p className="text-[11px] text-gray-400 mt-0.5 truncate max-w-[140px]" title={act.current_app}>
+                        {act.current_app}
+                      </p>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-gray-700 font-medium tabular-nums">
+                    {act ? fmtSeconds(act.today_seconds) : "—"}
+                  </td>
+                  <td className="px-4 py-3 text-gray-500 tabular-nums">
+                    {act ? fmtSeconds(act.week_seconds) : "—"}
                   </td>
                   <td className="px-4 py-3 text-gray-500">{u.device_count}</td>
                   <td className="px-4 py-3">
@@ -386,7 +427,7 @@ function UsersPageInner() {
                       {u.is_active ? "Active" : "Inactive"}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                  <td className="px-4 py-3 text-right whitespace-nowrap" onClick={e => e.stopPropagation()}>
                     {can("users", "edit") && (
                       <button onClick={() => setEditing(u)} className="text-gray-400 hover:text-brand-600 p-1" title="Edit">
                         <Pencil size={15} />
@@ -409,8 +450,9 @@ function UsersPageInner() {
                     )}
                   </td>
                 </tr>
-              ))}
-              {filteredActive.length === 0 && <tr><td colSpan={6} className="px-4 py-10 text-center text-gray-400 text-sm">No users found.</td></tr>}
+                );
+              })}
+              {filteredActive.length === 0 && <tr><td colSpan={8} className="px-4 py-10 text-center text-gray-400 text-sm">No users found.</td></tr>}
             </tbody>
           </table>
           </div>

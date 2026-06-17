@@ -178,6 +178,14 @@ class Config:
     SYNC_BACKOFF_CAP:         int   = 300
     SCREENSHOT_SYNC_SECS:     int   = 60   # screenshots sync on their own longer interval
 
+    # ── Local retention ──────────────────────────────────────────────────────
+    # Offline-first: every record stays in the local queue.db until the backend
+    # confirms it. Confirmed (synced/uploaded) records are kept for this many
+    # days, then flushed; UNSYNCED records are never deleted — they wait for
+    # connectivity however long it takes.
+    LOCAL_RETENTION_DAYS:     int   = 3
+    PURGE_INTERVAL_SECS:      int   = 3600  # run the retention pass hourly
+
     # ── Platform info (sent during enrollment) ───────────────────────────────
     PLATFORM: str = sys.platform.lower()
     HOSTNAME: str = platform.node()
