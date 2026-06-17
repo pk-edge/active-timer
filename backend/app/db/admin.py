@@ -14,13 +14,18 @@ from app.db.models import Company, Employee
 
 
 async def ensure_admin(
-    db: AsyncSession, *, company_name: str, email: str, name: str, password: str
+    db: AsyncSession, *, company_name: str, email: str, name: str, password: str,
+    reset_password: bool = False,
 ) -> tuple[Company, bool]:
     """Create-or-repair the company + admin (role=admin, is_active=True).
 
     Idempotent. The caller commits. Returns ``(company, created)`` — ``created`` is
     True when the admin was newly inserted (vs an existing one repaired) — so callers
     can read ``company.enrollment_token`` and log create-vs-update.
+
+    ``reset_password=True`` forces the password to be overwritten even when the admin
+    already exists. Leave it False (the default) for startup bootstrap so that a
+    manually changed password is never silently reverted.
     """
     company = (
         await db.execute(select(Company).where(Company.name == company_name))
@@ -34,7 +39,8 @@ async def ensure_admin(
     emp = (await db.execute(select(Employee).where(Employee.email == email))).scalar_one_or_none()
     created = emp is None
     if emp:
-        emp.password_hash = hash_password(password)
+        if reset_password:
+            emp.password_hash = hash_password(password)
         emp.role = "admin"
         emp.is_active = True
         emp.is_approved = True  # clear the pending-approval gate so login works

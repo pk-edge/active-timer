@@ -98,7 +98,7 @@ export default function AgentsPage() {
                    windows: installers?.find(i => i.platform === "windows" && i.is_active) };
 
   return (
-    <div className="overflow-y-auto pr-1 space-y-6">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-6">
       <div>
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Agents</h1>
         <p className="text-gray-500 text-sm mt-0.5">Distribute and update the desktop agent. The active version is what devices auto-update to.</p>

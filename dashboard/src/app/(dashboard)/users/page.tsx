@@ -326,7 +326,7 @@ function UsersPageInner() {
   const pendingCount = pending?.length ?? 0;
 
   return (
-    <div className="overflow-y-auto pr-1">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Users</h1>

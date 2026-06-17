@@ -8,7 +8,6 @@ import type { Device } from "@/types";
 
 export default function DeviceCard({ device, employees, canAssign = false, onAssigned }: {
   device: Device;
-  /** Company employees for the assign dropdown — omit to hide the control. */
   employees?: { id: string; name: string }[];
   canAssign?: boolean;
   onAssigned?: () => void;
@@ -31,15 +30,15 @@ export default function DeviceCard({ device, employees, canAssign = false, onAss
   }
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-4 hover:border-brand-300 hover:shadow-sm transition">
+    <div className="bg-white border border-gray-200 rounded-lg p-3 hover:border-brand-300 hover:shadow-sm transition">
       <Link href={`/devices/${device.id}`} className="block cursor-pointer">
-        <div className="flex items-start justify-between mb-3">
-          <div>
-            <p className="font-medium text-sm text-gray-900">{device.hostname}</p>
-            <p className="text-gray-500 text-xs mt-0.5">{device.employee_name ?? "Unassigned"}</p>
+        <div className="flex items-start justify-between mb-2">
+          <div className="min-w-0 flex-1 mr-2">
+            <p className="font-medium text-xs text-gray-900 truncate">{device.hostname}</p>
+            <p className="text-gray-500 text-[11px] mt-0.5 truncate">{device.employee_name ?? "Unassigned"}</p>
           </div>
           <span
-            className={`flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full ${
+            className={`flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0 ${
               device.is_online
                 ? "bg-green-50 text-green-600 border border-green-200"
                 : "bg-gray-100 text-gray-500 border border-gray-200"
@@ -54,21 +53,23 @@ export default function DeviceCard({ device, employees, canAssign = false, onAss
             {device.is_online ? "Online" : "Offline"}
           </span>
         </div>
-        <div className="flex items-center gap-1.5 text-gray-400 text-xs">
-          <Clock size={12} />
-          <span>{device.is_online ? "Active now" : `Last seen ${lastSeen}`}</span>
+        <div className="flex items-center justify-between text-[11px] text-gray-400">
+          <div className="flex items-center gap-1">
+            <Clock size={10} />
+            <span>{device.is_online ? "Active now" : `Seen ${lastSeen}`}</span>
+          </div>
+          <span className="capitalize text-gray-300">{device.platform}</span>
         </div>
-        <p className="text-gray-400 text-xs mt-1 capitalize">{device.platform}</p>
       </Link>
 
       {canAssign && employees && (
-        <div className="flex items-center gap-1.5 mt-3 pt-3 border-t border-gray-100">
-          <UserRound size={13} className="text-gray-400 shrink-0" />
+        <div className="flex items-center gap-1 mt-2 pt-2 border-t border-gray-100">
+          <UserRound size={11} className="text-gray-400 shrink-0" />
           <select
             value={device.employee_id ?? ""}
             disabled={saving}
             onChange={e => handleAssign(e.target.value)}
-            className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-brand-300 disabled:opacity-50"
+            className="w-full text-[11px] border border-gray-200 rounded px-1.5 py-1 text-gray-700 bg-white focus:outline-none focus:ring-1 focus:ring-brand-300 disabled:opacity-50"
             aria-label="Assign device to user"
           >
             <option value="">Unassigned</option>

@@ -85,15 +85,7 @@
       token change in backends.json always takes effect without manual cleanup.
       identity.json lives in %APPDATA%\TimeTracker\ (Config.BASE_DIR).
     -->
-    <CustomAction Id="ClearIdentity" Script="jscript" Return="ignore">
-      <![CDATA[
-        try {
-          var fso = new ActiveXObject("Scripting.FileSystemObject");
-          var path = Session.Property("AppDataFolder") + "TimeTracker\\identity.json";
-          if (fso.FileExists(path)) fso.DeleteFile(path, true);
-        } catch(e) {}
-      ]]>
-    </CustomAction>
+    <CustomAction Id="ClearIdentity" Script="jscript" ScriptSourceFile="clear_identity.js" Return="ignore" />
 
     <!-- Launch on finish -->
     <CustomAction Id="LaunchAgent" FileRef="TimeTrackerEXE" ExeCommand=""

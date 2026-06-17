@@ -427,7 +427,7 @@ export default function PoliciesPage() {
   const companyWide   = (rules ?? []).filter(r => r.target_type === "all" && r.is_active).length;
 
   return (
-    <div className="overflow-y-auto pr-1">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
         <div>
