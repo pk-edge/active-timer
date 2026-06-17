@@ -145,7 +145,7 @@ export default function RolesPage() {
   }
 
   return (
-    <div className="overflow-y-auto pr-1">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Roles</h1>

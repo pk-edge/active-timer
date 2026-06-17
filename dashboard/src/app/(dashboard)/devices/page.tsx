@@ -107,7 +107,7 @@ export default function DevicesPage() {
   if (isLoading) return <PageSkeleton />;
 
   return (
-    <div>
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">All Devices</h1>
         <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">

@@ -96,7 +96,7 @@ export default function AuditPage() {
   if (!can("audit", "view")) return <AccessDenied label="the Audit Log" />;
 
   return (
-    <div className="overflow-y-auto pr-1 space-y-4">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
