@@ -45,10 +45,21 @@ async def _scope_clause(admin: Employee, db: AsyncSession) -> tuple[str, dict]:
     return " AND ae.device_id = ANY(:vids)", {"vids": [str(i) for i in ids]}
 
 
-async def _assert_device_visible(device: Device, admin: Employee, db: AsyncSession) -> None:
+async def _get_visible_device(device_id: str, admin: Employee, db: AsyncSession) -> Device:
+    """Fetch a device by id, enforcing company + visibility scope in one pass."""
+    try:
+        device_uuid = uuid.UUID(device_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid device id")
+
     ids = await visible_device_ids(admin, db)
-    if ids is not ALL and device.id not in set(ids):
+    q = select(Device).where(Device.id == device_uuid, Device.company_id == admin.company_id)
+    if ids is not ALL:
+        q = q.where(Device.id.in_(ids))
+    device = (await db.execute(q)).scalar_one_or_none()
+    if not device:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+    return device
 
 
 @router.get("/company/summary", response_model=List[CompanyDayOut])
@@ -138,16 +149,7 @@ async def device_top_apps(
     admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        device_uuid = uuid.UUID(device_id)
-    except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid device id")
-
-    result_d = await db.execute(select(Device).where(Device.id == device_uuid))
-    device = result_d.scalar_one_or_none()
-    if not device or device.company_id != admin.company_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    await _assert_device_visible(device, admin, db)
+    device = await _get_visible_device(device_id, admin, db)
 
     result = await db.execute(
         text("""
@@ -172,16 +174,7 @@ async def device_summary(
     admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        device_uuid = uuid.UUID(device_id)
-    except ValueError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid device id")
-
-    result_d = await db.execute(select(Device).where(Device.id == device_uuid))
-    device = result_d.scalar_one_or_none()
-    if not device or device.company_id != admin.company_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
-    await _assert_device_visible(device, admin, db)
+    device = await _get_visible_device(device_id, admin, db)
 
     result = await db.execute(
         text(f"""

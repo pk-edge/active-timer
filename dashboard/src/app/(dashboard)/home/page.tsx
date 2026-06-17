@@ -1,20 +1,20 @@
 "use client";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
   Monitor, BarChart2, Users2, DownloadCloud,
   Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon,
-  AppWindow, ChevronDown, CalendarDays,
+  AppWindow, ChevronDown, CalendarDays, Search, X,
 } from "lucide-react";
 import { format, subDays, startOfMonth, startOfYear, subMonths } from "date-fns";
 import {
-  getOverview, getHomeAppUsage, getMyStats,
+  getOverview, getHomeAppUsage, getMyStats, getGroups,
   fmtSeconds, fmtTime, BASE,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, StatusDonut, UsagePie } from "@/components/charts";
-import type { OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
+import type { OverviewStats, RealtimeDevice, AppUsage, MyStats, Group } from "@/types";
 
 // ── SSE realtime hook ─────────────────────────────────────────────────────────
 
@@ -73,7 +73,6 @@ function useRealtimeStream(groupId?: string): RealtimeDevice[] {
 
     connect();
     return () => ctrl.abort();
-  // token is read fresh each run; groupId is the only external dep
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupId]);
 
@@ -156,7 +155,6 @@ function StatPeriodFilter({
                 ))}
               </div>
             </div>
-            {/* Custom inputs */}
             {(customMode || displayLabel === "Custom") && (
               <div className="p-3">
                 <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Custom Range</p>
@@ -221,6 +219,8 @@ function AdminHome() {
 
   const [sinceDate, setSinceDate] = useState(todayStr);
   const [untilDate, setUntilDate] = useState(todayStr);
+  const [groupId, setGroupId]     = useState("");
+  const [empSearch, setEmpSearch] = useState("");
 
   const isToday = sinceDate === todayStr && untilDate === todayStr;
   const activeLabel = isToday
@@ -230,23 +230,33 @@ function AdminHome() {
     ? "Avg active / device"
     : "Avg active / device (period)";
 
+  const { data: groups } = useSWR<Group[]>("home-groups", getGroups);
+
   const { data: stats } = useSWR<OverviewStats>(
-    ["home-overview", sinceDate, untilDate],
-    () => getOverview(undefined, 7, sinceDate, untilDate),
+    ["home-overview", sinceDate, untilDate, groupId],
+    () => getOverview(groupId || undefined, 7, sinceDate, untilDate),
     { refreshInterval: 300_000 },
   );
-  const realtime = useRealtimeStream();
+  const realtime = useRealtimeStream(groupId || undefined);
   const { data: apps } = useSWR<AppUsage[]>(
-    "home-apps",
-    () => getHomeAppUsage(undefined, 1),
+    ["home-apps", groupId],
+    () => getHomeAppUsage(groupId || undefined, 1),
     { refreshInterval: 300_000 },
   );
+
+  const filteredRealtime = useMemo(() => {
+    if (!empSearch.trim()) return realtime;
+    const q = empSearch.toLowerCase();
+    return realtime.filter(d =>
+      (d.employee_name ?? "").toLowerCase().includes(q) ||
+      d.hostname.toLowerCase().includes(q),
+    );
+  }, [realtime, empSearch]);
 
   const s = stats?.status ?? { active: 0, passive: 0, inactive: 0 };
   const avgSecs = stats?.avg_active_seconds_today ?? 0;
   const avgHrs  = (avgSecs / 3600).toFixed(1);
   const avgMins = Math.round(avgSecs / 60);
-  // Show minutes when < 1 hour for better precision
   const avgDisplay = avgSecs < 3600 ? `${avgMins}m` : `${avgHrs}h`;
 
   const QUICK_ACTIONS = [
@@ -272,15 +282,42 @@ function AdminHome() {
         ))}
       </div>
 
-      {/* Period filter + Stat cards */}
-      <div className="mb-2 flex items-center gap-2">
-        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Stats for</p>
+      {/* ── Filters row: period + group + user search ── */}
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide shrink-0">Stats for</p>
         <StatPeriodFilter
           sinceDate={sinceDate} untilDate={untilDate}
           onSinceChange={setSinceDate} onUntilChange={setUntilDate}
         />
+
+        {/* Group filter */}
+        {groups && groups.length > 0 && (
+          <div className="relative">
+            <Users2 size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <select
+              value={groupId}
+              onChange={e => setGroupId(e.target.value)}
+              className="appearance-none bg-white border border-gray-200 rounded-lg pl-7 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm"
+            >
+              <option value="">All groups</option>
+              {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+            <ChevronDown size={11} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          </div>
+        )}
+
+        {groupId && (
+          <button
+            onClick={() => setGroupId("")}
+            className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-1"
+          >
+            <X size={12} /> Clear group
+          </button>
+        )}
       </div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6 mt-3">
+
+      {/* Stat cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <StatCard label="Total devices"   value={stats?.total_devices ?? 0} />
         <StatCard label={activeLabel}     value={stats?.active_today ?? 0}  color="text-green-600" />
         <StatCard label="Online right now" value={s.active}                 color="text-brand-600" />
@@ -327,51 +364,72 @@ function AdminHome() {
         </div>
       </div>
 
-      {/* Realtime device table */}
+      {/* Live Device Feed — with scroller */}
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
-        <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
-          <Clock size={15} className="text-gray-400" />
+        <div className="flex flex-wrap items-center gap-3 px-5 py-3 border-b border-gray-100">
+          <Clock size={15} className="text-gray-400 shrink-0" />
           <p className="text-sm font-semibold text-gray-800">Live Device Feed</p>
-          <span className="ml-auto text-xs text-gray-400">{realtime?.length ?? 0} devices</span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[640px]">
-          <thead>
-            <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide">
-              <th className="text-left px-5 py-2.5 font-semibold">Employee</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Device</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Status</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Current app</th>
-              <th className="text-left px-5 py-2.5 font-semibold">Last seen</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(realtime ?? []).slice(0, 15).map(d => (
-              <tr key={d.device_id} className="border-t border-gray-100 hover:bg-gray-50">
-                <td className="px-5 py-3 font-medium text-gray-800">
-                  <Link href={`/devices/${d.device_id}`} className="hover:text-brand-600 transition">
-                    {d.employee_name ?? "—"}
-                  </Link>
-                </td>
-                <td className="px-5 py-3 text-gray-500">{d.hostname}</td>
-                <td className="px-5 py-3">
-                  <span className={`text-xs px-2 py-0.5 rounded-full border capitalize ${STATUS_STYLE[d.status]}`}>
-                    {d.status}
-                  </span>
-                </td>
-                <td className="px-5 py-3 text-gray-600 max-w-[180px] truncate">
-                  {d.current_app ?? <span className="text-gray-300">—</span>}
-                </td>
-                <td className="px-5 py-3 text-gray-400 text-xs">
-                  {d.last_seen_unix ? fmtTime(d.last_seen_unix) : "—"}
-                </td>
-              </tr>
-            ))}
-            {(realtime ?? []).length === 0 && (
-              <tr><td colSpan={5} className="px-5 py-10 text-center text-gray-400">No devices yet.</td></tr>
+          <span className="text-xs text-gray-400">{filteredRealtime.length} of {realtime.length} devices</span>
+
+          {/* User / employee search */}
+          <div className="ml-auto relative w-52">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <input
+              type="text"
+              value={empSearch}
+              onChange={e => setEmpSearch(e.target.value)}
+              placeholder="Search user or device…"
+              className="w-full pl-7 pr-7 py-1.5 text-xs bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-300 transition"
+            />
+            {empSearch && (
+              <button onClick={() => setEmpSearch("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                <X size={12} />
+              </button>
             )}
-          </tbody>
-        </table>
+          </div>
+        </div>
+
+        {/* Scrollable table — max-h so it doesn't expand infinitely */}
+        <div className="overflow-auto max-h-72">
+          <table className="w-full text-sm min-w-[640px]">
+            <thead className="sticky top-0 z-10">
+              <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide">
+                <th className="text-left px-5 py-2.5 font-semibold">Employee</th>
+                <th className="text-left px-5 py-2.5 font-semibold">Device</th>
+                <th className="text-left px-5 py-2.5 font-semibold">Status</th>
+                <th className="text-left px-5 py-2.5 font-semibold">Current app</th>
+                <th className="text-left px-5 py-2.5 font-semibold">Last seen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRealtime.map(d => (
+                <tr key={d.device_id} className="border-t border-gray-100 hover:bg-gray-50">
+                  <td className="px-5 py-3 font-medium text-gray-800">
+                    <Link href={`/devices/${d.device_id}`} className="hover:text-brand-600 transition">
+                      {d.employee_name ?? "—"}
+                    </Link>
+                  </td>
+                  <td className="px-5 py-3 text-gray-500">{d.hostname}</td>
+                  <td className="px-5 py-3">
+                    <span className={`text-xs px-2 py-0.5 rounded-full border capitalize ${STATUS_STYLE[d.status]}`}>
+                      {d.status}
+                    </span>
+                  </td>
+                  <td className="px-5 py-3 text-gray-600 max-w-[180px] truncate">
+                    {d.current_app ?? <span className="text-gray-300">—</span>}
+                  </td>
+                  <td className="px-5 py-3 text-gray-400 text-xs">
+                    {d.last_seen_unix ? fmtTime(d.last_seen_unix) : "—"}
+                  </td>
+                </tr>
+              ))}
+              {filteredRealtime.length === 0 && (
+                <tr><td colSpan={5} className="px-5 py-10 text-center text-gray-400">
+                  {empSearch ? "No devices match your search." : "No devices yet."}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -387,7 +445,7 @@ function EmployeeHome() {
   const topApp     = stats?.top_apps[0]?.app_name ?? "—";
 
   return (
-    <div className="overflow-y-auto pr-1">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       {/* Stat cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <StatCard label="Active today"   value={`${activeHrs}h`} color="text-brand-600" />

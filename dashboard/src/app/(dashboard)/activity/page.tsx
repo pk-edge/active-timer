@@ -135,27 +135,33 @@ export default function ActivityPage() {
       </div>
 
       {/* Realtime visibility */}
-      <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm mb-6">
-        <p className="text-sm font-semibold text-gray-800 mb-3">Today&apos;s Real-time Visibility</p>
-        {tab === "users" ? (
-          filtered.length === 0 ? (
-            <p className="text-sm text-gray-400 py-8 text-center">No devices match.</p>
+      <div className="bg-white border border-gray-200 rounded-xl shadow-sm mb-6 overflow-hidden">
+        <div className="px-4 pt-4 pb-2 border-b border-gray-100 flex items-center justify-between">
+          <p className="text-sm font-semibold text-gray-800">Today&apos;s Real-time Visibility</p>
+          <span className="text-xs text-gray-400">{filtered.length} devices</span>
+        </div>
+        {/* Scrollable grid — max-h so it doesn't push the rest of the page */}
+        <div className="overflow-y-auto max-h-72 p-4">
+          {tab === "users" ? (
+            filtered.length === 0 ? (
+              <p className="text-sm text-gray-400 py-8 text-center">No devices match.</p>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
+                {filtered.map(d => <DeviceTile key={d.device_id} d={d} />)}
+              </div>
+            )
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
-              {filtered.map(d => <DeviceTile key={d.device_id} d={d} />)}
+              {(groups ?? []).map(g => (
+                <Link key={g.id} href="/team" className="bg-white border border-gray-200 rounded-xl p-3 hover:border-brand-300 hover:shadow-sm transition block">
+                  <p className="text-sm font-medium text-gray-900 truncate">{g.name}</p>
+                  <p className="text-xs text-gray-400 mt-1">{g.member_count} members</p>
+                </Link>
+              ))}
+              {(groups ?? []).length === 0 && <p className="col-span-full text-sm text-gray-400 py-8 text-center">No groups yet.</p>}
             </div>
-          )
-        ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
-            {(groups ?? []).map(g => (
-              <Link key={g.id} href="/team" className="bg-white border border-gray-200 rounded-xl p-3 hover:border-brand-300 hover:shadow-sm transition block">
-                <p className="text-sm font-medium text-gray-900 truncate">{g.name}</p>
-                <p className="text-xs text-gray-400 mt-1">{g.member_count} members</p>
-              </Link>
-            ))}
-            {(groups ?? []).length === 0 && <p className="col-span-full text-sm text-gray-400 py-8 text-center">No groups yet.</p>}
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {/* Usage charts */}
