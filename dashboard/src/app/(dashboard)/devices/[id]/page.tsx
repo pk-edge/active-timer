@@ -37,11 +37,23 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
   const { data: devices } = useSWR<Device[]>("devices", getDevices);
   const device = devices?.find(d => d.id === id);
 
+  // OS lock/login screen apps — never count as active work time.
+  // Must stay in sync with backend SYSTEM_IDLE_APPS and agent LOCK_SCREEN_APPS.
+  const LOCK_SCREEN_APPS = new Set([
+    "loginwindow", "ScreenSaverEngine",
+    "System Idle Process", "LockApp", "LogonUI", "Idle", "screensaver",
+  ]);
+
   // Compute active time directly from events (avoids UTC/local date mismatch in stats)
   const activeSecsToday = useMemo(() => {
     if (!events) return 0;
     return events
-      .filter(e => e.event_type === "window_change" && e.duration > 0)
+      .filter(e =>
+        e.event_type === "window_change" &&
+        e.duration > 0 &&
+        e.app_name != null &&
+        !LOCK_SCREEN_APPS.has(e.app_name)
+      )
       .reduce((sum, e) => sum + e.duration, 0);
   }, [events]);
 

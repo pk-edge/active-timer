@@ -62,9 +62,25 @@ def _assert_secure_config() -> None:
                     "before deploying (ENVIRONMENT=development, so allowed here).")
 
 
+def _log_oauth_status() -> None:
+    """One-line startup signal so a missing Google config is obvious in the logs
+    at deploy time, instead of surfacing only when a user clicks 'Sign in'."""
+    from app.core.secrets import load_google_credentials
+    creds = load_google_credentials()
+    if creds.get("client_id") and creds.get("client_secret"):
+        log.info("Google OAuth: configured")
+    else:
+        log.warning(
+            "Google OAuth: NOT configured — /v1/auth/google will return 503. Set "
+            "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (or SECRETS_KEY + "
+            "secrets/google_credentials.enc) in this backend's environment."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _assert_secure_config()      # refuse to boot a real deployment with a weak secret
+    _log_oauth_status()          # surface missing Google OAuth config at startup
     await init_db()              # migrations + RBAC seed + bootstrap admin (all idempotent)
     await ingest_queue.start()   # start async worker pool
     yield

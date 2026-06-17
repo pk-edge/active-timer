@@ -24,6 +24,19 @@ from config import Config
 
 log = logging.getLogger("window_watcher")
 
+# Apps that represent the OS lock/login screen — never count as active work.
+# These appear as the foreground window while the screen is locked.
+LOCK_SCREEN_APPS = frozenset({
+    "loginwindow",          # macOS lock screen
+    "screensaverengine",    # macOS screen saver process
+    "lockapp",              # Windows 10/11 lock screen
+    "logonui",              # Windows login/credential UI
+    "system idle process",  # Windows idle placeholder
+    "xscreensaver",         # Linux X11 screen saver
+    "gnome-screensaver",    # Linux GNOME screen saver
+    "xfce4-screensaver",    # Linux XFCE screen saver
+})
+
 MEETING_APPS = frozenset({
     "zoom", "us.zoom.videomeetings", "zoom.us",
     "microsoft teams", "teams",
@@ -224,6 +237,14 @@ class WindowWatcher:
             return
 
         app, title = _get_active_window()
+
+        # Defense-in-depth: if the foreground window is the OS lock/login
+        # screen (loginwindow, LockApp, etc.), treat it exactly like a pause.
+        # This catches the rare race window where the lock detector hasn't
+        # fired yet (e.g., agent just started while screen was already locked).
+        if app.lower() in LOCK_SCREEN_APPS:
+            self._slice_start = now
+            return
 
         # macOS without Screen Recording permission → empty titles. For
         # browsers, the active tab is available via AppleScript instead.

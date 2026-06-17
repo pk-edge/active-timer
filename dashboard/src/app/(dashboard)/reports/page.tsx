@@ -19,7 +19,7 @@ const PERIODS = [
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-white border border-gray-200 rounded-xl p-5 mb-6 shadow-sm">
+    <div className="bg-white border border-gray-200 rounded-xl p-4 sm:p-5 mb-5 shadow-sm">
       <p className="text-sm font-semibold text-gray-800 mb-4">{title}</p>
       {children}
     </div>
@@ -61,7 +61,7 @@ export default function ReportsPage() {
   if (!can("reports", "view")) return <AccessDenied label="Reports" />;
 
   return (
-    <div>
+    <div className="flex-1 min-h-0 overflow-y-auto">
       {/* Header + filters */}
       <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
         <div>
@@ -188,17 +188,17 @@ export default function ReportsPage() {
             )}
           </div>
 
-          <div className="max-h-80 overflow-y-auto pr-1 space-y-2.5">
+          <div className="space-y-2.5">
             {filteredApps.map((app, i) => {
               const pct = Math.round((app.seconds / (apps[0]?.seconds || 1)) * 100);
               return (
-                <div key={app.app_name} className="flex items-center gap-3">
+                <div key={app.app_name} className="flex items-center gap-2 sm:gap-3">
                   <span className="text-xs text-gray-400 w-5 text-right shrink-0">{i + 1}</span>
-                  <span className="text-sm text-gray-700 w-36 truncate shrink-0">{app.app_name}</span>
-                  <div className="flex-1 bg-gray-100 rounded-full h-2">
+                  <span className="text-sm text-gray-700 w-28 sm:w-36 truncate shrink-0">{app.app_name}</span>
+                  <div className="flex-1 min-w-0 bg-gray-100 rounded-full h-2">
                     <div className="bg-brand-500 h-2 rounded-full transition-all" style={{ width: `${pct}%` }} />
                   </div>
-                  <span className="text-xs text-gray-500 w-16 text-right shrink-0">{fmtSeconds(app.seconds)}</span>
+                  <span className="text-xs text-gray-500 w-14 sm:w-16 text-right shrink-0">{fmtSeconds(app.seconds)}</span>
                 </div>
               );
             })}
@@ -208,6 +208,9 @@ export default function ReportsPage() {
           </div>
         </SectionCard>
       )}
+
+      {/* Bottom breathing room so last card isn't flush with the viewport edge */}
+      <div className="h-4" />
     </div>
   );
 }
