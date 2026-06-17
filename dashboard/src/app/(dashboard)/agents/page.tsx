@@ -2,8 +2,9 @@
 import { useState, useRef } from "react";
 import useSWR from "swr";
 import { format, parseISO } from "date-fns";
-import { DownloadCloud, Upload, CheckCircle2, Download, Apple, Monitor, History, User, Trash2 } from "lucide-react";
-import { getInstallers, uploadInstaller, activateInstaller, deleteInstaller, getInstallerDownload, getInstallerDownloads, fmtBytes } from "@/lib/api";
+import { DownloadCloud, Upload, CheckCircle2, Download, Apple, Monitor, History, User, Trash2, Link2, Copy, Check } from "lucide-react";
+import { getInstallers, uploadInstaller, activateInstaller, deleteInstaller, getInstallerDownload, getInstallerDownloads, getCompanyInfo, fmtBytes, BASE } from "@/lib/api";
+import type { CompanyInfo } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
 import type { Installer, InstallerDownload } from "@/types";
@@ -74,10 +75,39 @@ const PLATFORM_ICON: Record<string, React.ReactNode> = {
   windows: <Monitor size={13} className="shrink-0" />,
 };
 
+function CopyableLink({ label, icon, url }: { label: string; icon: React.ReactNode; url: string }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    navigator.clipboard.writeText(url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); });
+  }
+  return (
+    <div className="flex items-center gap-3 p-3 bg-gray-50 border border-gray-200 rounded-lg">
+      <div className="flex items-center gap-2 text-gray-600 shrink-0">
+        {icon}
+        <span className="text-sm font-medium">{label}</span>
+      </div>
+      <code className="flex-1 text-xs text-gray-500 truncate min-w-0 bg-white border border-gray-200 rounded px-2 py-1.5 font-mono">
+        {url}
+      </code>
+      <button
+        onClick={copy}
+        className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border transition shrink-0 ${
+          copied
+            ? "bg-green-50 border-green-200 text-green-600"
+            : "bg-white border-gray-200 text-gray-600 hover:border-brand-300 hover:text-brand-600"
+        }`}
+      >
+        {copied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
+      </button>
+    </div>
+  );
+}
+
 export default function AgentsPage() {
   const { loading, can } = useUser();
   const { data: installers, mutate } = useSWR<Installer[]>("installers", getInstallers);
   const { data: downloads }          = useSWR<InstallerDownload[]>("installer-downloads", getInstallerDownloads);
+  const { data: companyInfo }        = useSWR<CompanyInfo>("company-info", getCompanyInfo);
 
   if (loading) return null;
   if (!can("agents", "view")) return <AccessDenied label="Agents" />;
@@ -124,6 +154,31 @@ export default function AgentsPage() {
           );
         })}
       </div>
+
+      {/* Public download links */}
+      {companyInfo && (
+        <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
+          <div className="flex items-center gap-2 mb-1">
+            <Link2 size={15} className="text-gray-400" />
+            <p className="text-sm font-semibold text-gray-800">Public Download Links</p>
+          </div>
+          <p className="text-xs text-gray-400 mb-4">
+            Share these links with employees. Each visit generates a fresh 15-minute signed download — no credentials exposed.
+          </p>
+          <div className="space-y-2.5">
+            <CopyableLink
+              label="macOS"
+              icon={<Apple size={14} />}
+              url={`${BASE}/v1/downloads/${companyInfo.enrollment_token}/TimeTracker.dmg`}
+            />
+            <CopyableLink
+              label="Windows"
+              icon={<Monitor size={14} />}
+              url={`${BASE}/v1/downloads/${companyInfo.enrollment_token}/TimeTracker.msi`}
+            />
+          </div>
+        </div>
+      )}
 
       {can("agents", "create") && <UploadForm onUploaded={mutate} />}
 
