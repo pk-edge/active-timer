@@ -3,7 +3,7 @@ import { useState, useEffect, FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { adminLogin, loginWithToken, setPassword, BASE } from "@/lib/api";
-import { Clock, Eye, EyeOff, X } from "lucide-react";
+import { Clock, Eye, EyeOff, X, ShieldOff } from "lucide-react";
 import EdgeLogo from "@/components/EdgeLogo";
 
 /* ── Google "G" SVG icon ─────────────────────────────────────────────────── */
@@ -124,16 +124,17 @@ function SetPasswordModal({ onDone }: { onDone: () => void }) {
 
 /* ── Error messages from the OAuth callback ──────────────────────────────── */
 const OAUTH_ERRORS: Record<string, string> = {
-  domain_not_allowed:    "Only @onedge.co accounts are allowed to sign in with Google.",
-  account_inactive:      "Your account is inactive. Contact an administrator.",
-  google_token_failed:   "Google sign-in failed. Please try again.",
-  google_unreachable:    "Could not reach Google. Check your connection and try again.",
-  google_missing_email:  "Google did not return an email address. Try a different account.",
-  email_unverified:      "Your Google email is not verified. Verify it with Google and try again.",
-  invalid_state:         "OAuth session expired. Please try again.",
-  oauth_not_configured:  "Google sign-in is not yet configured. Use email login.",
-  company_not_found:     "System not set up yet. Contact an administrator.",
-  no_access:             "Your account does not have dashboard access.",
+  domain_not_allowed:        "Only @onedge.co accounts are allowed to sign in with Google.",
+  account_inactive:          "Your account is inactive. Contact an administrator.",
+  google_token_failed:       "Google sign-in failed. Please try again.",
+  google_unreachable:        "Could not reach Google. Check your connection and try again.",
+  google_missing_email:      "Google did not return an email address. Try a different account.",
+  email_unverified:          "Your Google email is not verified. Verify it with Google and try again.",
+  invalid_state:             "OAuth session expired. Please try again.",
+  oauth_not_configured:      "Google sign-in is not yet configured. Use email login.",
+  company_not_found:         "System not set up yet. Contact an administrator.",
+  no_access:                 "Your account does not have dashboard access.",
+  portal_access_restricted:  "__restricted__",
 };
 
 /* ── Main login page ─────────────────────────────────────────────────────── */
@@ -144,6 +145,7 @@ export default function LoginPage() {
   const [password,      setPassword_]    = useState("");
   const [error,         setError]        = useState("");
   const [pending,       setPending]      = useState(false);
+  const [restricted,    setRestricted]   = useState(false);
   const [loading,       setLoading]      = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [showPwReset,   setShowPwReset]  = useState(false);
@@ -156,8 +158,12 @@ export default function LoginPage() {
     const oauthErr = params.get("error");
 
     if (oauthErr) {
-      setError(OAUTH_ERRORS[oauthErr] ?? "Google sign-in failed. Please try again.");
-      // Clean the URL so a refresh doesn't show the error again.
+      const msg = OAUTH_ERRORS[oauthErr];
+      if (msg === "__restricted__") {
+        setRestricted(true);
+      } else {
+        setError(msg ?? "Google sign-in failed. Please try again.");
+      }
       window.history.replaceState({}, "", "/login");
       return;
     }
@@ -176,14 +182,16 @@ export default function LoginPage() {
   /* ── Email + password sign-in ────────────────────────────────────────── */
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    setError(""); setPending(false);
+    setError(""); setPending(false); setRestricted(false);
     setLoading(true);
     try {
       await adminLogin(email, password);
       router.replace("/");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
-      if (msg.includes("pending admin approval") || msg.includes("403")) {
+      if (msg.includes("Portal access restricted")) {
+        setRestricted(true);
+      } else if (msg.includes("pending admin approval")) {
         setPending(true);
       } else {
         setError("Invalid email or password.");
@@ -278,6 +286,18 @@ export default function LoginPage() {
                   <p className="text-sm text-amber-700">
                     Your account is awaiting admin approval. You&apos;ll be able to sign in once approved.
                   </p>
+                </div>
+              )}
+
+              {restricted && (
+                <div className="flex items-start gap-2.5 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
+                  <ShieldOff size={16} className="text-red-500 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-sm font-medium text-red-700">Portal access restricted</p>
+                    <p className="text-xs text-red-500 mt-0.5">
+                      This account is set up for device tracking only and cannot access the dashboard. Contact your administrator to request portal access.
+                    </p>
+                  </div>
                 </div>
               )}
 

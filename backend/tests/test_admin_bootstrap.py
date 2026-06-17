@@ -42,25 +42,35 @@ async def test_ensure_admin_satisfies_all_login_gates():
         assert emp.is_approved is True            # regression: was unset → 403 pending-approval
         assert verify_password("StrongPass123!", emp.password_hash)
 
-        # ── REPAIR path ──────────────────────────────────────────────────────
+        # ── REPAIR path (no password reset) ─────────────────────────────────
         # Simulate a self-registered admin: gates flipped off, role demoted.
         emp.is_active = False
         emp.is_approved = False
         emp.role = "employee"
         await db.flush()
 
+        # Bootstrap call (reset_password omitted → defaults to False).
         company2, created2 = await ensure_admin(
             db, company_name=company_name, email=email, name="Admin", password="NewPass456!"
         )
         assert created2 is False                  # existing employee → repaired, not re-created
         assert company2.id == company.id          # existing company reused, not duplicated
 
-        # Re-select (same session ⇒ identity-mapped row with the repair applied).
         emp = (await db.execute(select(Employee).where(Employee.email == email))).scalar_one()
         assert emp.role == "admin"                # re-promoted
         assert emp.is_active is True              # re-activated
         assert emp.is_approved is True            # regression: repair must restore approval
-        assert verify_password("NewPass456!", emp.password_hash)   # password rotated to the new one
+        # Password must NOT be silently reset — the admin may have changed it manually.
+        assert verify_password("StrongPass123!", emp.password_hash)
+
+        # ── REPAIR path (explicit reset_password=True) ────────────────────────
+        # The seedAdmin CLI always passes reset_password=True to explicitly rotate.
+        _, _ = await ensure_admin(
+            db, company_name=company_name, email=email, name="Admin",
+            password="NewPass456!", reset_password=True,
+        )
+        emp = (await db.execute(select(Employee).where(Employee.email == email))).scalar_one()
+        assert verify_password("NewPass456!", emp.password_hash)   # rotated only when explicit
 
         # ── EMAIL NORMALIZATION ──────────────────────────────────────────────
         # A mixed-case / whitespace email must resolve to the same admin row.
