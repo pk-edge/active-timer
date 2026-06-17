@@ -38,6 +38,7 @@ class SyncWorker:
         self._fails   = 0
         self._last_screenshot_sync = 0.0
         self._last_policy_sync     = 0.0
+        self._last_purge           = 0.0
 
         # Persistent HTTP client — TCP connection reused across every sync call.
         self._http = httpx.Client(
@@ -57,6 +58,7 @@ class SyncWorker:
                 self._sync_events()
                 self._maybe_sync_screenshots()
                 self._maybe_sync_policy()
+                self._maybe_purge()
         finally:
             self._http.close()
             log.info("SyncWorker stopped")
@@ -141,6 +143,11 @@ class SyncWorker:
             self._shared["sync_status"] = "ok"
             log.debug("Synced %d events", len(batch))
 
+            # Full batch ⇒ an offline backlog is draining: re-arm the trigger
+            # so the next batch goes immediately instead of after the 5s wait.
+            if len(batch) == Config.SYNC_BATCH_SIZE:
+                self._trigger.set()
+
         except Exception as e:
             self._fails += 1
             self._shared["sync_status"] = "offline" if self._fails > 5 else "syncing"
@@ -149,12 +156,33 @@ class SyncWorker:
     # ── Screenshot sync ──────────────────────────────────────────────────────
 
     def _maybe_sync_screenshots(self) -> None:
+        # Feature switch — also stops devices with an old local backlog from
+        # uploading it (POST /v1/screenshots + S3 PUT per shot).
+        if not Config.SCREENSHOTS_ENABLED:
+            return
         now = time.time()
         if now - self._last_screenshot_sync < Config.SCREENSHOT_SYNC_SECS:
             return
         self._last_screenshot_sync = now
         for ss in self._db.get_pending_screenshots(limit=5):
             self._upload_screenshot(ss)
+
+    # ── Local retention ──────────────────────────────────────────────────────
+
+    def _maybe_purge(self) -> None:
+        """Hourly retention pass: flush backend-confirmed records older than
+        LOCAL_RETENTION_DAYS; unsynced records are kept until they sync."""
+        now = time.time()
+        if now - self._last_purge < Config.PURGE_INTERVAL_SECS:
+            return
+        self._last_purge = now
+        try:
+            removed = self._db.purge_synced_records(Config.LOCAL_RETENTION_DAYS)
+            if any(removed.values()):
+                log.info("Retention purge (>%dd, synced only): %s",
+                         Config.LOCAL_RETENTION_DAYS, removed)
+        except Exception as e:
+            log.warning("Retention purge failed: %s", e)
 
     # ── Policy sync ──────────────────────────────────────────────────────────
 

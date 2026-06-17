@@ -10,16 +10,34 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://timetracker:timetracker@db:5432/timetracker"
 
-    # Connection pool — set per-environment to fit the DB's max_connections.
-    # One task uses up to POOL_SIZE + MAX_OVERFLOW; a 2-task rolling deploy uses
-    # 2x that, so keep (DB_POOL_SIZE + DB_MAX_OVERFLOW) * 2 < the DB max_connections.
+    # Connection budget — TWO isolated pools so background ingest writes can
+    # never starve HTTP auth lookups (the "QueuePool limit reached" jam):
+    #   HTTP requests : DB_POOL_SIZE + DB_MAX_OVERFLOW          (default 5+5 = 10)
+    #   ingest writers: INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW (default 2+2 = 4)
+    # One task therefore holds at most 14 connections; a 2-task rolling deploy
+    # spikes to 2x that (28), which fits even the smallest RDS/Postgres tiers
+    # (max_connections >= 60). Raise per-environment only with the math above.
     DB_POOL_SIZE: int = 5
-    DB_MAX_OVERFLOW: int = 10
+    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_TIMEOUT: int = 10   # fail fast instead of stacking 30s waits
     DB_POOL_RECYCLE: int = 1800
 
-    # Ingest queue worker ceiling — keep it under the pool headroom (pool minus a
-    # few for HTTP requests) or a burst of workers re-exhausts the DB pool. Per-env.
-    INGEST_MAX_WORKERS: int = 16
+    # Dedicated ingest-writer pool (see budget above).
+    INGEST_DB_POOL_SIZE: int = 2
+    INGEST_DB_MAX_OVERFLOW: int = 2
+
+    # Ingest queue worker pool — bounded by its OWN connection pool so workers
+    # can NEVER overflow it: more workers than connections just block on checkout
+    # and time out. At startup MAX is hard-clamped to
+    # (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW), and MIN is kept below MAX so
+    # the pool has room to scale up under load and back down when idle.
+    INGEST_MIN_WORKERS: int = 2
+    INGEST_MAX_WORKERS: int = 4
+
+    # ── Runtime environment ────────────────────────────────────────────────────
+    # "development" | "staging" | "production". Anything other than development
+    # is treated as a real deployment and enforces secure-secret checks at boot.
+    ENVIRONMENT: str = "development"
 
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET: str = "change-me-in-production"
@@ -41,6 +59,22 @@ class Settings(BaseSettings):
 
     # ── Agent installer storage ───────────────────────────────────────────────
     MAX_INSTALLER_MB: int = 600
+
+    # ── Google OAuth ─────────────────────────────────────────────────────────
+    # Credentials: loaded from secrets/google_credentials.enc when SECRETS_KEY is set,
+    # otherwise read from GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env vars.
+    GOOGLE_CLIENT_ID:     str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    # Both auto-derive from the live request when blank, so one image works on
+    # localhost, staging and prod. Set them only to pin an exact value.
+    #   GOOGLE_REDIRECT_URI : blank → request.url_for(callback); whatever value
+    #                         is used MUST be registered in Google Cloud Console.
+    #   DASHBOARD_URL       : blank → the allowlisted origin the user signed in
+    #                         from; used as the final fallback if that is absent.
+    GOOGLE_REDIRECT_URI:  str = ""
+    DASHBOARD_URL:        str = "http://localhost:3002"
+    # Only this email domain is permitted to sign in via Google.
+    ALLOWED_EMAIL_DOMAIN: str = "onedge.co"
 
     # ── Bootstrap admin ───────────────────────────────────────────────────────
     # Idempotently created/repaired on startup from the tracker/admin-{env} secret,

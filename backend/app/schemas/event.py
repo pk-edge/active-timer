@@ -1,9 +1,14 @@
 from typing import Optional, List, Union
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
+# Known event types. Events outside this set are SKIPPED per-event at the
+# ingest endpoint (counted in `skipped`) — never a 422 for the whole batch.
+# A newer agent emitting a new event type must not jam sync on an older
+# backend: the sync worker retries the same oldest batch forever on 4xx.
 ALLOWED_EVENT_TYPES = {
     "window_change", "idle_start", "idle_end",
-    "lock", "unlock", "url_visit",
+    "lock", "unlock", "url_visit", "url_blocked",
+    "meeting_start", "meeting_end",
 }
 
 
@@ -15,13 +20,6 @@ class EventIn(BaseModel):
     url:          Optional[str] = None
     duration:     int = 0
     timestamp:    Union[int, str]
-
-    @field_validator("event_type")
-    @classmethod
-    def _valid_type(cls, v: str) -> str:
-        if v not in ALLOWED_EVENT_TYPES:
-            raise ValueError(f"Unknown event_type: {v}")
-        return v
 
 
 class IngestRequest(BaseModel):

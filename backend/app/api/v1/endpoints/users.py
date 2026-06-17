@@ -5,19 +5,24 @@ users (admins, RMs) have a password and an assigned role. Group assignment here
 controls which groups a 'groups'-scoped user may VIEW (employee_group_access).
 """
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import select, func, delete, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require
 from app.core import audit
-from app.core.security import hash_password
+from app.core.config import get_settings
+from app.core.ingest_queue import ingest_queue
+from app.core.security import hash_password_async
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
 from app.schemas.rbac import UserIn, UserPatch, UserOut, ApproveRequest
 
 router = APIRouter()
+settings = get_settings()
 
 
 async def _device_count(emp_id, db: AsyncSession) -> int:
@@ -59,14 +64,20 @@ async def _resolve_role(role_id: str | None, company_id, db: AsyncSession) -> Ro
 
 async def _set_group_access(emp_id, company_id, group_ids: list[str], db: AsyncSession) -> None:
     await db.execute(delete(EmployeeGroupAccess).where(EmployeeGroupAccess.employee_id == emp_id))
-    for gid in group_ids:
+    guids = []
+    for gid in dict.fromkeys(group_ids):  # dedupe, preserve order
         try:
-            guid = uuid.UUID(gid)
+            guids.append(uuid.UUID(gid))
         except ValueError:
             continue
-        exists = await db.execute(select(Group.id).where(Group.id == guid, Group.company_id == company_id))
-        if exists.first():
-            db.add(EmployeeGroupAccess(employee_id=emp_id, group_id=guid))
+    if not guids:
+        return
+    # Validate every id against the company in one query (was one per group).
+    valid = (await db.execute(
+        select(Group.id).where(Group.id.in_(guids), Group.company_id == company_id)
+    )).scalars().all()
+    for guid in valid:
+        db.add(EmployeeGroupAccess(employee_id=emp_id, group_id=guid))
 
 
 @router.get("", response_model=list[UserOut])
@@ -148,6 +159,270 @@ async def list_users(
     ]
 
 
+# ── Per-user activity (online status + time spent) ───────────────────────────
+# NOTE: these routes MUST stay declared before the /{user_id} routes below,
+# otherwise FastAPI matches "activity" as a user_id.
+
+class UserActivityOut(BaseModel):
+    id:            str
+    name:          str
+    email:         str
+    role_name:     str | None
+    is_active:     bool
+    device_count:  int
+    is_online:     bool
+    last_seen:     str | None   # ISO timestamp of the most recent device heartbeat
+    current_app:   str | None   # live, from the in-memory ingest cache
+    today_seconds: int          # active time since local midnight (UTC)
+    week_seconds:  int          # active time over the trailing 7 days
+
+
+class UserDeviceActivityOut(BaseModel):
+    id:            str
+    hostname:      str
+    platform:      str
+    is_online:     bool
+    last_seen:     str | None
+    current_app:   str | None
+    today_seconds: int
+    week_seconds:  int
+
+
+class UserDayOut(BaseModel):
+    date:           str
+    active_seconds: int
+    idle_seconds:   int
+
+
+class UserAppOut(BaseModel):
+    app_name: str
+    seconds:  int
+
+
+class UserActivityDetailOut(BaseModel):
+    user:    UserActivityOut
+    devices: list[UserDeviceActivityOut]
+    daily:   list[UserDayOut]          # trailing 7 days, newest first
+    top_apps: list[UserAppOut]         # trailing 7 days, by active time
+
+
+async def _visible_employees(user: Employee, db: AsyncSession) -> list[Employee]:
+    """Active+approved employees this admin may see (mirrors list_users scoping)."""
+    q = (
+        select(Employee).options(selectinload(Employee.role_obj))
+        .where(
+            Employee.company_id == user.company_id,
+            Employee.is_deleted == False,   # noqa: E712
+            Employee.is_approved == True,   # noqa: E712
+        )
+        .order_by(Employee.name.asc())
+    )
+    if getattr(user, "_scope_type", "own") == "groups":
+        gid_rows = await db.execute(
+            select(EmployeeGroupAccess.group_id)
+            .where(EmployeeGroupAccess.employee_id == user.id)
+        )
+        my_gids = [g[0] for g in gid_rows.all()]
+        if not my_gids:
+            return []
+        q = q.where(
+            Employee.id.in_(
+                select(GroupMember.employee_id).where(
+                    GroupMember.group_id.in_(my_gids),
+                    GroupMember.member_type == "employee",
+                    GroupMember.employee_id.isnot(None),
+                )
+            )
+        )
+    return list((await db.execute(q)).scalars().all())
+
+
+def _live_app(device_ids: list[str], cutoff: datetime) -> str | None:
+    """Most recent current_app across a user's devices, from the ingest cache.
+    Pure in-memory lookup — zero DB cost."""
+    best_ts, best_app = None, None
+    for did in device_ids:
+        cached = ingest_queue.device_cache.get(did)
+        if not cached:
+            continue
+        ts = cached.get("last_seen")
+        if ts and ts > cutoff and cached.get("current_app"):
+            if best_ts is None or ts > best_ts:
+                best_ts, best_app = ts, cached["current_app"]
+    return best_app
+
+
+@router.get("/activity", response_model=list[UserActivityOut])
+async def list_user_activity(
+    user: Employee = Depends(require("users", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """One row per employee with devices, online status, and active time.
+
+    Exactly 3 set-based queries regardless of user count (no N+1):
+      1. visible employees   2. their devices   3. event sums grouped by employee
+    """
+    employees = await _visible_employees(user, db)
+    if not employees:
+        return []
+    emp_ids = [e.id for e in employees]
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+
+    # Devices per employee (tiny table — counts + last_seen computed in Python).
+    dev_rows = (await db.execute(
+        select(Device.id, Device.employee_id, Device.last_seen)
+        .where(Device.employee_id.in_(emp_ids))
+    )).all()
+    devs_by_emp: dict = {}
+    for did, eid, seen in dev_rows:
+        devs_by_emp.setdefault(eid, []).append((str(did), seen))
+
+    # Active seconds (today + trailing 7 days) for ALL users in one aggregate.
+    sums = (await db.execute(
+        text("""
+            SELECT d.employee_id AS eid,
+                   COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
+                                      AND ae.timestamp >= date_trunc('day', NOW())
+                                     THEN ae.duration ELSE 0 END), 0) AS today,
+                   COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
+                                     THEN ae.duration ELSE 0 END), 0) AS week
+            FROM activity_events ae
+            JOIN devices d ON d.id = ae.device_id
+            WHERE d.employee_id = ANY(:ids)
+              AND ae.timestamp >= NOW() - INTERVAL '7 days'
+            GROUP BY d.employee_id
+        """),
+        {"ids": emp_ids},
+    )).all()
+    time_by_emp = {r.eid: (int(r.today), int(r.week)) for r in sums}
+
+    out = []
+    for e in employees:
+        devices  = devs_by_emp.get(e.id, [])
+        dev_ids  = [d[0] for d in devices]
+        last_seen = max((d[1] for d in devices if d[1]), default=None)
+        today, week = time_by_emp.get(e.id, (0, 0))
+        out.append(UserActivityOut(
+            id=str(e.id), name=e.name, email=e.email,
+            role_name=e.role_obj.name if e.role_obj else (e.role or None),
+            is_active=e.is_active,
+            device_count=len(devices),
+            is_online=bool(last_seen and last_seen > cutoff),
+            last_seen=last_seen.isoformat() if last_seen else None,
+            current_app=_live_app(dev_ids, cutoff),
+            today_seconds=today,
+            week_seconds=week,
+        ))
+    return out
+
+
+@router.get("/{user_id}/activity", response_model=UserActivityDetailOut)
+async def user_activity_detail(
+    user_id: str,
+    user: Employee = Depends(require("users", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Everything the user detail page needs in ONE request (4 small queries):
+    summary, per-device breakdown, 7-day daily trend, top apps."""
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user id")
+
+    emp = (await db.execute(
+        select(Employee).options(selectinload(Employee.role_obj)).where(
+            Employee.id == uid,
+            Employee.company_id == user.company_id,
+            Employee.is_deleted == False,  # noqa: E712
+        )
+    )).scalar_one_or_none()
+    if not emp:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+
+    devices = (await db.execute(
+        select(Device).where(Device.employee_id == uid).order_by(Device.hostname)
+    )).scalars().all()
+    dev_ids = [str(d.id) for d in devices]
+
+    per_device: dict = {}
+    daily: list[UserDayOut] = []
+    top_apps: list[UserAppOut] = []
+    if dev_ids:
+        rows = (await db.execute(
+            text("""
+                SELECT device_id,
+                       COALESCE(SUM(CASE WHEN event_type = 'window_change'
+                                          AND timestamp >= date_trunc('day', NOW())
+                                         THEN duration ELSE 0 END), 0) AS today,
+                       COALESCE(SUM(CASE WHEN event_type = 'window_change'
+                                         THEN duration ELSE 0 END), 0) AS week
+                FROM activity_events
+                WHERE device_id = ANY(:ids)
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                GROUP BY device_id
+            """),
+            {"ids": dev_ids},
+        )).all()
+        per_device = {str(r.device_id): (int(r.today), int(r.week)) for r in rows}
+
+        day_rows = (await db.execute(
+            text("""
+                SELECT DATE(timestamp) AS day,
+                       COALESCE(SUM(CASE WHEN event_type = 'window_change' THEN duration ELSE 0 END), 0) AS active,
+                       COALESCE(SUM(CASE WHEN event_type = 'idle_start'    THEN duration ELSE 0 END), 0) AS idle
+                FROM activity_events
+                WHERE device_id = ANY(:ids)
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                GROUP BY day ORDER BY day DESC
+            """),
+            {"ids": dev_ids},
+        )).all()
+        daily = [UserDayOut(date=str(r.day), active_seconds=int(r.active), idle_seconds=int(r.idle))
+                 for r in day_rows]
+
+        app_rows = (await db.execute(
+            text("""
+                SELECT app_name, SUM(duration) AS seconds
+                FROM activity_events
+                WHERE device_id = ANY(:ids)
+                  AND event_type = 'window_change' AND app_name IS NOT NULL
+                  AND timestamp >= NOW() - INTERVAL '7 days'
+                GROUP BY app_name ORDER BY seconds DESC LIMIT 8
+            """),
+            {"ids": dev_ids},
+        )).all()
+        top_apps = [UserAppOut(app_name=r.app_name, seconds=int(r.seconds)) for r in app_rows]
+
+    dev_out = []
+    for d in devices:
+        t, w = per_device.get(str(d.id), (0, 0))
+        cached = ingest_queue.device_cache.get(str(d.id))
+        live = bool(d.last_seen and d.last_seen > cutoff)
+        dev_out.append(UserDeviceActivityOut(
+            id=str(d.id), hostname=d.hostname, platform=d.platform,
+            is_online=live,
+            last_seen=d.last_seen.isoformat() if d.last_seen else None,
+            current_app=(cached or {}).get("current_app") if live else None,
+            today_seconds=t, week_seconds=w,
+        ))
+
+    last_seen = max((d.last_seen for d in devices if d.last_seen), default=None)
+    summary = UserActivityOut(
+        id=str(emp.id), name=emp.name, email=emp.email,
+        role_name=emp.role_obj.name if emp.role_obj else (emp.role or None),
+        is_active=emp.is_active,
+        device_count=len(devices),
+        is_online=bool(last_seen and last_seen > cutoff),
+        last_seen=last_seen.isoformat() if last_seen else None,
+        current_app=_live_app(dev_ids, cutoff),
+        today_seconds=sum(v[0] for v in per_device.values()),
+        week_seconds=sum(v[1] for v in per_device.values()),
+    )
+    return UserActivityDetailOut(user=summary, devices=dev_out, daily=daily, top_apps=top_apps)
+
+
 @router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def create_user(
     body: UserIn,
@@ -165,7 +440,7 @@ async def create_user(
         name=body.name,
         role="employee",
         role_id=role.id if role else None,
-        password_hash=hash_password(body.password) if body.password else None,
+        password_hash=await hash_password_async(body.password) if body.password else None,
         is_active=True,
     )
     db.add(emp)
@@ -224,7 +499,7 @@ async def update_user(
         emp.role_id = new_role_id
     if body.password:
         changed["password"] = "changed"
-        emp.password_hash = hash_password(body.password)
+        emp.password_hash = await hash_password_async(body.password)
     if body.is_active is not None and body.is_active != emp.is_active:
         changed["is_active"] = body.is_active
         emp.is_active = body.is_active

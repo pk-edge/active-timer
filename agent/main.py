@@ -110,8 +110,26 @@ def _fetch_today_active(jwt_token: str) -> int | None:
     return None
 
 
+def _preflight_macos_permissions() -> None:
+    """Window titles on macOS need Screen Recording access. Request it once —
+    without it, browser meeting/video detection falls back to AppleScript."""
+    if sys.platform != "darwin":
+        return
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess
+        if CGPreflightScreenCaptureAccess():
+            log.info("Screen Recording permission: granted")
+        else:
+            log.warning("Screen Recording permission missing — window titles limited "
+                        "(browser tabs fall back to AppleScript); requesting access")
+            CGRequestScreenCaptureAccess()
+    except Exception as e:
+        log.debug("Screen-capture preflight unavailable: %s", e)
+
+
 def main() -> None:
     log.info("TimeTracker agent starting")
+    _preflight_macos_permissions()
 
     # 1. Local DB — schema only, device_id set after enrollment
     db = LocalDB(Config.DB_PATH)
@@ -126,6 +144,9 @@ def main() -> None:
         "sync_trigger":        threading.Event(),
         "current_app":         "",
         "current_title":       "",   # kept current by WindowWatcher for idle media detection
+        "in_meeting":          False,  # published by WindowWatcher (native + browser meetings)
+        "media_active":        False,  # published by WindowWatcher (video/music playback)
+        "is_idle":             False,  # published by InputMonitor
         "sync_status":         "enrolling",
         "current_session_id":  None,
         "new_session_event":   threading.Event(),
@@ -140,12 +161,13 @@ def main() -> None:
     # 4. Daemon worker threads (silently skip DB writes until enrolled)
     workers = [
         WindowWatcher(shared),
-        # Screenshotter(shared),  # disabled — re-enable when needed
         InputMonitor(shared),
         UrlWatcher(shared),
         SyncWorker(shared),
         UpdateWorker(shared),
     ]
+    if Config.SCREENSHOTS_ENABLED:
+        workers.insert(1, Screenshotter(shared))
     for w in workers:
         t = threading.Thread(target=w.run, name=w.__class__.__name__, daemon=True)
         t.start()
@@ -208,21 +230,22 @@ def _run_widget(shared: dict) -> None:
         widget.show()
 
         # ── Periodic daily flush — saves active seconds every 60s ────────────
-        # Baseline is set to the pre-loaded daily total so only GENUINELY NEW
-        # seconds are persisted.  Negative deltas (day rollover) are ignored.
+        # The delta is computed against the PERSISTED total (not an in-memory
+        # baseline) so the accumulator always converges on widget.elapsed: the
+        # server-reconciled absolute write at enrollment can never be double-
+        # counted, and a same-day restart resumes the timer exactly where it
+        # left off.
+        from datetime import date
         from PySide6.QtCore import QTimer
 
-        # Baseline = today's already-persisted seconds read synchronously from DB.
-        # Reading here (not from shared["today_active_secs"]) avoids a race with
-        # the background enrollment thread.  Only NEW seconds are flushed.
-        _last_flushed_secs = [shared["db"].get_today_active_secs_any_device()]
-
         def _flush_daily():
-            current = widget.elapsed
-            delta   = current - _last_flushed_secs[0]
-            if delta > 0:           # positive only — ignore day-rollover negatives
+            # Day rollover pending: the widget tick resets elapsed first.
+            # Flushing now would write yesterday's total into today's row.
+            if widget.session_date and widget.session_date != date.today():
+                return
+            delta = widget.elapsed - shared["db"].get_today_active_secs_any_device()
+            if delta > 0:
                 shared["db"].flush_daily_secs(delta)
-            _last_flushed_secs[0] = current
 
         flush_timer = QTimer()
         flush_timer.setInterval(60_000)  # every 60 seconds

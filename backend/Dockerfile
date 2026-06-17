@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 # ── Stage 1: install dependencies into an isolated venv ───────────────────────
 # All requirements ship prebuilt wheels for slim/linux, so no compiler is needed.
 FROM python:3.12-slim AS builder
@@ -47,4 +45,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
 
 # Dependencies are baked into the image; only the server starts at runtime.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# --proxy-headers + --forwarded-allow-ips lets Starlette honor the X-Forwarded-*
+# headers from the staging/prod load balancer, so request.url_for() yields the
+# public https host (needed to derive the Google OAuth callback URL correctly).
+# The only ingress is the trusted LB, so trusting all forwarded peers is safe.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]

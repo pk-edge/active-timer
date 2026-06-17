@@ -2,7 +2,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -111,8 +111,7 @@ async def update_role(
     db: AsyncSession = Depends(get_db),
 ):
     role = await _get_role(role_id, user, db)
-    if role.is_system:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="System role cannot be edited")
+    # Any role is editable, including system roles (Super Admin / Viewer / Talent).
     if body.scope_type not in ("all", "groups", "own"):
         raise HTTPException(status_code=400, detail="Invalid scope_type")
     _validate_perms(body.permissions)
@@ -120,9 +119,10 @@ async def update_role(
     role.name = body.name
     role.description = body.description
     role.scope_type = body.scope_type
-    # Replace permission set
-    for p in list(role.permissions):
-        await db.delete(p)
+    # Replace permission set in one statement instead of one DELETE per row.
+    # The ORM-enabled delete also evicts the loaded objects from the session,
+    # and the trailing refresh reloads role.permissions for the response.
+    await db.execute(delete(RolePermission).where(RolePermission.role_id == role.id))
     await db.flush()
     for p in body.permissions:
         db.add(RolePermission(role_id=role.id, module=p.module, action=p.action))
@@ -142,13 +142,16 @@ async def delete_role(
     db: AsyncSession = Depends(get_db),
 ):
     role = await _get_role(role_id, user, db)
-    if role.is_system:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="System role cannot be deleted")
-    assigned = await db.execute(select(Employee.id).where(Employee.role_id == role.id).limit(1))
-    if assigned.first():
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
-                            detail="Role is assigned to users; reassign them first")
+    # No restriction: any role can be deleted, including system roles. Rather than
+    # block when the role is still assigned, clear it from those employees
+    # (role_id → NULL) in the same transaction so no one is left pointing at a
+    # deleted role. Cleared users fall back to their legacy `role` perms (admins
+    # keep full access) or to no permissions until an admin assigns a new role.
+    unassigned = (await db.execute(
+        update(Employee).where(Employee.role_id == role.id).values(role_id=None)
+    )).rowcount
     # Soft-delete: flag instead of physical removal so audit history is preserved
     role.is_deleted = True
-    await audit.record(db, user, "role.delete", "role", role_id, {"name": role.name})
+    await audit.record(db, user, "role.delete", "role", role_id,
+                       {"name": role.name, "unassigned_users": unassigned})
     await db.commit()

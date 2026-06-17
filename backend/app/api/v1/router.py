@@ -1,10 +1,11 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, ingest, devices, screenshots, reports, logs, roles, groups, users, installers, home, audit, notifications, tech_utilization, policy, setup, company
+from app.api.v1.endpoints import auth, ingest, devices, screenshots, reports, logs, roles, groups, users, installers, home, audit, notifications, tech_utilization, policy, setup, company, googleAuth
 
 api_router = APIRouter()
 
 api_router.include_router(auth.router,        prefix="/auth",        tags=["auth"])
+api_router.include_router(googleAuth.router,  prefix="/auth",        tags=["auth"])
 api_router.include_router(ingest.router,      prefix="/ingest",      tags=["ingest"])
 api_router.include_router(devices.router,     prefix="/devices",     tags=["devices"])
 api_router.include_router(screenshots.router, prefix="/screenshots", tags=["screenshots"])

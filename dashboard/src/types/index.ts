@@ -99,6 +99,49 @@ export interface User {
   device_count: number;
 }
 
+export interface UserActivity {
+  id:            string;
+  name:          string;
+  email:         string;
+  role_name:     string | null;
+  is_active:     boolean;
+  device_count:  number;
+  is_online:     boolean;
+  last_seen:     string | null;
+  current_app:   string | null;
+  today_seconds: number;
+  week_seconds:  number;
+}
+
+export interface UserDeviceActivity {
+  id:            string;
+  hostname:      string;
+  platform:      string;
+  is_online:     boolean;
+  last_seen:     string | null;
+  current_app:   string | null;
+  today_seconds: number;
+  week_seconds:  number;
+}
+
+export interface UserDay {
+  date:           string;
+  active_seconds: number;
+  idle_seconds:   number;
+}
+
+export interface UserApp {
+  app_name: string;
+  seconds:  number;
+}
+
+export interface UserActivityDetail {
+  user:     UserActivity;
+  devices:  UserDeviceActivity[];
+  daily:    UserDay[];
+  top_apps: UserApp[];
+}
+
 export interface Group {
   id:           string;
   name:         string;

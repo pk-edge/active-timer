@@ -1,6 +1,7 @@
 import type {
   Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
-  Me, Role, ModuleDef, User, Group, GroupDetail, GroupMember, Installer, InstallerDownload,
+  Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
+  Group, GroupDetail, GroupMember, Installer, InstallerDownload,
   OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
   AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
@@ -77,6 +78,17 @@ export function isAuthenticated(): boolean {
   return Boolean(getToken());
 }
 
+export function loginWithToken(token: string) {
+  localStorage.setItem("tt_token", token);
+}
+
+export async function setPassword(password: string): Promise<void> {
+  await request<void>("/v1/auth/set-password", {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+}
+
 // ── Devices ───────────────────────────────────────────────────────────────────
 
 export const getDevices = () => request<Device[]>("/v1/devices");
@@ -147,6 +159,10 @@ export const deleteRole = (id: string) =>
 
 export const getUsers = (search?: string) =>
   request<User[]>(`/v1/users${search ? `?search=${encodeURIComponent(search)}` : ""}`);
+export const getUserActivity = () =>
+  request<UserActivity[]>("/v1/users/activity");
+export const getUserActivityDetail = (id: string) =>
+  request<UserActivityDetail>(`/v1/users/${id}/activity`);
 export const getPendingUsers = () =>
   request<User[]>("/v1/users?pending=true");
 export const createUser = (body: Record<string, unknown>) =>
@@ -207,6 +223,8 @@ export async function importGroupsCsv(file: File) {
 export const getInstallers = () => request<Installer[]>("/v1/installers");
 export const activateInstaller = (id: string) =>
   request<Installer>(`/v1/installers/${id}/activate`, { method: "POST" });
+export const deleteInstaller = (id: string) =>
+  request<void>(`/v1/installers/${id}`, { method: "DELETE" });
 export const getInstallerDownload = (id: string) =>
   request<{ download_url: string; version: string; platform: string }>(`/v1/installers/${id}/download`);
 export const getInstallerDownloads = () => request<InstallerDownload[]>("/v1/installers/downloads");

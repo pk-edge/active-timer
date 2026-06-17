@@ -24,10 +24,13 @@ Architecture
 
 Pool sizing
 ───────────
-• Starts with MIN_WORKERS (4).
+• Starts with MIN_WORKERS (INGEST_MIN_WORKERS, default 2).
 • Every SCALE_INTERVAL seconds a monitor coroutine checks queue depth.
-  – depth >  SCALE_UP_AT   → spin up one worker  (up to MAX_WORKERS = 16)
+  – depth >  SCALE_UP_AT   → spin up one worker  (up to MAX_WORKERS)
   – depth <  SCALE_DOWN_AT → shut down one worker (down to MIN_WORKERS)
+• MAX_WORKERS is hard-clamped to the ingest pool's connection count
+  (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW) so workers can never
+  outnumber connections and block on checkout.
 • Workers drain in BATCH_SIZE chunks (default 200) so each DB round-trip
   is as cheap as possible.
 
@@ -54,8 +57,13 @@ log = logging.getLogger("ingest_queue")
 QUEUE_MAXSIZE   = 100_000   # drop back-pressure threshold
 BATCH_SIZE      = 200       # events per DB write cycle
 BATCH_WAIT      = 0.4       # seconds to wait for a full batch before flushing
-MIN_WORKERS     = 4         # always-on workers
-MAX_WORKERS     = get_settings().INGEST_MAX_WORKERS  # env-driven; keep < DB pool
+_settings        = get_settings()
+MIN_WORKERS     = _settings.INGEST_MIN_WORKERS   # always-on workers
+# Hard ceiling: never run more workers than the ingest pool has connections, or
+# the surplus workers block on checkout and time out (the pool "overflow" jam).
+# Keep MAX >= MIN so the pool is always at least its floor size.
+_INGEST_CONN_CAP = _settings.INGEST_DB_POOL_SIZE + _settings.INGEST_DB_MAX_OVERFLOW
+MAX_WORKERS     = max(MIN_WORKERS, min(_settings.INGEST_MAX_WORKERS, _INGEST_CONN_CAP))
 SCALE_INTERVAL  = 5.0       # how often to check queue depth
 SCALE_UP_AT     = 500       # grow pool when queue exceeds this
 SCALE_DOWN_AT   = 50        # shrink pool when queue drops below this
@@ -69,6 +77,9 @@ class IngestQueue:
         self._workers: list[asyncio.Task] = []
         self._monitor_task: asyncio.Task | None = None
         self._running = False
+        # Graceful scale-down: workers exit between batches when this is > 0,
+        # instead of being cancelled mid-DB-write (which would drop the batch).
+        self._shrink_pending = 0
 
         # In-memory device state cache: {device_id: {...}} used by realtime endpoint
         self.device_cache: dict[str, dict] = {}
@@ -139,16 +150,18 @@ class IngestQueue:
                 log.info("IngestQueue scaled UP → %d workers (queue depth %d)",
                          alive + 1, depth)
 
-            elif depth < SCALE_DOWN_AT and alive > MIN_WORKERS:
-                # Mark one worker for graceful exit on next empty wait
-                self._workers[0].cancel()
-                log.info("IngestQueue scaled DOWN → %d workers (queue depth %d)",
+            elif depth < SCALE_DOWN_AT and alive > MIN_WORKERS and self._shrink_pending == 0:
+                # Ask one worker to exit after its current batch — never cancel
+                # mid-write, or the batch it already popped would be lost.
+                self._shrink_pending = 1
+                log.info("IngestQueue scaling DOWN → %d workers (queue depth %d)",
                          alive - 1, depth)
 
     # ── Worker coroutine ──────────────────────────────────────────────────────
 
     async def _worker(self, worker_id: int) -> None:
-        from app.db.base import AsyncSessionLocal
+        # Dedicated writer pool — never competes with HTTP requests for connections.
+        from app.db.base import IngestSessionLocal
         from app.core import broadcaster
         from app.db.models import ActivityEvent
         from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -157,6 +170,13 @@ class IngestQueue:
         log.debug("Worker %d starting", worker_id)
         try:
             while True:
+                # Honour a pending scale-down between batches (safe exit point).
+                if self._shrink_pending > 0:
+                    alive = len([t for t in self._workers if not t.done()])
+                    if alive > MIN_WORKERS:
+                        self._shrink_pending -= 1
+                        break
+
                 batch: list[dict] = []
 
                 # Block until at least one item arrives
@@ -184,7 +204,7 @@ class IngestQueue:
                 device_ids = list({b["device_id"] for b in batch})
 
                 try:
-                    async with AsyncSessionLocal() as db:
+                    async with IngestSessionLocal() as db:
                         # Bulk insert events
                         stmt = (
                             pg_insert(ActivityEvent)
@@ -239,7 +259,7 @@ class IngestQueue:
             return
         log.info("Flushing %d remaining items on shutdown", remaining)
         try:
-            from app.db.base import AsyncSessionLocal
+            from app.db.base import IngestSessionLocal
             from app.db.models import ActivityEvent
             from sqlalchemy.dialects.postgresql import insert as pg_insert
             from sqlalchemy import text
@@ -255,7 +275,7 @@ class IngestQueue:
                     break
 
             if rows:
-                async with AsyncSessionLocal() as db:
+                async with IngestSessionLocal() as db:
                     stmt = (
                         pg_insert(ActivityEvent)
                         .values(rows)

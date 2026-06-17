@@ -6,10 +6,14 @@ Note: this product has no app/URL *productivity classification*, so these
 dashboards report ACTIVITY (active time, activity status, app/site usage by time)
 rather than ActivTrak-style productive/unproductive percentages.
 """
+import asyncio
+import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -152,11 +156,14 @@ async def overview(
         stat_filter = " AND ae.timestamp >= date_trunc('day', NOW())"
 
     # Active working time = window_change events for real user apps ONLY.
-    # Excludes: System Idle Process / LockApp (Windows OS placeholders that
-    # appear as foreground window while the user is actually idle), and any
-    # event whose app_name is NULL/blank.
+    # Excludes OS lock/login screen apps that appear as the foreground window
+    # while the screen is locked, and any event whose app_name is NULL/blank.
     SYSTEM_IDLE_APPS = (
-        "System Idle Process", "LockApp", "LogonUI",
+        "loginwindow",          # macOS lock screen
+        "ScreenSaverEngine",    # macOS screen saver
+        "System Idle Process",  # Windows idle placeholder
+        "LockApp",              # Windows 10/11 lock screen
+        "LogonUI",              # Windows login/credential UI
         "Idle", "screensaver",
     )
     placeholders = ", ".join(f":ex{i}" for i in range(len(SYSTEM_IDLE_APPS)))
@@ -333,7 +340,7 @@ async def my_stats(
     active_result = await db.execute(
         text("""
             SELECT COALESCE(SUM(
-                CASE WHEN event_type NOT IN ('idle_start','lock') THEN duration ELSE 0 END
+                CASE WHEN event_type = 'window_change' THEN duration ELSE 0 END
             ), 0) AS active
             FROM activity_events
             WHERE device_id = ANY(:ids) AND timestamp >= date_trunc('day', NOW())
@@ -384,6 +391,112 @@ async def my_stats(
 
 # ── Device active-time sync — called by the agent on startup ──────────────────
 
+@router.get("/stream")
+async def stream(
+    group_id: str | None = Query(default=None),
+    user: Employee = Depends(require("home", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    SSE endpoint — pushes the realtime device list whenever ingest lands new data.
+
+    Industrial-standard pattern:
+    - Auth and scope resolved before streaming; DB connection released immediately.
+    - Hard cap: 503 when broadcaster is at MAX_SUBSCRIBERS.
+    - Initial snapshot sent on connect so the client never shows a blank state.
+    - Burst coalescing: rapid ingest flushes are merged so the DB query runs at
+      most once every MIN_PUSH_INTERVAL seconds per subscriber.
+    - 25 s heartbeat keeps proxies and load-balancers from killing idle connections.
+    - CancelledError caught explicitly so client disconnect is always clean.
+    """
+    from app.core import broadcaster
+    from app.core.ingest_queue import ingest_queue
+    from app.db.base import AsyncSessionLocal
+
+    ids        = await _resolve_ids(user, group_id, db)
+    company_id = user.company_id
+
+    # Reject early (before releasing DB connection) if broadcaster is at capacity.
+    if broadcaster.subscriber_count() >= broadcaster.MAX_SUBSCRIBERS:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SSE capacity reached, try again later",
+        )
+
+    # CRITICAL: release the request's pooled connection NOW. This response
+    # streams for the life of the dashboard tab — holding the dependency
+    # session would pin one connection per viewer and drain the pool (the
+    # "QueuePool limit reached" production jam). Payload queries below use
+    # their own short-lived sessions.
+    await db.close()
+
+    async def _payload() -> str:
+        async with AsyncSessionLocal() as sess:
+            rows = await _status_rows(ids, company_id, sess)
+
+        cache  = ingest_queue.device_cache
+        now    = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+
+        for row in rows:
+            cached = cache.get(row["device_id"])
+            if not cached:
+                continue
+            cached_ts = cached.get("last_seen")
+            if cached_ts and cached_ts > cutoff:
+                if cached.get("current_app"):
+                    row["current_app"] = cached["current_app"]
+                row["status"] = (
+                    "passive" if cached.get("latest_type") in _PASSIVE_EVENTS
+                    else "active"
+                )
+
+        return f"data: {json.dumps(rows)}\n\n"
+
+    # Each push re-runs the device-status query, so cap the per-subscriber rate:
+    # under sustained ingest a dashboard tab refreshes at most every MIN_PUSH_INTERVAL
+    # instead of once per worker batch flush (which can be several times a second).
+    MIN_PUSH_INTERVAL = 2.0
+
+    async def _event_generator():
+        q = broadcaster.subscribe()
+        if q is None:
+            # Capacity was grabbed between the check above and subscribe().
+            yield "event: error\ndata: capacity\n\n"
+            return
+        try:
+            yield await _payload()
+            last_push = time.monotonic()
+
+            while True:
+                try:
+                    await asyncio.wait_for(q.get(), timeout=25.0)
+                    # Coalesce the burst and enforce the minimum push interval
+                    delay = MIN_PUSH_INTERVAL - (time.monotonic() - last_push)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    while not q.empty():
+                        q.get_nowait()
+                    yield await _payload()
+                    last_push = time.monotonic()
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            pass  # client disconnected — finally block handles cleanup
+        finally:
+            broadcaster.unsubscribe(q)
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 @router.get("/device-today-active")
 async def device_today_active(
     device: Device = Depends(get_current_device),
@@ -403,6 +516,7 @@ async def device_today_active(
                     WHEN ae.event_type = 'window_change'
                      AND ae.app_name IS NOT NULL
                      AND ae.app_name NOT IN (
+                         'loginwindow','ScreenSaverEngine',
                          'System Idle Process','LockApp','LogonUI','Idle','screensaver'
                      )
                     THEN ae.duration ELSE 0

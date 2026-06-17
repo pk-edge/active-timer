@@ -271,8 +271,10 @@ async def import_groups(
     created_groups = 0
     added_members = 0
     skipped: list[dict] = []
-    group_cache: dict[str, Group] = {}
 
+    # Validate row shape first so all lookups can be batched (a fixed number of
+    # queries for the whole file instead of two or three per CSV row).
+    rows: list[tuple[int, str, str, str]] = []
     for i, row in enumerate(reader, start=2):  # row 1 = header
         gname = (row.get("group") or "").strip()
         ident = (row.get("identifier") or "").strip()
@@ -280,48 +282,78 @@ async def import_groups(
         if not gname or not ident or mtype not in ("employee", "device"):
             skipped.append({"row": i, "reason": "missing/invalid group, identifier, or type"})
             continue
+        rows.append((i, gname, ident, mtype))
 
-        g = group_cache.get(gname)
-        if g is None:
-            existing = await db.execute(
-                select(Group).where(Group.company_id == user.company_id, Group.name == gname)
-            )
-            g = existing.scalar_one_or_none()
-            if g is None:
-                g = Group(company_id=user.company_id, name=gname, created_by=user.id)
-                db.add(g)
-                await db.flush()
-                created_groups += 1
-            group_cache[gname] = g
+    if not rows:
+        return ImportResult(created_groups=0, added_members=0, skipped=skipped)
 
+    gnames = {gname for _, gname, _, _ in rows}
+    emails = {ident.lower() for _, _, ident, mtype in rows if mtype == "employee"}
+    hosts  = {ident for _, _, ident, mtype in rows if mtype == "device"}
+
+    groups_by_name = {
+        g.name: g for g in (await db.execute(
+            select(Group).where(Group.company_id == user.company_id, Group.name.in_(gnames))
+        )).scalars().all()
+    }
+    emps_by_email: dict = {}
+    if emails:
+        emps_by_email = {
+            e.email: e for e in (await db.execute(
+                select(Employee).where(
+                    Employee.company_id == user.company_id, Employee.email.in_(emails))
+            )).scalars().all()
+        }
+    devs_by_host: dict = {}
+    if hosts:
+        devs_by_host = {
+            d.hostname: d for d in (await db.execute(
+                select(Device).where(
+                    Device.company_id == user.company_id, Device.hostname.in_(hosts))
+            )).scalars().all()
+        }
+
+    missing = sorted(gnames - groups_by_name.keys())
+    if missing:
+        for gname in missing:
+            g = Group(company_id=user.company_id, name=gname, created_by=user.id)
+            db.add(g)
+            groups_by_name[gname] = g
+        await db.flush()  # one flush assigns ids to every new group
+        created_groups = len(missing)
+
+    # Existing memberships for every involved group, in one query.
+    seen: set[tuple] = set()
+    gids = [g.id for g in groups_by_name.values()]
+    for gid, eid, did in (await db.execute(
+        select(GroupMember.group_id, GroupMember.employee_id, GroupMember.device_id)
+        .where(GroupMember.group_id.in_(gids))
+    )).all():
+        seen.add((gid, eid, did))
+
+    for i, gname, ident, mtype in rows:
+        g = groups_by_name[gname]
         if mtype == "employee":
-            er = await db.execute(select(Employee).where(
-                Employee.company_id == user.company_id, Employee.email == ident.lower()))
-            emp = er.scalar_one_or_none()
+            emp = emps_by_email.get(ident.lower())
             if not emp:
                 skipped.append({"row": i, "reason": f"employee email not found: {ident}"})
                 continue
-            dupe = await db.execute(select(GroupMember.id).where(
-                GroupMember.group_id == g.id, GroupMember.employee_id == emp.id))
-            if dupe.first():
+            key = (g.id, emp.id, None)
+            if key in seen:
                 skipped.append({"row": i, "reason": "duplicate membership"})
                 continue
             db.add(GroupMember(group_id=g.id, member_type="employee", employee_id=emp.id))
         else:
-            dr = await db.execute(select(Device).where(
-                Device.company_id == user.company_id, Device.hostname == ident))
-            dev = dr.scalar_one_or_none()
+            dev = devs_by_host.get(ident)
             if not dev:
                 skipped.append({"row": i, "reason": f"device hostname not found: {ident}"})
                 continue
-            dupe = await db.execute(select(GroupMember.id).where(
-                GroupMember.group_id == g.id, GroupMember.device_id == dev.id))
-            if dupe.first():
+            key = (g.id, None, dev.id)
+            if key in seen:
                 skipped.append({"row": i, "reason": "duplicate membership"})
                 continue
             db.add(GroupMember(group_id=g.id, member_type="device", device_id=dev.id))
-
-        await db.flush()
+        seen.add(key)
         added_members += 1
 
     await db.commit()

@@ -14,10 +14,16 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
   const insights = useMemo(() => {
     if (!events || events.length === 0) return null;
 
+    // OS lock/login screen apps — excluded from all active-time metrics.
+    const LOCK_SCREEN_APPS = new Set([
+      "loginwindow", "ScreenSaverEngine",
+      "System Idle Process", "LockApp", "LogonUI", "Idle", "screensaver",
+    ]);
+
     // Top apps by total duration
     const appMap: Record<string, number> = {};
     events.forEach(e => {
-      if (e.event_type === "window_change" && e.app_name) {
+      if (e.event_type === "window_change" && e.app_name && !LOCK_SCREEN_APPS.has(e.app_name)) {
         appMap[e.app_name] = (appMap[e.app_name] ?? 0) + (e.duration || 0);
       }
     });

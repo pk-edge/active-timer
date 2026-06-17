@@ -1,42 +1,54 @@
 "use client";
-import { Monitor, Globe, Lock, MousePointer } from "lucide-react";
+import { Monitor, Globe, Lock, MousePointer, Video, ShieldAlert } from "lucide-react";
 import { fmtTime, fmtSeconds } from "@/lib/api";
 import type { TimelineEvent } from "@/types";
 
 const ICONS: Record<string, React.ReactNode> = {
   window_change: <Monitor size={12} />,
   url_visit:     <Globe size={12} />,
+  url_blocked:   <ShieldAlert size={12} />,
   lock:          <Lock size={12} />,
   unlock:        <Lock size={12} />,
   idle_start:    <MousePointer size={12} />,
   idle_end:      <MousePointer size={12} />,
+  meeting_start: <Video size={12} />,
+  meeting_end:   <Video size={12} />,
 };
 
 const DOT_COLOR: Record<string, string> = {
   window_change: "bg-brand-500",
   url_visit:     "bg-purple-500",
+  url_blocked:   "bg-red-500",
   lock:          "bg-red-400",
   unlock:        "bg-green-500",
   idle_start:    "bg-gray-300",
   idle_end:      "bg-gray-400",
+  meeting_start: "bg-blue-500",
+  meeting_end:   "bg-blue-400",
 };
 
 const ICON_COLOR: Record<string, string> = {
   window_change: "text-brand-500",
   url_visit:     "text-purple-500",
+  url_blocked:   "text-red-500",
   lock:          "text-red-500",
   unlock:        "text-green-500",
   idle_start:    "text-gray-400",
   idle_end:      "text-gray-400",
+  meeting_start: "text-blue-500",
+  meeting_end:   "text-blue-400",
 };
 
 const BADGE_COLOR: Record<string, string> = {
   window_change: "bg-brand-50 text-brand-700",
   url_visit:     "bg-purple-50 text-purple-700",
+  url_blocked:   "bg-red-50 text-red-600",
   lock:          "bg-red-50 text-red-600",
   unlock:        "bg-green-50 text-green-700",
   idle_start:    "bg-gray-100 text-gray-500",
   idle_end:      "bg-gray-100 text-gray-500",
+  meeting_start: "bg-blue-50 text-blue-700",
+  meeting_end:   "bg-blue-50 text-blue-600",
 };
 
 function EventRow({ e, isLast }: { e: TimelineEvent; isLast: boolean }) {
@@ -74,11 +86,24 @@ function EventRow({ e, isLast }: { e: TimelineEvent; isLast: boolean }) {
                 </span>
               ) : (
                 <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${badge}`}>
-                  {e.event_type === "lock"       ? "Screen locked"      :
-                   e.event_type === "unlock"     ? "Screen unlocked"    :
-                   e.event_type === "idle_start" ? "Went idle"          :
-                   e.event_type === "idle_end"   ? "Returned from idle" :
+                  {e.event_type === "lock"          ? "Screen locked"      :
+                   e.event_type === "unlock"        ? "Screen unlocked"    :
+                   e.event_type === "idle_start"    ? "Went idle"          :
+                   e.event_type === "idle_end"      ? "Returned from idle" :
+                   e.event_type === "meeting_start" ? "Meeting started"    :
+                   e.event_type === "meeting_end"   ? "Meeting ended"      :
+                   e.event_type === "url_blocked"   ? "Blocked URL"        :
                    e.event_type}
+                </span>
+              )}
+              {e.app_name && (e.event_type === "meeting_start" || e.event_type === "meeting_end") && (
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ${badge}`}>
+                  {e.event_type === "meeting_start" ? "Meeting started" : "Meeting ended"}
+                </span>
+              )}
+              {e.app_name && e.event_type === "url_blocked" && (
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ${badge}`}>
+                  Blocked URL
                 </span>
               )}
               {e.duration > 0 && (

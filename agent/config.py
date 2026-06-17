@@ -127,31 +127,61 @@ class Config:
 
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # ── Screenshots — disabled (feature unused right now) ────────────────────
+    # Master switch for the whole screenshot pipeline: when off, the capture
+    # worker is not started AND the sync worker skips its upload loop, so no
+    # screenshot traffic reaches the backend, the DB, or S3. Re-enable by
+    # launching with TT_SCREENSHOTS=1 — no code change needed.
+    SCREENSHOTS_ENABLED: bool = os.environ.get("TT_SCREENSHOTS", "0") == "1"
+
     # ── Capture tuning ───────────────────────────────────────────────────────
     WINDOW_POLL_SECS:    int = 5
     SCREENSHOT_INTERVAL: int = 300
     IDLE_THRESHOLD_SECS: int = 300  # 5 minutes — stop timer if no input for 5 min
     URL_POLL_SECS:       int = 30   # poll browser history every 30s for sub-link fidelity
+    ACTIVITY_HEARTBEAT_SECS: int = 60  # re-emit current window as a slice even without a switch
 
     # ── Policy / URL blocking ─────────────────────────────────────────────────
     POLICY_SYNC_SECS:    int = 300  # re-fetch blocked URL list every 5 minutes
     POLICY_PATH:         Path = BASE_DIR / "policy.json"
 
+    # Browsers — used for tab-title based meeting/media detection
+    BROWSER_APPS: frozenset = frozenset({
+        "chrome", "google chrome", "chromium", "firefox", "safari",
+        "microsoft edge", "msedge", "edge", "brave", "brave browser",
+        "arc", "opera", "vivaldi", "iexplore", "internet explorer",
+    })
+
     # Media/meeting apps — never emit idle when these are the active window
     MEDIA_APPS: frozenset = frozenset({
         "zoom", "zoom.us", "us.zoom.videomeetings",
-        "microsoft teams", "teams",
+        "microsoft teams", "teams", "ms teams",
         "google meet",
         "webex", "cisco webex meetings",
         "facetime",
         "loom",
         "discord",
         "skype",
+        "vlc", "quicktime player", "spotify", "iina",
+        "windows media player", "movies & tv", "films & tv",
     })
+
+    # Browser tab-title fragments that mean the user is in a meeting.
+    # Tab titles look like "Meet – abc-defg-hij", "Zoom Meeting", "… | Microsoft Teams".
+    MEETING_BROWSER_TITLES: frozenset = frozenset({
+        "google meet", "meet –", "meet -", "meet.google.com",
+        "zoom meeting", "zoom workplace", "zoom.us",
+        "microsoft teams", "teams.microsoft.com", "teams.live.com",
+        "webex", "gotomeeting", "whereby", "around.co",
+        "jitsi", "bluejeans", "huddle",
+    })
+
+    # Browser tab-title fragments that mean the user is watching/listening to media
     MEDIA_BROWSER_TITLES: frozenset = frozenset({
-        "youtube", "netflix", "spotify", "amazon prime video",
-        "disney+", "twitch", "hulu", "apple tv",
-        "meet.google.com", "zoom.us",
+        "youtube", "netflix", "spotify", "prime video", "amazon prime video",
+        "disney+", "twitch", "hulu", "apple tv", "vimeo", "dailymotion",
+        "soundcloud", "tidal", "hbo", "crunchyroll", "udemy", "coursera",
+        "pluralsight", "linkedin learning",
     })
 
     # ── Sync tuning ──────────────────────────────────────────────────────────
@@ -161,6 +191,14 @@ class Config:
     SYNC_BACKOFF_BASE:        float = 2.0
     SYNC_BACKOFF_CAP:         int   = 300
     SCREENSHOT_SYNC_SECS:     int   = 60   # screenshots sync on their own longer interval
+
+    # ── Local retention ──────────────────────────────────────────────────────
+    # Offline-first: every record stays in the local queue.db until the backend
+    # confirms it. Confirmed (synced/uploaded) records are kept for this many
+    # days, then flushed; UNSYNCED records are never deleted — they wait for
+    # connectivity however long it takes.
+    LOCAL_RETENTION_DAYS:     int   = 3
+    PURGE_INTERVAL_SECS:      int   = 3600  # run the retention pass hourly
 
     # ── Platform info (sent during enrollment) ───────────────────────────────
     PLATFORM: str = sys.platform.lower()
