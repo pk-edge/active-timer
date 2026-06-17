@@ -45,37 +45,51 @@ def _resolve_backends() -> list[dict]:
 
     Resolution order (first match wins for the primary backend):
       1. TT_API_BASE env var  (single URL, token from TT_COMPANY_TOKEN)
-      2. backends.json in bundle Resources / _internal
-      3. api_base.txt in bundle Resources / _internal  (legacy single-URL)
-      4. Localhost fallback
+      2. backends.json in bundle Resources / _internal  (frozen app)
+      3. api_base.txt in bundle Resources / _internal  (legacy single-URL, frozen)
+      4. backends.json next to config.py  (dev / non-frozen runs)
+      5. backends.json in BASE_DIR  (runtime override / pushed config)
+      6. Localhost fallback
     """
+    def _parse(path: Path) -> list[dict]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            return [
+                {"url": b["url"].rstrip("/"), "token": b.get("token") or None}
+                for b in data if b.get("url")
+            ]
+        except Exception:
+            return []
+
     # 1. Env var override
     if url := os.environ.get("TT_API_BASE", "").strip():
         token = os.environ.get("TT_COMPANY_TOKEN", "").strip() or None
         return [{"url": url, "token": token}]
 
+    # 2 + 3. Frozen bundle resources (_internal\ on Windows, Resources/ on macOS)
     res = _bundle_resources()
     if res:
-        # 2. backends.json — supports 1 or 2 backends with explicit tokens
         bfile = res / "backends.json"
         if bfile.exists():
-            try:
-                data = json.loads(bfile.read_text(encoding="utf-8-sig"))
-                backends = [
-                    {"url": b["url"].rstrip("/"), "token": b.get("token") or None}
-                    for b in data
-                    if b.get("url")
-                ]
-                if backends:
-                    return backends
-            except Exception:
-                pass
+            if backends := _parse(bfile):
+                return backends
 
-        # 3. Legacy api_base.txt (single line = single URL)
         cfg = res / "api_base.txt"
         if cfg.exists():
             if url := cfg.read_text(encoding="utf-8-sig").strip():
                 return [{"url": url, "token": None}]
+
+    # 4. backends.json next to this file — dev / non-frozen runs
+    bfile = Path(__file__).parent / "backends.json"
+    if bfile.exists():
+        if backends := _parse(bfile):
+            return backends
+
+    # 5. backends.json in user data dir — runtime override
+    bfile = BASE_DIR / "backends.json"
+    if bfile.exists():
+        if backends := _parse(bfile):
+            return backends
 
     return [{"url": "http://localhost:8000", "token": None}]
 

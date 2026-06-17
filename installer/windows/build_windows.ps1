@@ -1,4 +1,4 @@
-# TimeTracker Windows Build Script
++# TimeTracker Windows Build Script
 #
 # Builds timetracker.exe once with PyInstaller, then packages a single MSI.
 # backends.json is the single source of truth for URL + token.
@@ -178,13 +178,18 @@ $sb.ToString() | Set-Content -Path $FragFile -Encoding UTF8
 # ── 4. Build MSI ──────────────────────────────────────────────────────────────
 $MsiOut = Join-Path $OutputDir "TimeTracker-${Version}.msi"
 
+# Run from the script dir so relative source files (clear_identity.js,
+# license.rtf) referenced in the .wxs resolve; -b adds it as a bind path too.
+Push-Location $ScriptDir
 wix build `
     -d "Version=$Version" `
     -d "DistDir=$DistDir" `
+    -b "$ScriptDir" `
     -ext WixToolset.UI.wixext `
     -ext WixToolset.Util.wixext `
     -out $MsiOut `
     $WxsFile $FragFile
+Pop-Location
 
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 
