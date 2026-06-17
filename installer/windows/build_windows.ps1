@@ -1,4 +1,4 @@
-+# TimeTracker Windows Build Script
+# TimeTracker Windows Build Script
 #
 # Builds timetracker.exe once with PyInstaller, then packages a single MSI.
 # backends.json is the single source of truth for URL + token.
