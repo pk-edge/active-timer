@@ -36,7 +36,7 @@ export default function TeamPage() {
   const selected = groups?.find(g => g.id === groupId);
 
   return (
-    <div className="overflow-y-auto pr-1">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Team Management</h1>
         <button onClick={() => mutate()}

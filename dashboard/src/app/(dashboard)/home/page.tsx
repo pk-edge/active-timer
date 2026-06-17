@@ -257,7 +257,7 @@ function AdminHome() {
   ];
 
   return (
-    <div className="overflow-y-auto pr-1">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       {/* Quick actions */}
       <div className="flex flex-wrap gap-3 mb-6">
         {QUICK_ACTIONS.filter(a => can(a.module, "view")).map(({ href, label, icon: Icon }) => (
