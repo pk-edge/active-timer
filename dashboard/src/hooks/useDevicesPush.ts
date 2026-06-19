@@ -9,7 +9,7 @@ import { BASE } from "@/lib/api";
  * this hook calls mutate("devices") so the devices page re-fetches instantly.
  * Reconnects automatically after any error.
  */
-export function useDevicesPush() {
+export function useDevicesPush(showArchived = false) {
   const { mutate } = useSWRConfig();
 
   useEffect(() => {
@@ -27,7 +27,8 @@ export function useDevicesPush() {
       );
 
       es.addEventListener("devices_updated", () => {
-        mutate("devices");
+        // Invalidate whichever SWR key the page is currently subscribed to.
+        mutate(showArchived ? "devices?show_archived=true" : "devices");
       });
 
       es.onerror = () => {
@@ -45,5 +46,5 @@ export function useDevicesPush() {
       clearTimeout(retryTimer);
       es?.close();
     };
-  }, [mutate]);
+  }, [mutate, showArchived]);
 }

@@ -1,7 +1,7 @@
 import type {
   Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
-  Group, GroupDetail, GroupMember, Installer, InstallerDownload,
+  Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
   OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
   AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
@@ -91,13 +91,23 @@ export async function setPassword(password: string): Promise<void> {
 
 // ── Devices ───────────────────────────────────────────────────────────────────
 
-export const getDevices = () => request<Device[]>("/v1/devices");
+export const getDevices = (showArchived = false) =>
+  request<Device[]>(`/v1/devices${showArchived ? "?show_archived=true" : ""}`);
 
 export const assignDevice = (deviceId: string, employeeId: string | null) =>
   request<Device>(`/v1/devices/${deviceId}/assign`, {
     method: "PATCH",
     body: JSON.stringify({ employee_id: employeeId }),
   });
+
+export const archiveDevice = (deviceId: string) =>
+  request<Device>(`/v1/devices/${deviceId}/archive`, { method: "PATCH" });
+
+export const restoreDevice = (deviceId: string) =>
+  request<Device>(`/v1/devices/${deviceId}/restore`, { method: "PATCH" });
+
+export const deleteDevice = (deviceId: string) =>
+  request<void>(`/v1/devices/${deviceId}`, { method: "DELETE" });
 
 export const getTimeline = (deviceId: string, since?: number, until?: number) => {
   const params = new URLSearchParams();
@@ -228,6 +238,17 @@ export const deleteInstaller = (id: string) =>
 export const getInstallerDownload = (id: string) =>
   request<{ download_url: string; version: string; platform: string }>(`/v1/installers/${id}/download`);
 export const getInstallerDownloads = () => request<InstallerDownload[]>("/v1/installers/downloads");
+
+export const patchInstaller = (id: string, body: {
+  rollout_percent?: number; mandatory?: boolean; channel?: string;
+  min_supported_version?: string | null; expires_at?: string | null;
+}) => request<Installer>(`/v1/installers/${id}`, {
+  method: "PATCH",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+export const getUpdateRuns = () => request<UpdateRunsResponse>("/v1/updates/runs");
 
 export async function uploadInstaller(form: {
   platform: string; installer_type: string; version: string; notes?: string; file: File;
