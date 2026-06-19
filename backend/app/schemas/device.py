@@ -12,6 +12,8 @@ class DeviceOut(BaseModel):
     last_seen:      Optional[datetime]
     last_seen_unix: Optional[int]
     is_online:      bool
+    is_archived:    bool = False
+    is_deleted:     bool = False
 
     model_config = {"from_attributes": True}
 

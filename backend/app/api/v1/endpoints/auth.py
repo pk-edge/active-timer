@@ -27,7 +27,7 @@ async def enroll_device(body: EnrollRequest, db: AsyncSession = Depends(get_db))
     if not company:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid enrollment token")
 
-    # Upsert by (company_id, hostname)
+    # Upsert by (company_id, hostname).
     result = await db.execute(
         select(Device).where(Device.company_id == company.id, Device.hostname == body.hostname)
     )
@@ -42,10 +42,21 @@ async def enroll_device(body: EnrollRequest, db: AsyncSession = Depends(get_db))
         )
         db.add(device)
         await db.flush()
+    elif device.is_deleted:
+        # Soft-deleted device re-enrolling — restore it as a fresh active device.
+        # (A unique constraint on (company_id, hostname) prevents creating a new row.)
+        device.is_deleted    = False
+        device.is_archived   = False
+        device.is_active     = True
+        device.platform      = body.platform
+        device.agent_version = body.agent_version
     else:
         device.platform      = body.platform
         device.agent_version = body.agent_version
-        device.is_active     = True
+        # Archived devices: refresh the token so the agent has a valid credential,
+        # but do NOT reactivate — admin must explicitly restore from archive.
+        if not device.is_archived:
+            device.is_active = True
 
     token = create_device_token(str(device.id), str(company.id))
     device.jwt_token = token
