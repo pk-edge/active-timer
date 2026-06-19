@@ -287,6 +287,22 @@ async def google_oauth_callback(
         # deactivated/deleted record's identity (it could later be reactivated).
         if not employee.is_active or employee.is_deleted:
             return RedirectResponse(f"{dash}/login?error=account_inactive")
+
+        # Block talent (device-only) accounts — auto-provisioned by enrollment with the
+        # "Talent" system role. They must never reach the dashboard portal.
+        is_talent = (
+            employee.role_obj is not None
+            and getattr(employee.role_obj, "is_system", False)
+            and getattr(employee.role_obj, "name", "") == "Talent"
+        )
+        has_no_portal_role = (
+            employee.role_id is None
+            and employee.role not in ("admin", "manager", "viewer")
+        )
+        if is_talent or has_no_portal_role:
+            log.warning("Blocked portal access for talent/device-only account: %s", email)
+            return RedirectResponse(f"{dash}/login?error=portal_access_restricted")
+
         if employee.google_sub != google_sub:
             employee.google_sub = google_sub
             await db.commit()

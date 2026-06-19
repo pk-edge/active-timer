@@ -172,9 +172,8 @@ def main() -> None:
         t = threading.Thread(target=w.run, name=w.__class__.__name__, daemon=True)
         t.start()
 
-    # 5. First-run only: resolve the employee email (prompt → browser detect).
-    # Must happen on the main thread BEFORE Qt blocks and BEFORE enrollment
-    # starts. Already-enrolled devices skip this entirely.
+    # 5. First-run only: silently detect employee email from browser profiles.
+    # Already-enrolled devices skip this entirely.
     employee_email = None
     if not identity.load().get("device_id"):
         try:

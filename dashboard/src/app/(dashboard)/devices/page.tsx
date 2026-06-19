@@ -107,7 +107,7 @@ export default function DevicesPage() {
   if (isLoading) return <PageSkeleton />;
 
   return (
-    <div>
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">All Devices</h1>
         <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
@@ -172,7 +172,7 @@ export default function DevicesPage() {
 
       {/* Device grid */}
       {view === "all" && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
           {filtered.map(d => (
             <DeviceCard key={d.id} device={d} employees={employees}
                         canAssign={canAssign} onAssigned={() => mutate()} />
@@ -200,7 +200,7 @@ export default function DevicesPage() {
                   {group.devices.length} device{group.devices.length !== 1 ? "s" : ""}
                 </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
                 {group.devices.map(d => (
                   <DeviceCard key={d.id} device={d} employees={employees}
                               canAssign={canAssign} onAssigned={() => mutate()} />

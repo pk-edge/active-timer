@@ -116,7 +116,7 @@ export default function SettingsPage() {
   if (!can("settings", "view")) return <AccessDenied label="Settings" />;
 
   return (
-    <div>
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 mb-1">Settings</h1>
