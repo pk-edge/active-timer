@@ -7,6 +7,8 @@ export interface Device {
   last_seen:      string | null;
   last_seen_unix: number | null;
   is_online:      boolean;
+  is_archived:    boolean;
+  is_deleted:     boolean;
 }
 
 export interface TimelineEvent {
@@ -172,6 +174,28 @@ export interface Installer {
   notes:          string | null;
   is_active:      boolean;
   uploaded_at:    string | null;
+  // Distribution config (auto-update rollout).
+  rollout_percent?:       number;
+  mandatory?:             boolean;
+  channel?:               string;
+  min_supported_version?: string | null;
+  expires_at?:            string | null;
+}
+
+export interface UpdateRun {
+  id:             string;
+  device_id:      string;
+  from_version:   string | null;
+  target_version: string;
+  status:         string;
+  error_code:     string | null;
+  progress:       number;
+  updated_at:     string | null;
+}
+
+export interface UpdateRunsResponse {
+  runs:     UpdateRun[];
+  adoption: Record<string, number>;   // agent_version → device count
 }
 
 export interface InstallerDownload {
