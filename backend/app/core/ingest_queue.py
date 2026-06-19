@@ -221,7 +221,7 @@ class IngestQueue:
                         )
                         await db.commit()
 
-                    broadcaster.publish("devices_updated")
+                    await broadcaster.publish("devices_updated")
 
                     log.debug("Worker %d: flushed %d events, %d devices",
                               worker_id, len(rows), len(device_ids))

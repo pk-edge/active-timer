@@ -25,6 +25,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.api.deps import get_db, get_current_device
 from app.core import broadcaster
+from app.core.app_normalizer import normalize_app_name
 from app.core.ingest_queue import ingest_queue
 from app.db.models import Device, ActivityEvent
 from app.schemas.event import ALLOWED_EVENT_TYPES, IngestRequest, IngestResponse
@@ -64,7 +65,7 @@ async def ingest_events(
             "id":           e.id,
             "device_id":    str(device.id),
             "event_type":   e.event_type,
-            "app_name":     e.app_name,
+            "app_name":     normalize_app_name(e.app_name),
             "window_title": (e.window_title or "")[:500],
             "url":          (e.url or "")[:2000],
             "duration":     e.duration,
@@ -109,4 +110,4 @@ async def _sync_write(rows: list[dict], device_id: str, db: AsyncSession) -> Non
         {"id": device_id},
     )
     await db.commit()
-    broadcaster.publish("devices_updated")
+    await broadcaster.publish("devices_updated")

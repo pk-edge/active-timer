@@ -118,6 +118,90 @@ async def _status_rows(ids, company_id, db: AsyncSession) -> list[dict]:
     return out
 
 
+# ── SSE snapshot cache (fan-out overload protection) ──────────────────────────
+# A device-update event fans out to EVERY open dashboard tab at once. Without
+# coalescing, 1 500 tabs would each run the heavy double-LATERAL status query on
+# every ingest flush and drain the 10-connection HTTP pool. But the overlaid
+# payload is byte-identical for every connection sharing a (company, scope) —
+# 1 500 admins on the company-wide view are ONE scope. So we compute the final
+# SSE payload once per scope per _SNAPSHOT_TTL and let all same-scope tabs read it:
+#   • single-flight lock → a simultaneous wake-up of N same-scope tabs = 1 query
+#   • _snapshot_db_sem   → at most N concurrent SSE queries ever touch the pool,
+#                          so SSE can never starve real user requests
+#   • TTL pruning        → cache stays O(distinct live scopes); no unbounded growth
+# The cache key includes company_id + the exact visible-id set, so a connection
+# only ever reads a payload built for its OWN authorized scope (no leakage).
+_SNAPSHOT_TTL = 1.0           # seconds — realtime freshness, far under the 60-90s cutoff
+_SNAPSHOT_DB_CONCURRENCY = 4  # max concurrent SSE status queries (HTTP pool is 5+5)
+
+_snapshot_cache: dict[tuple, tuple[float, str]] = {}
+_snapshot_locks: dict[tuple, asyncio.Lock] = {}
+_snapshot_db_sem = asyncio.Semaphore(_SNAPSHOT_DB_CONCURRENCY)
+
+
+def _scope_key(ids, company_id) -> tuple:
+    """Hashable cache key. Same authorized view ⇒ same key ⇒ shared payload."""
+    return (str(company_id), "__ALL__" if ids is ALL else frozenset(str(i) for i in ids))
+
+
+def _build_payload(rows: list[dict]) -> str:
+    """Apply the live ingest-cache overlay and serialize. Pure function of `rows`
+    plus the global device_cache, so its output is identical across same-scope tabs."""
+    from app.core.ingest_queue import ingest_queue
+    cache  = ingest_queue.device_cache
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+    for row in rows:
+        cached = cache.get(row["device_id"])
+        if not cached:
+            continue
+        cached_ts = cached.get("last_seen")
+        if cached_ts and cached_ts > cutoff:
+            if cached.get("current_app"):
+                row["current_app"] = cached["current_app"]
+            row["status"] = (
+                "passive" if cached.get("latest_type") in _PASSIVE_EVENTS else "active"
+            )
+    return f"data: {json.dumps(rows)}\n\n"
+
+
+def _prune_snapshot_cache() -> None:
+    """Drop expired entries and their idle locks so the cache can't grow without
+    bound as scopes come and go. Cheap: only runs once the cache is non-trivial."""
+    if len(_snapshot_cache) <= 64:
+        return
+    now = time.monotonic()
+    for k in [k for k, (exp, _) in _snapshot_cache.items() if exp <= now]:
+        _snapshot_cache.pop(k, None)
+        lk = _snapshot_locks.get(k)
+        if lk is not None and not lk.locked():
+            _snapshot_locks.pop(k, None)
+
+
+async def _scoped_status_payload(ids, company_id) -> str:
+    """Return the SSE payload for a scope, cached for _SNAPSHOT_TTL and shared by
+    every connection on the same scope (single-flight + bounded DB concurrency)."""
+    from app.db.base import AsyncSessionLocal
+    key = _scope_key(ids, company_id)
+
+    hit = _snapshot_cache.get(key)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+
+    lock = _snapshot_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        hit = _snapshot_cache.get(key)          # re-check: another tab may have filled it
+        if hit and hit[0] > time.monotonic():
+            return hit[1]
+        async with _snapshot_db_sem:            # cap concurrent SSE queries on the pool
+            async with AsyncSessionLocal() as sess:
+                rows = await _status_rows(ids, company_id, sess)
+        payload = _build_payload(rows)
+        _snapshot_cache[key] = (time.monotonic() + _SNAPSHOT_TTL, payload)
+
+    _prune_snapshot_cache()
+    return payload
+
+
 @router.get("/overview")
 async def overview(
     group_id:   str | None = Query(default=None),
@@ -402,68 +486,39 @@ async def stream(
 
     Industrial-standard pattern:
     - Auth and scope resolved before streaming; DB connection released immediately.
-    - Hard cap: 503 when broadcaster is at MAX_SUBSCRIBERS.
+    - No subscriber cap: events fan out via Redis pub/sub (app/core/broadcaster.py),
+      so this scales across workers/replicas. Connection limits belong at the
+      proxy/uvicorn/OS layer, not here.
     - Initial snapshot sent on connect so the client never shows a blank state.
-    - Burst coalescing: rapid ingest flushes are merged so the DB query runs at
-      most once every MIN_PUSH_INTERVAL seconds per subscriber.
+    - Fan-out safe: the status query is computed once per (company, scope) and
+      shared by all same-scope tabs (single-flight + bounded DB concurrency), so
+      N open dashboards do NOT become N queries per event.
     - 25 s heartbeat keeps proxies and load-balancers from killing idle connections.
     - CancelledError caught explicitly so client disconnect is always clean.
     """
     from app.core import broadcaster
-    from app.core.ingest_queue import ingest_queue
-    from app.db.base import AsyncSessionLocal
 
     ids        = await _resolve_ids(user, group_id, db)
     company_id = user.company_id
 
-    # Reject early (before releasing DB connection) if broadcaster is at capacity.
-    if broadcaster.subscriber_count() >= broadcaster.MAX_SUBSCRIBERS:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="SSE capacity reached, try again later",
-        )
-
     # CRITICAL: release the request's pooled connection NOW. This response
     # streams for the life of the dashboard tab — holding the dependency
     # session would pin one connection per viewer and drain the pool (the
-    # "QueuePool limit reached" production jam). Payload queries below use
-    # their own short-lived sessions.
+    # "QueuePool limit reached" production jam). The shared payload cache uses
+    # its own short-lived sessions.
     await db.close()
 
     async def _payload() -> str:
-        async with AsyncSessionLocal() as sess:
-            rows = await _status_rows(ids, company_id, sess)
+        # Scope-keyed, single-flight cache: every same-scope tab that wakes on
+        # this event reuses ONE query+build instead of each hammering the pool.
+        return await _scoped_status_payload(ids, company_id)
 
-        cache  = ingest_queue.device_cache
-        now    = datetime.now(timezone.utc)
-        cutoff = now - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
-
-        for row in rows:
-            cached = cache.get(row["device_id"])
-            if not cached:
-                continue
-            cached_ts = cached.get("last_seen")
-            if cached_ts and cached_ts > cutoff:
-                if cached.get("current_app"):
-                    row["current_app"] = cached["current_app"]
-                row["status"] = (
-                    "passive" if cached.get("latest_type") in _PASSIVE_EVENTS
-                    else "active"
-                )
-
-        return f"data: {json.dumps(rows)}\n\n"
-
-    # Each push re-runs the device-status query, so cap the per-subscriber rate:
-    # under sustained ingest a dashboard tab refreshes at most every MIN_PUSH_INTERVAL
-    # instead of once per worker batch flush (which can be several times a second).
+    # Per-subscriber push throttle. The heavy DB work is already coalesced by the
+    # shared scope cache; this just bounds how often each tab re-renders.
     MIN_PUSH_INTERVAL = 2.0
 
     async def _event_generator():
         q = broadcaster.subscribe()
-        if q is None:
-            # Capacity was grabbed between the check above and subscribe().
-            yield "event: error\ndata: capacity\n\n"
-            return
         try:
             yield await _payload()
             last_push = time.monotonic()

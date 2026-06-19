@@ -48,6 +48,20 @@ def _is_media_or_meeting(shared: dict) -> bool:
     return False
 
 
+def _should_mark_idle(idle_secs: float, exempt: bool, idle_threshold: int) -> bool:
+    """Decide whether to transition into idle.
+
+    - Below the idle threshold → never idle.
+    - Past the threshold and NOT in a meeting/media context → idle.
+    - In a meeting/media context → NEVER idle (the user may be watching/listening,
+      so live meeting/video time is never cut by inactivity). A walk-away during a
+      meeting is bounded by screen lock / display sleep instead — by design.
+    """
+    if idle_secs < idle_threshold:
+        return False
+    return not exempt
+
+
 class InputMonitor:
     def __init__(self, shared: dict):
         self._db      = shared["db"]
@@ -101,11 +115,12 @@ class InputMonitor:
                     kCGAnyInputEventType,
                 )
                 with self._lock:
-                    if not self._is_idle and idle_secs >= Config.IDLE_THRESHOLD_SECS:
-                        # Only go idle if NOT in an active media/meeting context
-                        if not _is_media_or_meeting(self._shared):
-                            self._set_idle(True, int(idle_secs))
-                            log.debug("Idle started (%.0fs without input)", idle_secs)
+                    if not self._is_idle and _should_mark_idle(
+                        idle_secs, _is_media_or_meeting(self._shared),
+                        Config.IDLE_THRESHOLD_SECS,
+                    ):
+                        self._set_idle(True, int(idle_secs))
+                        log.debug("Idle started (%.0fs without input)", idle_secs)
                     elif self._is_idle and idle_secs < Config.IDLE_THRESHOLD_SECS:
                         self._set_idle(False)
                         log.debug("Idle ended")
@@ -157,9 +172,11 @@ class InputMonitor:
             try:
                 with self._lock:
                     elapsed = time.time() - self._last_input
-                    if not self._is_idle and elapsed >= Config.IDLE_THRESHOLD_SECS:
-                        if not _is_media_or_meeting(self._shared):
-                            self._set_idle(True, int(elapsed))
-                            log.debug("Idle started (%.0fs without input)", elapsed)
+                    if not self._is_idle and _should_mark_idle(
+                        elapsed, _is_media_or_meeting(self._shared),
+                        Config.IDLE_THRESHOLD_SECS,
+                    ):
+                        self._set_idle(True, int(elapsed))
+                        log.debug("Idle started (%.0fs without input)", elapsed)
             except Exception as e:
                 log.warning("Idle check failed — will retry: %s", e)
