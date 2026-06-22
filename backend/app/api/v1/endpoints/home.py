@@ -407,6 +407,147 @@ async def web_usage(
     return [{"host": r.host, "visits": int(r.visits or 0)} for r in res.fetchall()]
 
 
+# ── Meeting logs ──────────────────────────────────────────────────────────────
+# Apps that represent the lock/login screen — never count toward meeting active
+# time (they emit window_change while the screen is locked).
+_MEETING_EXCLUDED_APPS = frozenset({
+    "loginwindow", "ScreenSaverEngine", "System Idle Process",
+    "LockApp", "LogonUI", "Idle", "screensaver",
+})
+
+
+def _pair_meeting_sessions(events, now_ts):
+    """Pair an ordered stream of meeting_start/meeting_end events into sessions.
+
+    events: iterable of (device_id, event_type, platform, title, ts) ordered by
+            (device_id, ts). Pure — robust to a missing start or end:
+      • start while one is already open → the open one closes at the new start,
+      • end with nothing open → ignored,
+      • still-open at the end → marked ongoing and closed at now_ts.
+    """
+    sessions = []
+    open_by_dev = {}
+    for dev, etype, platform, title, ts in events:
+        if etype == "meeting_start":
+            prev = open_by_dev.get(dev)
+            if prev is not None:
+                prev["end_ts"] = ts
+                sessions.append(prev)
+            open_by_dev[dev] = {
+                "device_id": dev, "platform": platform or "Meeting",
+                "title": title or "", "start_ts": ts, "end_ts": None, "ongoing": False,
+            }
+        else:  # meeting_end
+            prev = open_by_dev.pop(dev, None)
+            if prev is not None:
+                prev["end_ts"] = ts
+                sessions.append(prev)
+    for prev in open_by_dev.values():
+        prev["end_ts"] = now_ts
+        prev["ongoing"] = True
+        sessions.append(prev)
+    return sessions
+
+
+def _enrich_sessions(sessions, window_changes):
+    """Compute each session's active seconds + apps-used from window_change slices
+    overlapping its [start_ts, end_ts] (same device). Pure. Idle/lock contribute
+    nothing because they emit no window_change; locked-app slices are excluded."""
+    for s in sessions:
+        secs, apps = 0, {}
+        for dev, app, dur, ts in window_changes:
+            if dev != s["device_id"]:
+                continue
+            if not (s["start_ts"] <= ts <= s["end_ts"]):
+                continue
+            if not app or app in _MEETING_EXCLUDED_APPS:
+                continue
+            secs += dur
+            apps[app] = apps.get(app, 0) + dur
+        s["active_secs"] = int(secs)
+        s["duration_secs"] = int(s["end_ts"] - s["start_ts"])
+        s["apps"] = sorted(
+            ({"app_name": a, "seconds": int(d)} for a, d in apps.items()),
+            key=lambda x: -x["seconds"],
+        )[:5]
+    return sessions
+
+
+@router.get("/meetings")
+async def meetings(
+    device_id:   str | None = Query(default=None, description="Restrict to one device"),
+    employee_id: str | None = Query(default=None, description="Restrict to one user's devices"),
+    group_id:    str | None = Query(default=None),
+    days:        int = Query(default=1, ge=1, le=31),
+    user: Employee = Depends(require("home", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Meeting sessions for the visible devices over the last `days`.
+
+    A session is bounded by a meeting_start/meeting_end pair; its active time is
+    the window_change activity within the session (so other apps used during the
+    meeting count, while idle/locked time does not). Trivial sessions (<30s active)
+    are dropped as noise. Scoping mirrors the other home endpoints — company +
+    the caller's visible devices, optionally narrowed to one device or employee.
+    """
+    ids = await _resolve_ids(user, group_id, db)
+    if ids is not ALL and not ids:
+        return {"total_active_secs": 0, "count": 0, "sessions": []}
+
+    frag, params = _clause(ids, "ae.device_id")
+    params.update({"company_id": str(user.company_id), "days": days})
+    extra = ""
+    if device_id:
+        extra += " AND ae.device_id = :only_device"
+        params["only_device"] = device_id
+    if employee_id:
+        extra += " AND d.employee_id = :only_emp"
+        params["only_emp"] = employee_id
+
+    mres = await db.execute(
+        text(f"""
+            SELECT ae.device_id::text AS device_id, ae.event_type,
+                   ae.app_name, ae.window_title,
+                   EXTRACT(EPOCH FROM ae.timestamp)::bigint AS ts
+            FROM activity_events ae JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type IN ('meeting_start', 'meeting_end')
+              AND ae.timestamp >= NOW() - make_interval(days => :days){frag}{extra}
+            ORDER BY ae.device_id, ae.timestamp ASC
+        """),
+        params,
+    )
+    mevents = [(r.device_id, r.event_type, r.app_name, r.window_title, int(r.ts))
+               for r in mres.fetchall()]
+    if not mevents:
+        return {"total_active_secs": 0, "count": 0, "sessions": []}
+
+    wres = await db.execute(
+        text(f"""
+            SELECT ae.device_id::text AS device_id, ae.app_name, ae.duration,
+                   EXTRACT(EPOCH FROM ae.timestamp)::bigint AS ts
+            FROM activity_events ae JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'window_change' AND ae.app_name IS NOT NULL
+              AND ae.timestamp >= NOW() - make_interval(days => :days){frag}{extra}
+        """),
+        params,
+    )
+    wchanges = [(r.device_id, r.app_name, int(r.duration or 0), int(r.ts))
+                for r in wres.fetchall()]
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    sessions = _enrich_sessions(_pair_meeting_sessions(mevents, now_ts), wchanges)
+    sessions = [s for s in sessions if s["active_secs"] >= 30 or s["ongoing"]]
+    sessions.sort(key=lambda s: s["start_ts"], reverse=True)
+
+    return {
+        "total_active_secs": int(sum(s["active_secs"] for s in sessions)),
+        "count": len(sessions),
+        "sessions": sessions,
+    }
+
+
 @router.get("/my-stats")
 async def my_stats(
     user: Employee = Depends(get_current_user),
@@ -554,6 +695,12 @@ async def stream(
 
 @router.get("/device-today-active")
 async def device_today_active(
+    since: int | None = Query(
+        default=None,
+        description="Unix epoch (UTC seconds) of the DEVICE's local midnight. The "
+                    "agent sends this so 'today' matches the user's local day exactly, "
+                    "independent of the server/DB timezone.",
+    ),
     device: Device = Depends(get_current_device),
     db: AsyncSession = Depends(get_db),
 ):
@@ -563,9 +710,28 @@ async def device_today_active(
 
     The agent calls this on startup so the widget baseline always matches
     the portal — no drift from local daily_totals accumulation errors.
+
+    Day boundary: when the agent supplies `since` (its local midnight as an
+    absolute unix timestamp) we filter `timestamp >= to_timestamp(since)`, which
+    is unambiguous and matches the device's local day. The previous boundary
+    (`date_trunc('day', NOW() AT TIME ZONE 'UTC')`) both (a) used the UTC day
+    rather than the device's local day, and (b) re-applied the DB session
+    timezone on comparison — on a non-UTC production DB that shifted the boundary
+    by the session offset (e.g. +1h on a UTC+1 server), inflating "today" and
+    making the agent jump forward on restart. `to_timestamp` avoids both.
+    The no-`since` fallback computes a correct UTC-midnight timestamptz.
     """
+    if since is not None:
+        boundary_sql = "ae.timestamp >= to_timestamp(:since)"
+        params = {"did": str(device.id), "since": int(since)}
+    else:
+        # Backward-compatible fallback (older agents): correct UTC-midnight,
+        # session-timezone-independent.
+        boundary_sql = "ae.timestamp >= (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"
+        params = {"did": str(device.id)}
+
     result = await db.execute(
-        text("""
+        text(f"""
             SELECT COALESCE(SUM(
                 CASE
                     WHEN ae.event_type = 'window_change'
@@ -579,9 +745,9 @@ async def device_today_active(
             ), 0) AS active_secs
             FROM activity_events ae
             WHERE ae.device_id = :did
-              AND ae.timestamp >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+              AND {boundary_sql}
         """),
-        {"did": str(device.id)},
+        params,
     )
     row = result.fetchone()
     return {"active_seconds_today": int(row.active_secs or 0)}

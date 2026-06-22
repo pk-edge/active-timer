@@ -45,7 +45,7 @@ export function fmtDur(secs: number): string {
 export function ProdIcon({ v }: { v: string }) {
   if (v === "productive")   return <CheckCircle2 size={15} className="text-green-500 shrink-0" />;
   if (v === "unproductive") return <MinusCircle  size={15} className="text-red-400  shrink-0" />;
-  return <Circle size={15} className="text-gray-300 shrink-0" />;
+  return <Circle size={15} className="text-gray-500 shrink-0" />;
 }
 
 // ── Smart search bar ──────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ export function SmartSearchBar({ value, onChange, placeholder }: SearchBarProps)
 
   return (
     <div className="relative flex-1">
-      <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+      <Search size={15} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
       <input
         ref={ref}
         value={value}
@@ -82,12 +82,12 @@ export function SmartSearchBar({ value, onChange, placeholder }: SearchBarProps)
       />
       {value && (
         <button onClick={() => onChange("")}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600">
           <X size={14} />
         </button>
       )}
       {!value && (
-        <kbd className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-gray-300 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200 font-mono">
+        <kbd className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded border border-gray-200 font-mono">
           /
         </kbd>
       )}
@@ -131,7 +131,7 @@ export function FilterBar({
                   className={`px-4 py-1.5 text-sm font-medium transition ${
                     (lbl === "Summary") === summaryMode
                       ? "bg-white text-gray-900 shadow-sm"
-                      : "text-gray-500 hover:text-gray-700"
+                      : "text-gray-600 hover:text-gray-700"
                   }`}>
             {lbl}
           </button>
@@ -148,7 +148,7 @@ export function FilterBar({
           <option value="">All Teams</option>
           {(groups ?? []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
-        <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+        <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
       </div>
 
       {/* User */}
@@ -160,7 +160,7 @@ export function FilterBar({
             <option key={u.id} value={u.id}>{u.name}</option>
           ))}
         </select>
-        <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+        <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
       </div>
 
       {/* Productivity */}
@@ -170,7 +170,7 @@ export function FilterBar({
                   className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm">
             {PROD_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
         </div>
       )}
     </div>
@@ -186,16 +186,16 @@ export function QuickStats({ stats }: { stats: { label: string; value: string; c
       <button onClick={() => setOpen(x => !x)}
               className="w-full flex items-center justify-between px-5 py-3 hover:bg-gray-50 transition">
         <p className="text-sm font-semibold text-gray-700 flex items-center gap-2">
-          <BarChart2 size={15} className="text-gray-400" /> Quick Stats
+          <BarChart2 size={15} className="text-gray-600" /> Quick Stats
         </p>
-        <ChevronDown size={14} className={`text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} />
+        <ChevronDown size={14} className={`text-gray-600 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
         <div className="px-5 pb-4 pt-1 grid grid-cols-2 sm:grid-cols-4 gap-4 border-t border-gray-100">
           {stats.map(s => (
             <div key={s.label}>
               <p className={`text-xl font-bold leading-none ${s.color ?? "text-gray-900"}`}>{s.value}</p>
-              <p className="text-xs text-gray-400 mt-1">{s.label}</p>
+              <p className="text-xs text-gray-600 mt-1">{s.label}</p>
             </div>
           ))}
         </div>
@@ -216,7 +216,7 @@ export function DetailTabs({
                 className={`px-4 py-2.5 text-sm font-medium transition border-b-2 -mb-px ${
                   active === t
                     ? "border-brand-600 text-brand-600"
-                    : "border-transparent text-gray-500 hover:text-gray-700"
+                    : "border-transparent text-gray-600 hover:text-gray-700"
                 }`}>
           {t}
         </button>
@@ -235,11 +235,11 @@ export function DurationRow({
       <div className="flex items-center justify-between mb-1 gap-2">
         <div className="min-w-0 flex-1">
           <p className="text-sm text-gray-800 truncate" title={label}>{label}</p>
-          {sub && <p className="text-xs text-gray-400 truncate">{sub}</p>}
+          {sub && <p className="text-xs text-gray-600 truncate">{sub}</p>}
         </div>
         <div className="flex items-center gap-3 shrink-0">
           <span className="text-sm text-gray-700 font-medium tabular-nums">{fmtDur(duration_secs)}</span>
-          <span className="text-xs text-gray-400 w-8 text-right">{pct.toFixed(1)}%</span>
+          <span className="text-xs text-gray-600 w-8 text-right">{pct.toFixed(1)}%</span>
         </div>
       </div>
       <div className="h-1 bg-gray-100 rounded-full overflow-hidden">

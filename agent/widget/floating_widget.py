@@ -7,6 +7,7 @@ Progress bar, green accents, muted labels — all from the SVG palette.
 """
 
 import json
+import logging
 import sys
 import time
 import subprocess
@@ -32,6 +33,8 @@ H_CARD = 140
 W      = W_CARD + PAD * 2   # 294
 H      = H_CARD + PAD * 2   # 164
 RADIUS = 16
+
+log = logging.getLogger("floating_widget")
 
 DAILY_GOAL_SECS = 8 * 3600
 
@@ -169,11 +172,34 @@ class FloatingWidget(QWidget):
             app.commitDataRequest.connect(self._on_session_end)
         except Exception:
             pass
-        # macOS: a shutdown/restart arrives as a Quit event on the application.
+        # macOS: QEvent.Quit is NOT reliably delivered to the app before the
+        # window close during a real shutdown (applicationShouldTerminate sends
+        # close events directly), so this filter alone let the close be vetoed
+        # and the OS reported the agent as preventing shutdown. The reliable
+        # signal is NSWorkspace's power-off notification (logout/restart/shutdown).
         app.installEventFilter(self)
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSWorkspace
+                nc = NSWorkspace.sharedWorkspace().notificationCenter()
+                # Keep the returned token on self so the observer isn't GC'd.
+                self._poweroff_observer = nc.addObserverForName_object_queue_usingBlock_(
+                    "NSWorkspaceWillPowerOffNotification", None, None,
+                    lambda _n: self._on_macos_power_off(),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("macOS power-off observer setup failed: %s", e)
 
     def _on_session_end(self, *_a):
         self._allow_close = True
+
+    def _on_macos_power_off(self, *_a):
+        # Logout / restart / shutdown requested: lift the close veto and quit
+        # promptly so the agent never blocks the power action. aboutToQuit runs
+        # the final daily flush + session end; autostart relaunches on next login.
+        log.info("macOS power-off/logout detected — quitting agent cleanly")
+        self._allow_close = True
+        QApplication.quit()
 
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.Type.Quit:

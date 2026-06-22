@@ -49,8 +49,8 @@ function NotifItem({ n, onRead }: { n: Notification; onRead: () => void }) {
         <p className={`text-sm leading-snug ${!n.is_read ? "font-semibold text-gray-900" : "font-medium text-gray-700"}`}>
           {n.title}
         </p>
-        <p className="text-xs text-gray-500 mt-0.5 truncate">{n.body}</p>
-        <p className={`text-[11px] mt-1.5 font-medium ${!n.is_read ? "text-brand-500" : "text-gray-400"}`}>
+        <p className="text-xs text-gray-600 mt-0.5 truncate">{n.body}</p>
+        <p className={`text-[11px] mt-1.5 font-medium ${!n.is_read ? "text-brand-500" : "text-gray-600"}`}>
           {timeAgo(n.created_at)}
         </p>
       </div>
@@ -117,7 +117,7 @@ export default function NotificationBell() {
       {/* Bell button */}
       <button
         onClick={() => setOpen(o => !o)}
-        className={`relative p-2.5 rounded-xl text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition-colors ${shake ? "animate-[wiggle_0.6s_ease-in-out]" : ""}`}
+        className={`relative p-2.5 rounded-xl text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors ${shake ? "animate-[wiggle_0.6s_ease-in-out]" : ""}`}
         aria-label="Notifications"
       >
         <Bell size={20} className={open ? "text-brand-600" : ""} />
@@ -159,7 +159,7 @@ export default function NotificationBell() {
             )}
             <button
               onClick={() => setOpen(false)}
-              className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition"
+              className="p-1.5 text-gray-600 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition"
             >
               <X size={14} />
             </button>
@@ -171,17 +171,17 @@ export default function NotificationBell() {
           {notifications.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-14 px-8 text-center">
               <div className="w-16 h-16 bg-gradient-to-br from-gray-100 to-gray-200 rounded-2xl flex items-center justify-center mb-4 shadow-inner">
-                <Inbox size={28} className="text-gray-400" />
+                <Inbox size={28} className="text-gray-600" />
               </div>
               <p className="text-sm font-semibold text-gray-700">All caught up!</p>
-              <p className="text-xs text-gray-400 mt-1.5 leading-relaxed">
+              <p className="text-xs text-gray-600 mt-1.5 leading-relaxed">
                 No pending approvals or alerts right now.
               </p>
             </div>
           ) : (
             <>
               {notifications.some(n => !n.is_read) && (
-                <p className="px-5 pt-3 pb-1 text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                <p className="px-5 pt-3 pb-1 text-[10px] font-bold uppercase tracking-widest text-gray-600">
                   New
                 </p>
               )}
@@ -190,7 +190,7 @@ export default function NotificationBell() {
               ))}
 
               {notifications.some(n => n.is_read) && (
-                <p className="px-5 pt-3 pb-1 text-[10px] font-bold uppercase tracking-widest text-gray-400">
+                <p className="px-5 pt-3 pb-1 text-[10px] font-bold uppercase tracking-widest text-gray-600">
                   Earlier
                 </p>
               )}

@@ -77,7 +77,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
   if (!insights) {
     return (
       <div className="bg-white border border-gray-200 rounded-xl p-4 text-center shadow-sm">
-        <p className="text-xs text-gray-400">No activity data for this date.</p>
+        <p className="text-xs text-gray-600">No activity data for this date.</p>
       </div>
     );
   }
@@ -87,7 +87,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
 
       {/* ── Quick stats row ── */}
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3">
-        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Usage Breakdown</p>
+        <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Usage Breakdown</p>
         <div className="grid grid-cols-2 gap-2">
           {/* Active */}
           <div className="bg-green-50 rounded-lg px-3 py-2">
@@ -120,7 +120,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
         {/* Focus ratio bar */}
         {activeSecsToday + idleSecsToday > 0 && (
           <div className="mt-3">
-            <div className="flex justify-between text-xs text-gray-400 mb-1">
+            <div className="flex justify-between text-xs text-gray-600 mb-1">
               <span className="flex items-center gap-1"><TrendingUp size={10} /> Focus ratio</span>
               <span className="font-semibold text-gray-700">{focusPct}%</span>
             </div>
@@ -133,7 +133,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
 
       {/* ── Peak hour + top domain ── */}
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3">
-        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Highlights</p>
+        <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Highlights</p>
         <div className="space-y-2">
           {insights.peakHour !== null && (
             <div className="flex items-center gap-2.5">
@@ -146,7 +146,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
                   {" – "}
                   {(insights.peakHour + 1) % 12 || 12}:00 {(insights.peakHour + 1) < 12 ? "AM" : "PM"}
                 </p>
-                <p className="text-xs text-gray-400">Peak hour</p>
+                <p className="text-xs text-gray-600">Peak hour</p>
               </div>
             </div>
           )}
@@ -158,7 +158,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
               </div>
               <div className="min-w-0">
                 <p className="text-xs font-semibold text-gray-800 truncate">{insights.topDomain[0]}</p>
-                <p className="text-xs text-gray-400">Top site · {insights.topDomain[1]} visits</p>
+                <p className="text-xs text-gray-600">Top site · {insights.topDomain[1]} visits</p>
               </div>
             </div>
           )}
@@ -172,7 +172,7 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
                 <p className="text-xs font-semibold text-gray-800">
                   {insights.lockCount} lock{insights.lockCount > 1 ? "s" : ""}
                 </p>
-                <p className="text-xs text-gray-400">Screen locked today</p>
+                <p className="text-xs text-gray-600">Screen locked today</p>
               </div>
             </div>
           )}
@@ -183,9 +183,9 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
       {insights.topApps.length > 0 && (
         <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3">
           <div className="flex items-center justify-between mb-3">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">
               Applications
-              <span className="ml-1.5 font-normal normal-case text-gray-300">
+              <span className="ml-1.5 font-normal normal-case text-gray-500">
                 ({insights.topApps.length})
               </span>
             </p>
@@ -210,10 +210,10 @@ export default function InsightsPanel({ events, activeSecsToday, idleSecsToday }
                 <div key={app}>
                   <div className="flex items-center justify-between mb-1.5">
                     <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-xs font-bold text-gray-300 w-3.5 shrink-0">{i + 1}</span>
+                      <span className="text-xs font-bold text-gray-500 w-3.5 shrink-0">{i + 1}</span>
                       <span className="text-xs font-semibold text-gray-700 truncate">{app}</span>
                     </div>
-                    <span className="text-xs text-gray-400 shrink-0 ml-1">{fmtSeconds(secs)}</span>
+                    <span className="text-xs text-gray-600 shrink-0 ml-1">{fmtSeconds(secs)}</span>
                   </div>
                   <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
                     <div className="h-full rounded-full bg-brand-400 transition-all" style={{ width: `${pct}%` }} />

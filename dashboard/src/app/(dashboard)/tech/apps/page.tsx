@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { format, subDays } from "date-fns";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
@@ -7,7 +8,6 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recha
 import { getAppUsage, getAppUsageDetail } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
-import RefreshButton from "@/components/RefreshButton";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, ProdIcon, fmtDur, exportCsv,
@@ -38,7 +38,7 @@ function DetailPanel({
           </div>
           <p className="font-semibold text-gray-900 text-sm truncate flex-1">{item.app_name}</p>
         </div>
-        <p className="text-xs text-gray-400">
+        <p className="text-xs text-gray-600">
           {fmtDur(item.duration_secs)} · {item.user_count} {item.user_count === 1 ? "user" : "users"} · {item.pct.toFixed(1)}%
         </p>
         {item.category_name && (
@@ -57,11 +57,11 @@ function DetailPanel({
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {isLoading ? (
-          <p className="text-sm text-gray-400 py-8 text-center">Loading…</p>
+          <p className="text-sm text-gray-600 py-8 text-center">Loading…</p>
         ) : tab === "Titles" ? (
           <>
             {(data?.titles ?? []).length === 0
-              ? <p className="text-sm text-gray-400 py-8 text-center">No window titles recorded.</p>
+              ? <p className="text-sm text-gray-600 py-8 text-center">No window titles recorded.</p>
               : (data?.titles ?? []).map(t => (
                 <DurationRow key={t.title} label={t.title}
                              duration_secs={t.duration_secs} pct={t.pct} color={item.color} />
@@ -70,7 +70,7 @@ function DetailPanel({
         ) : tab === "Users" ? (
           <>
             {(data?.users ?? []).length === 0
-              ? <p className="text-sm text-gray-400 py-8 text-center">No users.</p>
+              ? <p className="text-sm text-gray-600 py-8 text-center">No users.</p>
               : (data?.users ?? []).map(u => (
                 <DurationRow key={u.name} label={u.name}
                              duration_secs={u.duration_secs} pct={u.pct} color={item.color} />
@@ -79,7 +79,7 @@ function DetailPanel({
         ) : (
           <div className="pt-2">
             {(data?.usage ?? []).length === 0
-              ? <p className="text-sm text-gray-400 py-8 text-center">No data.</p>
+              ? <p className="text-sm text-gray-600 py-8 text-center">No data.</p>
               : (
                 <ResponsiveContainer width="100%" height={220}>
                   <BarChart data={data?.usage ?? []} barCategoryGap="35%">
@@ -113,7 +113,7 @@ export default function AppUsagePage() {
   const [summaryMode,  setSummaryMode]  = useState(true);
   const [selected,     setSelected]     = useState<AppUsageItem | null>(null);
 
-  const { data, mutate, isLoading } = useSWR(
+  const { data, isLoading } = useSWR(
     ["app-usage", dateRange.since, dateRange.until, productivity, groupId, employeeId],
     () => getAppUsage(dateRange.since, dateRange.until, productivity || undefined, groupId || undefined, employeeId || undefined),
   );
@@ -136,7 +136,7 @@ export default function AppUsagePage() {
     );
   }
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("tech", "view")) return <AccessDenied label="Application Usage" />;
 
   const stats = [
@@ -152,10 +152,9 @@ export default function AppUsagePage() {
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Application Usage</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Desktop app activity from all devices</p>
+          <p className="text-sm text-gray-600 mt-0.5">Desktop app activity from all devices</p>
         </div>
         <div className="flex items-center gap-2">
-          <RefreshButton onRefresh={() => mutate()} />
           <button onClick={doExport}
                   className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm transition">
             <Download size={13} /> Export
@@ -192,17 +191,17 @@ export default function AppUsagePage() {
         }`}>
           <div className="grid grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_120px_60px_32px] gap-2 px-3 sm:px-4 py-2.5 bg-gray-50 border-b border-gray-200 shrink-0">
             <div />
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Application</p>
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Duration</p>
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide text-right">%</p>
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Application</p>
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Duration</p>
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide text-right">%</p>
             <div />
           </div>
 
           <div className="flex-1 overflow-y-auto min-h-0">
             {isLoading ? (
-              <p className="text-sm text-gray-400 py-12 text-center animate-pulse">Loading…</p>
+              <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
             ) : filtered.length === 0 ? (
-              <p className="text-sm text-gray-400 py-12 text-center">No applications found.</p>
+              <p className="text-sm text-gray-600 py-12 text-center">No applications found.</p>
             ) : filtered.map(item => (
               <button
                 key={item.app_name}
@@ -219,8 +218,8 @@ export default function AppUsagePage() {
                   )}
                 </div>
                 <p className="text-sm text-gray-700 tabular-nums self-center">{fmtDur(item.duration_secs)}</p>
-                <p className="text-sm text-gray-500 tabular-nums text-right self-center">{item.pct.toFixed(1)}%</p>
-                <MoreHorizontal size={14} className="text-gray-300 self-center" />
+                <p className="text-sm text-gray-600 tabular-nums text-right self-center">{item.pct.toFixed(1)}%</p>
+                <MoreHorizontal size={14} className="text-gray-500 self-center" />
               </button>
             ))}
           </div>
@@ -241,7 +240,7 @@ export default function AppUsagePage() {
       </div>
 
       {!selected && filtered.length > 0 && (
-        <p className="text-xs text-gray-400 text-center mt-2 shrink-0">
+        <p className="text-xs text-gray-600 text-center mt-2 shrink-0">
           Tap an application to see details
         </p>
       )}

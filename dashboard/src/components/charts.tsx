@@ -10,10 +10,10 @@ export function AccessDenied({ label = "this page" }: { label?: string }) {
   return (
     <div className="flex flex-col items-center justify-center h-full text-center">
       <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-        <Lock size={20} className="text-gray-400" />
+        <Lock size={20} className="text-gray-600" />
       </div>
       <p className="text-gray-700 font-medium">No access</p>
-      <p className="text-gray-400 text-sm mt-1">You don&apos;t have permission to view {label}.</p>
+      <p className="text-gray-600 text-sm mt-1">You don&apos;t have permission to view {label}.</p>
     </div>
   );
 }
@@ -45,7 +45,7 @@ export function StatusDonut({
       </ResponsiveContainer>
       <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
         <span className="text-3xl font-bold text-gray-900">{pctActive}%</span>
-        <span className="text-xs text-gray-400">active now</span>
+        <span className="text-xs text-gray-600">active now</span>
       </div>
     </div>
   );
@@ -53,7 +53,7 @@ export function StatusDonut({
 
 export function ActivityTrend({ data }: { data: { date: string; active_seconds: number }[] }) {
   if (!data.length) {
-    return <div className="h-[180px] flex items-center justify-center text-sm text-gray-400">No activity in this period.</div>;
+    return <div className="h-[180px] flex items-center justify-center text-sm text-gray-600">No activity in this period.</div>;
   }
   return (
     <ResponsiveContainer width="100%" height={180}>
@@ -77,7 +77,7 @@ export function UsagePie({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 }: { items: any[]; labelKey: string; valueKey: string; format?: (v: number) => string }) {
   if (!items.length) {
-    return <div className="h-[240px] flex items-center justify-center text-sm text-gray-400">No data yet.</div>;
+    return <div className="h-[240px] flex items-center justify-center text-sm text-gray-600">No data yet.</div>;
   }
   const data = items.map(it => ({ name: String(it[labelKey]), value: Number(it[valueKey]) }));
   return (
@@ -96,7 +96,7 @@ export function UsagePie({
           <div key={d.name} className="flex items-center gap-2 text-xs">
             <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
             <span className="text-gray-600 truncate flex-1">{d.name}</span>
-            <span className="text-gray-400 shrink-0">{fmt ? fmt(d.value) : d.value}</span>
+            <span className="text-gray-600 shrink-0">{fmt ? fmt(d.value) : d.value}</span>
           </div>
         ))}
       </div>

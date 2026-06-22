@@ -51,7 +51,7 @@ export default function RegisterPage() {
             <div className="text-center">
               <CheckCircle2 size={40} className="mx-auto mb-3 text-green-500" />
               <h1 className="text-lg font-semibold text-gray-900 mb-2">Request submitted!</h1>
-              <p className="text-sm text-gray-500 mb-5">
+              <p className="text-sm text-gray-600 mb-5">
                 An administrator will review your account. You&apos;ll be able to sign in once approved.
               </p>
               <Link href="/login"
@@ -110,7 +110,7 @@ export default function RegisterPage() {
                 </button>
               </form>
 
-              <p className="text-center text-sm text-gray-500 mt-5">
+              <p className="text-center text-sm text-gray-600 mt-5">
                 Already have an account?{" "}
                 <Link href="/login" className="text-brand-600 hover:text-brand-700 font-medium">Sign in</Link>
               </p>

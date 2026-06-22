@@ -9,6 +9,7 @@ import { useAuth } from "@/hooks/useAuth";
 import DailyChart       from "./_components/DailyChart";
 import ActivityTimeline from "./_components/ActivityTimeline";
 import InsightsPanel    from "./_components/InsightsPanel";
+import MeetingsCard     from "@/components/MeetingsCard";
 import type { TimelineEvent, DailyStat, Device } from "@/types";
 
 export default function DevicePage({ params }: { params: Promise<{ id: string }> }) {
@@ -70,7 +71,7 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
       {/* ── Back link ── */}
       <Link
         href="/"
-        className="inline-flex items-center gap-1.5 text-gray-400 text-sm mb-3 hover:text-gray-700 transition w-fit"
+        className="inline-flex items-center gap-1.5 text-gray-600 text-sm mb-3 hover:text-gray-700 transition w-fit"
       >
         <ArrowLeft size={13} /> All devices
       </Link>
@@ -84,35 +85,35 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
           </h1>
           <div className="flex items-center gap-3 mt-1 flex-wrap">
             {device?.employee_name && (
-              <span className="flex items-center gap-1 text-xs text-gray-500">
+              <span className="flex items-center gap-1 text-xs text-gray-600">
                 <User size={11} />
                 {device.employee_name}
               </span>
             )}
             {device?.platform && (
-              <span className="text-xs text-gray-400 capitalize bg-gray-100 px-2 py-0.5 rounded-full">
+              <span className="text-xs text-gray-600 capitalize bg-gray-100 px-2 py-0.5 rounded-full">
                 {device.platform}
               </span>
             )}
             <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
               device?.is_online
                 ? "bg-green-50 text-green-600"
-                : "bg-gray-100 text-gray-500"
+                : "bg-gray-100 text-gray-600"
             }`}>
               {device?.is_online ? "● Online" : "○ Offline"}
             </span>
           </div>
           <p className="text-sm mt-1.5">
-            <span className="text-gray-500">Active on {selDate}:</span>{" "}
+            <span className="text-gray-600">Active on {selDate}:</span>{" "}
             <span className="text-green-600 font-bold">{fmtSeconds(activeSecsToday)}</span>
             {idleSecsToday > 0 && (
-              <span className="text-gray-400 text-xs ml-2">· {fmtSeconds(idleSecsToday)} idle</span>
+              <span className="text-gray-600 text-xs ml-2">· {fmtSeconds(idleSecsToday)} idle</span>
             )}
           </p>
         </div>
 
         <div className="flex flex-col gap-1 items-end shrink-0">
-          <label className="text-xs text-gray-400 font-medium">Date</label>
+          <label className="text-xs text-gray-600 font-medium">Date</label>
           <input
             type="date"
             value={selDate}
@@ -134,6 +135,7 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
             activeSecsToday={activeSecsToday}
             idleSecsToday={idleSecsToday}
           />
+          <MeetingsCard deviceId={id} days={7} />
         </div>
 
         {/* Activity feed — below on mobile, left column on desktop */}

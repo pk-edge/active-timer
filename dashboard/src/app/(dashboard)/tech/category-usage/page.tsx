@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { format, subDays } from "date-fns";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
@@ -7,7 +8,6 @@ import { ArrowUpRight, ChevronLeft } from "lucide-react";
 import { getCategoryUsage, getCategoryUsageDetail } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
-import RefreshButton from "@/components/RefreshButton";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, fmtDur, exportCsv,
@@ -42,11 +42,11 @@ function DetailPanel({
         <div className="flex items-center gap-2 mb-1">
           <div className="w-3 h-3 rounded-full shrink-0" style={{ background: item.color }} />
           <p className="font-semibold text-gray-900 text-sm flex-1">{item.name}</p>
-          <p className="text-xs text-gray-400 shrink-0">
+          <p className="text-xs text-gray-600 shrink-0">
             Total Duration: <span className="font-medium text-gray-700">{fmtDur(item.duration_secs)}</span>
           </p>
         </div>
-        <p className="text-xs text-gray-400">
+        <p className="text-xs text-gray-600">
           {item.pct.toFixed(1)}% of total · {item.user_count} {item.user_count === 1 ? "user" : "users"}
         </p>
       </div>
@@ -72,11 +72,11 @@ function DetailPanel({
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {isLoading ? (
-          <p className="text-sm text-gray-400 py-8 text-center">Loading…</p>
+          <p className="text-sm text-gray-600 py-8 text-center">Loading…</p>
         ) : tab === "Activities" ? (
           <>
             {(data?.activities ?? []).length === 0
-              ? <p className="text-sm text-gray-400 py-8 text-center">No applications in this category.</p>
+              ? <p className="text-sm text-gray-600 py-8 text-center">No applications in this category.</p>
               : (data?.activities ?? []).map(a => (
                 <DurationRow key={a.app_name} label={a.app_name}
                              duration_secs={a.duration_secs} pct={a.pct} color={item.color} />
@@ -85,7 +85,7 @@ function DetailPanel({
         ) : (
           <>
             {displayUsers.length === 0
-              ? <p className="text-sm text-gray-400 py-8 text-center">No users.</p>
+              ? <p className="text-sm text-gray-600 py-8 text-center">No users.</p>
               : displayUsers.map(u => (
                 <DurationRow key={u.email} label={u.name} sub={u.email}
                              duration_secs={u.duration_secs} pct={u.pct} color={item.color} />
@@ -108,7 +108,7 @@ export default function CategoryUsagePage() {
   const [summaryMode, setSummaryMode] = useState(true);
   const [selected,    setSelected]    = useState<CategoryUsageItem | null>(null);
 
-  const { data, mutate, isLoading } = useSWR(
+  const { data, isLoading } = useSWR(
     ["category-usage", dateRange.since, dateRange.until, groupId, employeeId],
     () => getCategoryUsage(dateRange.since, dateRange.until, groupId || undefined),
   );
@@ -128,7 +128,7 @@ export default function CategoryUsagePage() {
     );
   }
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("tech", "view")) return <AccessDenied label="Category Usage" />;
 
   const stats = [
@@ -144,10 +144,9 @@ export default function CategoryUsagePage() {
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Category Usage</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Time broken down by application category</p>
+          <p className="text-sm text-gray-600 mt-0.5">Time broken down by application category</p>
         </div>
         <div className="flex items-center gap-2">
-          <RefreshButton onRefresh={() => mutate()} />
           <button onClick={doExport}
                   className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900 px-3 py-1.5 rounded-lg border border-gray-200 bg-white shadow-sm transition">
             Export
@@ -184,16 +183,16 @@ export default function CategoryUsagePage() {
         }`}>
           <div className="grid grid-cols-[16px_1fr_110px_52px] sm:grid-cols-[16px_1fr_120px_60px] gap-3 px-4 sm:px-5 py-2.5 bg-gray-50 border-b border-gray-200 shrink-0">
             <div />
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Category</p>
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Duration</p>
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide text-right">%</p>
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Category</p>
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Duration</p>
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide text-right">%</p>
           </div>
 
           <div className="flex-1 overflow-y-auto min-h-0">
             {isLoading ? (
-              <p className="text-sm text-gray-400 py-12 text-center animate-pulse">Loading…</p>
+              <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
             ) : filtered.length === 0 ? (
-              <p className="text-sm text-gray-400 py-12 text-center">No categories found.</p>
+              <p className="text-sm text-gray-600 py-12 text-center">No categories found.</p>
             ) : filtered.map(item => (
               <button
                 key={item.name}
@@ -205,10 +204,10 @@ export default function CategoryUsagePage() {
                 <div className="w-3 h-3 rounded-full mt-0.5 shrink-0" style={{ background: item.color }} />
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-gray-800">{item.name}</p>
-                  <p className="text-xs text-gray-400">{item.user_count} users</p>
+                  <p className="text-xs text-gray-600">{item.user_count} users</p>
                 </div>
                 <p className="text-sm text-gray-700 tabular-nums self-center">{fmtDur(item.duration_secs)}</p>
-                <p className="text-sm text-gray-500 tabular-nums text-right self-center">{item.pct.toFixed(1)}%</p>
+                <p className="text-sm text-gray-600 tabular-nums text-right self-center">{item.pct.toFixed(1)}%</p>
               </button>
             ))}
           </div>
@@ -229,7 +228,7 @@ export default function CategoryUsagePage() {
       </div>
 
       {!selected && filtered.length > 0 && (
-        <p className="text-xs text-gray-400 text-center mt-2 shrink-0">
+        <p className="text-xs text-gray-600 text-center mt-2 shrink-0">
           Tap a category to see activities and users
         </p>
       )}

@@ -10,7 +10,7 @@ export default function ScreenshotGrid({ screenshots }: Props) {
     return (
       <div className="bg-white border border-gray-200 rounded-xl py-12 text-center shadow-sm">
         <ImageIcon size={32} className="mx-auto mb-3 text-gray-200" />
-        <p className="text-gray-400 text-sm">No screenshots yet.</p>
+        <p className="text-gray-600 text-sm">No screenshots yet.</p>
       </div>
     );
   }
@@ -31,8 +31,8 @@ export default function ScreenshotGrid({ screenshots }: Props) {
             className="w-full aspect-video object-cover group-hover:opacity-90 transition"
           />
           <div className="px-2 py-1.5 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
-            <p className="text-xs text-gray-500">{fmtTime(s.captured_at_unix)}</p>
-            <p className="text-xs text-gray-400">{fmtBytes(s.file_size)}</p>
+            <p className="text-xs text-gray-600">{fmtTime(s.captured_at_unix)}</p>
+            <p className="text-xs text-gray-600">{fmtBytes(s.file_size)}</p>
           </div>
         </a>
       ))}

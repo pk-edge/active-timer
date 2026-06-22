@@ -2,7 +2,7 @@ import type {
   Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
-  OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
+  OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
   AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
   WebsiteListOut, WebsiteDetailOut,
@@ -334,6 +334,13 @@ export const getHomeAppUsage = (group_id?: string, days = 1) =>
 export const getHomeWebUsage = (group_id?: string, days = 1) =>
   request<WebUsage[]>(`/v1/home/web-usage${gq(group_id, { days })}`);
 export const getMyStats = () => request<MyStats>("/v1/home/my-stats");
+export const getMeetings = (opts: { deviceId?: string; employeeId?: string; days?: number }) => {
+  const p = new URLSearchParams();
+  if (opts.deviceId)   p.set("device_id", opts.deviceId);
+  if (opts.employeeId) p.set("employee_id", opts.employeeId);
+  p.set("days", String(opts.days ?? 7));
+  return request<MeetingsResponse>(`/v1/home/meetings?${p.toString()}`);
+};
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 

@@ -328,3 +328,92 @@ async def test_category_rule_stored_canonical(client, db_session):
     assert r.status_code == 200, r.text
 
     await _cleanup_company(db_session, cid)
+
+
+# ── +1h-on-restart fix: device-today-active honors the device's local midnight ─
+
+@pytest.mark.asyncio
+async def test_device_today_active_respects_local_midnight_since(client, db_session):
+    cid = uuid.uuid4(); did = uuid.uuid4(); tag = uuid.uuid4().hex[:8]
+    token = create_device_token(str(did), str(cid))
+    await db_session.execute(sa_text(
+        "INSERT INTO companies (id, name, enrollment_token) VALUES (:i,:n,:t)"),
+        {"i": str(cid), "n": f"TZ-{tag}", "t": tag})
+    await db_session.execute(sa_text(
+        "INSERT INTO devices (id, company_id, hostname, platform, jwt_token, is_active) "
+        "VALUES (:i,:c,:h,'darwin',:tok,TRUE)"),
+        {"i": str(did), "c": str(cid), "h": f"h-{tag}", "tok": token})
+
+    since = 1_700_000_000  # device's local midnight (absolute unix)
+    # 600s of activity 1h BEFORE local midnight (yesterday — must be EXCLUDED),
+    # 900s 1min after (today — must be INCLUDED). Excluding the pre-midnight
+    # block is exactly what stops the '+1h on restart' inflation.
+    for off, dur in ((-3600, 600), (60, 900)):
+        await db_session.execute(sa_text(
+            "INSERT INTO activity_events (id, device_id, event_type, app_name, duration, timestamp) "
+            "VALUES (:i,:d,'window_change','Code',:dur, to_timestamp(:ts))"),
+            {"i": str(uuid.uuid4()), "d": str(did), "dur": dur, "ts": since + off})
+    await db_session.flush()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    r = await client.get(f"/v1/home/device-today-active?since={since}", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["active_seconds_today"] == 900   # only the post-midnight block
+
+    # No `since` (older agent) still works (UTC-day fallback, no error).
+    r2 = await client.get("/v1/home/device-today-active", headers=headers)
+    assert r2.status_code == 200
+
+
+# ── Meeting logs: session aggregation (active time + apps-used) ───────────────
+
+@pytest.mark.asyncio
+async def test_meetings_endpoint_aggregates_sessions(client, db_session):
+    cid = uuid.uuid4(); did = uuid.uuid4(); eid = uuid.uuid4(); tag = uuid.uuid4().hex[:8]
+    await db_session.execute(sa_text(
+        "INSERT INTO companies (id, name, enrollment_token) VALUES (:i,:n,:t)"),
+        {"i": str(cid), "n": f"MTG-{tag}", "t": tag})
+    admin_h = await _seed_admin(db_session, cid)
+    await db_session.execute(sa_text(
+        "INSERT INTO employees (id, company_id, email, name, role, is_active) "
+        "VALUES (:i,:c,:e,:n,'member',TRUE)"),
+        {"i": str(eid), "c": str(cid), "e": f"u-{tag}@x.com", "n": "Worker"})
+    await db_session.execute(sa_text(
+        "INSERT INTO devices (id, company_id, employee_id, hostname, platform, is_active) "
+        "VALUES (:i,:c,:emp,:h,'darwin',TRUE)"),
+        {"i": str(did), "c": str(cid), "emp": str(eid), "h": f"h-{tag}"})
+
+    def ev(etype, app, mins_ago, dur=0, title=""):
+        return {"i": str(uuid.uuid4()), "d": str(did), "t": etype, "a": app,
+                "ti": title, "dur": dur, "m": mins_ago}
+
+    rows = [
+        # Real Zoom meeting [120m ago, 100m ago]: 600s Zoom + 300s Chrome inside;
+        # 999s Slack BEFORE the meeting must be excluded.
+        ev("meeting_start", "Zoom", 120, 0, "Standup"),
+        ev("window_change", "Zoom", 119, 600),
+        ev("window_change", "Google Chrome", 110, 300),
+        ev("meeting_end", "Zoom", 100, 1200),
+        ev("window_change", "Slack", 150, 999),
+        # Trivial meeting (10s active) → dropped as noise.
+        ev("meeting_start", "Webex", 80, 0),
+        ev("window_change", "Webex", 79, 10),
+        ev("meeting_end", "Webex", 75, 300),
+    ]
+    for r in rows:
+        await db_session.execute(sa_text(
+            "INSERT INTO activity_events "
+            "(id, device_id, event_type, app_name, window_title, duration, timestamp) "
+            "VALUES (:i,:d,:t,:a,:ti,:dur, NOW() - make_interval(mins => :m))"), r)
+    await db_session.flush()
+
+    body = (await client.get(f"/v1/home/meetings?device_id={did}&days=2", headers=admin_h)).json()
+    assert body["count"] == 1                    # trivial Webex meeting filtered out
+    assert body["total_active_secs"] == 900      # 600 Zoom + 300 Chrome (Slack excluded)
+    s = body["sessions"][0]
+    assert s["platform"] == "Zoom"
+    assert {a["app_name"]: a["seconds"] for a in s["apps"]} == {"Zoom": 600, "Google Chrome": 300}
+
+    # Same result via the per-user filter (the dashboard user view).
+    by_emp = (await client.get(f"/v1/home/meetings?employee_id={eid}&days=2", headers=admin_h)).json()
+    assert by_emp["count"] == 1 and by_emp["total_active_secs"] == 900
