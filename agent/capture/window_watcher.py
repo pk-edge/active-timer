@@ -21,6 +21,7 @@ import time
 import logging
 
 from config import Config
+from meeting_detect import detect_presence, MeetingSessionTracker
 
 log = logging.getLogger("window_watcher")
 
@@ -48,9 +49,11 @@ MEETING_APPS = frozenset({
     "skype",
 })
 
-# Keep a meeting "open" through brief context switches (checking notes,
-# replying on Slack mid-call) instead of emitting end/start pairs.
-MEETING_GRACE_SECS = 120
+# A meeting stays "open" until the call has been absent this long — covers brief
+# tab/app switches mid-call (checking notes, replying on Slack) and any
+# locked/away gap, which ends the session at the last in-call moment. Several
+# poll cycles so a single missed poll never flickers the session.
+MEETING_CONFIRM_SECS = 25
 
 # Protects duration sums from clock jumps / laptop sleep without lock events.
 MAX_SLICE_SECS = Config.ACTIVITY_HEARTBEAT_SECS + Config.WINDOW_POLL_SECS * 2
@@ -199,6 +202,108 @@ def _is_media_context(app_name: str, title: str) -> bool:
     return False
 
 
+# ── Meeting-presence collectors (thin OS shell over the pure detect core) ─────
+
+def _list_windows() -> list[dict]:
+    """[{'owner','title'}] for visible, normal-layer windows. Best-effort; the
+    poll loop tolerates a return of []. macOS uses Quartz, Windows EnumWindows."""
+    try:
+        if sys.platform == "darwin":
+            from Quartz import (
+                CGWindowListCopyWindowInfo,
+                kCGWindowListOptionOnScreenOnly,
+                kCGNullWindowID,
+            )
+            wins = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID) or []
+            out = []
+            for w in wins:
+                if w.get("kCGWindowLayer") != 0:
+                    continue  # skip menubar/dock/overlay layers
+                out.append({
+                    "owner": w.get("kCGWindowOwnerName") or "",
+                    "title": w.get("kCGWindowName") or "",
+                })
+            return out
+        if sys.platform == "win32":
+            return _win_list_windows()
+    except Exception as e:
+        log.debug("_list_windows error: %s", e)
+    return []
+
+
+def _win_list_windows() -> list[dict]:
+    """Windows: enumerate visible top-level windows with their owning process."""
+    import ctypes
+    import ctypes.wintypes as wt
+    user32 = ctypes.windll.user32
+    out: list[dict] = []
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def _cb(hwnd, _lparam):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            title = buf.value or ""
+            pid = wt.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            owner = ""
+            if psutil is not None:
+                try:
+                    owner = psutil.Process(pid.value).name().replace(".exe", "")
+                except Exception:
+                    owner = ""
+            out.append({"owner": owner, "title": title})
+        except Exception:
+            pass  # one bad window must not abort the whole enumeration
+        return True
+
+    try:
+        user32.EnumWindows(_cb, 0)
+    except Exception as e:
+        log.debug("EnumWindows failed: %s", e)
+    return out
+
+
+def _browser_tabs(windows: list[dict]) -> list[dict]:
+    """macOS only: active tab (url,title) of each *running* scriptable browser.
+
+    Gated on browsers that actually have a window open — querying a browser that
+    isn't running would make AppleScript launch it. Windows/Linux return []: live
+    tab URLs aren't reliably available there, so browser meetings on those OSes
+    rely on native apps; this is the accepted 'macOS-strong browser' tradeoff."""
+    tabs: list[dict] = []
+    if sys.platform != "darwin":
+        return tabs
+    seen = set()
+    for w in windows:
+        owner = w.get("owner") or ""
+        if owner in seen or not _is_browser(owner):
+            continue
+        seen.add(owner)
+        title, url = _macos_browser_tab(owner)
+        if url:
+            tabs.append({"url": url, "title": title})
+    return tabs
+
+
+def _collect_meeting_signals() -> tuple[list[dict], list[dict]]:
+    """(windows, tabs) for detect_presence. Never raises. Skips the costlier
+    browser-tab enumeration when a native call window is already present."""
+    windows = _list_windows()
+    if detect_presence(windows, []) is not None:
+        return windows, []
+    return windows, _browser_tabs(windows)
+
+
 class WindowWatcher:
     def __init__(self, shared: dict):
         self._shared       = shared
@@ -209,11 +314,10 @@ class WindowWatcher:
         self._last_app     = ""
         self._last_title   = ""
         self._slice_start  = time.time()
-        self._in_meeting        = False
-        self._meeting_start     = 0.0
-        self._meeting_app       = ""
-        self._meeting_title     = ""
-        self._meeting_last_seen = 0.0
+        # Session/presence meeting detection (see meeting_detect.py). Replaces the
+        # old foreground-only grace model: scans ALL windows + browser tabs so a
+        # backgrounded call still counts, and survives brief flicker.
+        self._meeting_tracker = MeetingSessionTracker(MEETING_CONFIRM_SECS)
 
     def run(self):
         log.info("WindowWatcher started (poll=%ds heartbeat=%ds)",
@@ -273,7 +377,7 @@ class WindowWatcher:
             self._emit_slice(app, title, now)
             self._slice_start = now
 
-        self._update_meeting_state(app, title, now)
+        self._update_meetings(now, app, title)
 
     def _emit_slice(self, app: str, title: str, now: float):
         duration = min(int(now - self._slice_start), MAX_SLICE_SECS)
@@ -288,39 +392,32 @@ class WindowWatcher:
         })
         self._shared["sync_trigger"].set()
 
-    def _update_meeting_state(self, app: str, title: str, now: float):
-        in_meeting_ctx = _is_meeting_context(app, title)
-        if in_meeting_ctx:
-            self._meeting_last_seen = now
+    def _update_meetings(self, now: float, app: str, title: str):
+        """Feed the current call presence to the session tracker and persist any
+        start/end it emits. `app`/`title` are the foreground window, used only for
+        the media-active flag (meeting detection scans all windows + tabs)."""
+        windows, tabs = _collect_meeting_signals()
+        presence = detect_presence(windows, tabs)
 
-        if in_meeting_ctx and not self._in_meeting:
-            self._in_meeting    = True
-            self._meeting_start = now
-            self._meeting_app   = app
-            self._meeting_title = title
-            self._db.insert_event({
-                "type":  "meeting_start",
-                "app":   app,
-                "title": title,
-                "ts":    int(now),
-            })
-            self._shared["sync_trigger"].set()
-            log.info("Meeting started: %s — %s", app, title)
-
-        elif self._in_meeting and not in_meeting_ctx:
-            # Grace period: brief switches away (notes, Slack) don't end it.
-            if now - self._meeting_last_seen > MEETING_GRACE_SECS:
-                self._in_meeting = False
-                meeting_dur      = int(now - self._meeting_start)
+        for ev in self._meeting_tracker.update(presence, now):
+            if ev["type"] == "meeting_start":
+                self._db.insert_event({
+                    "type":  "meeting_start",
+                    "app":   ev["platform"],
+                    "title": ev["title"],
+                    "ts":    int(ev["ts"]),
+                })
+                log.info("Meeting started: %s — %s", ev["platform"], ev["title"])
+            else:  # meeting_end
                 self._db.insert_event({
                     "type":     "meeting_end",
-                    "app":      self._meeting_app,
-                    "title":    self._meeting_title,
-                    "duration": meeting_dur,
-                    "ts":       int(now),
+                    "app":      ev["platform"],
+                    "title":    ev["title"],
+                    "duration": int(ev["duration"]),
+                    "ts":       int(ev["ts"]),
                 })
-                self._shared["sync_trigger"].set()
-                log.info("Meeting ended: %s (%ds)", self._meeting_app, meeting_dur)
+                log.info("Meeting ended: %s (%ds)", ev["platform"], ev["duration"])
+            self._shared["sync_trigger"].set()
 
-        self._shared["in_meeting"]   = self._in_meeting
+        self._shared["in_meeting"]   = self._meeting_tracker.in_meeting
         self._shared["media_active"] = _is_media_context(app, title)

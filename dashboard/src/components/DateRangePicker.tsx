@@ -55,12 +55,12 @@ export default function DateRangePicker({ value, onChange }: Props) {
         onClick={() => setOpen(x => !x)}
         className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-700 hover:border-brand-300 shadow-sm transition"
       >
-        <CalendarDays size={14} className="text-gray-400 shrink-0" />
+        <CalendarDays size={14} className="text-gray-600 shrink-0" />
         <span className="font-medium">{preset}</span>
-        <span className="text-gray-400 text-xs">
+        <span className="text-gray-600 text-xs">
           {value.since === value.until ? value.since : `${value.since} – ${value.until}`}
         </span>
-        <ChevronDown size={12} className={`text-gray-400 transition-transform ${open ? "rotate-180" : ""}`} />
+        <ChevronDown size={12} className={`text-gray-600 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
       {/* Dropdown */}
@@ -71,7 +71,7 @@ export default function DateRangePicker({ value, onChange }: Props) {
           <div className="absolute left-0 top-full mt-1.5 z-40 bg-white border border-gray-200 rounded-xl shadow-xl w-80">
             {/* Preset grid */}
             <div className="p-3 border-b border-gray-100">
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Quick Select</p>
+              <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Quick Select</p>
               <div className="grid grid-cols-2 gap-1">
                 {PRESETS.map(p => (
                   <button
@@ -91,10 +91,10 @@ export default function DateRangePicker({ value, onChange }: Props) {
 
             {/* Custom date inputs */}
             <div className="p-3">
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Custom Range</p>
+              <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Custom Range</p>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">From</label>
+                  <label className="block text-xs text-gray-600 mb-1">From</label>
                   <input
                     type="date"
                     value={value.since}
@@ -104,7 +104,7 @@ export default function DateRangePicker({ value, onChange }: Props) {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">To</label>
+                  <label className="block text-xs text-gray-600 mb-1">To</label>
                   <input
                     type="date"
                     value={value.until}

@@ -33,8 +33,8 @@ const ICON_COLOR: Record<string, string> = {
   url_blocked:   "text-red-500",
   lock:          "text-red-500",
   unlock:        "text-green-500",
-  idle_start:    "text-gray-400",
-  idle_end:      "text-gray-400",
+  idle_start:    "text-gray-600",
+  idle_end:      "text-gray-600",
   meeting_start: "text-blue-500",
   meeting_end:   "text-blue-400",
 };
@@ -45,15 +45,15 @@ const BADGE_COLOR: Record<string, string> = {
   url_blocked:   "bg-red-50 text-red-600",
   lock:          "bg-red-50 text-red-600",
   unlock:        "bg-green-50 text-green-700",
-  idle_start:    "bg-gray-100 text-gray-500",
-  idle_end:      "bg-gray-100 text-gray-500",
+  idle_start:    "bg-gray-100 text-gray-600",
+  idle_end:      "bg-gray-100 text-gray-600",
   meeting_start: "bg-blue-50 text-blue-700",
   meeting_end:   "bg-blue-50 text-blue-600",
 };
 
 function EventRow({ e, isLast }: { e: TimelineEvent; isLast: boolean }) {
   const dot   = DOT_COLOR[e.event_type]  ?? "bg-gray-300";
-  const icon  = ICON_COLOR[e.event_type] ?? "text-gray-400";
+  const icon  = ICON_COLOR[e.event_type] ?? "text-gray-600";
   const badge = BADGE_COLOR[e.event_type] ?? "bg-gray-100 text-gray-600";
 
   return (
@@ -115,7 +115,7 @@ function EventRow({ e, isLast }: { e: TimelineEvent; isLast: boolean }) {
 
             {/* Window title */}
             {e.window_title && (
-              <p className="text-xs text-gray-400 mt-0.5 truncate pl-5" title={e.window_title}>
+              <p className="text-xs text-gray-600 mt-0.5 truncate pl-5" title={e.window_title}>
                 {e.window_title}
               </p>
             )}
@@ -141,8 +141,8 @@ export default function ActivityTimeline({ events }: Props) {
     return (
       <div className="bg-white border border-gray-200 rounded-xl py-16 text-center shadow-sm">
         <Monitor size={36} className="mx-auto mb-3 text-gray-200" />
-        <p className="text-gray-400 text-sm font-medium">No activity recorded for this date.</p>
-        <p className="text-gray-300 text-xs mt-1">Try selecting a different date</p>
+        <p className="text-gray-600 text-sm font-medium">No activity recorded for this date.</p>
+        <p className="text-gray-500 text-xs mt-1">Try selecting a different date</p>
       </div>
     );
   }
@@ -151,7 +151,7 @@ export default function ActivityTimeline({ events }: Props) {
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Activity Feed</p>
+        <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider">Activity Feed</p>
         <span className="text-xs font-medium bg-brand-50 text-brand-600 px-2 py-0.5 rounded-full">
           {events.length} events
         </span>

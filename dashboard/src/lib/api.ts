@@ -1,8 +1,8 @@
 import type {
-  Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
+  Device, TimelineEvent, DailyStat, CompanyDay, AppUsage, LogEvent,
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
-  OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
+  OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
   AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
   WebsiteListOut, WebsiteDetailOut,
@@ -120,10 +120,6 @@ export const getTimeline = (deviceId: string, since?: number, until?: number) =>
 export const getDailyStats = (deviceId: string, days = 7) =>
   request<DailyStat[]>(`/v1/devices/${deviceId}/stats?days=${days}`);
 
-// ── Screenshots ───────────────────────────────────────────────────────────────
-
-export const getScreenshots = (deviceId: string) =>
-  request<Screenshot[]>(`/v1/screenshots/${deviceId}`);
 
 // ── Reports ───────────────────────────────────────────────────────────────────
 
@@ -334,6 +330,13 @@ export const getHomeAppUsage = (group_id?: string, days = 1) =>
 export const getHomeWebUsage = (group_id?: string, days = 1) =>
   request<WebUsage[]>(`/v1/home/web-usage${gq(group_id, { days })}`);
 export const getMyStats = () => request<MyStats>("/v1/home/my-stats");
+export const getMeetings = (opts: { deviceId?: string; employeeId?: string; days?: number }) => {
+  const p = new URLSearchParams();
+  if (opts.deviceId)   p.set("device_id", opts.deviceId);
+  if (opts.employeeId) p.set("employee_id", opts.employeeId);
+  p.set("days", String(opts.days ?? 7));
+  return request<MeetingsResponse>(`/v1/home/meetings?${p.toString()}`);
+};
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 
@@ -472,9 +475,21 @@ export const getCategoryUsageDetail = (cat_id: string | null, tab: string, since
 export interface CompanyInfo {
   name: string;
   enrollment_token: string;
+  agent_headless: boolean;
 }
 
 export const getCompanyInfo = () => request<CompanyInfo>("/v1/company/info");
+export const updateCompanySettings = (agent_headless: boolean) =>
+  request<CompanyInfo>("/v1/company/settings", {
+    method: "PATCH",
+    body: JSON.stringify({ agent_headless }),
+  });
+// Per-device visibility override: null = inherit company default, true/false = force.
+export const setDeviceHeadless = (deviceId: string, override: boolean | null) =>
+  request<Device>(`/v1/devices/${deviceId}/headless`, {
+    method: "PATCH",
+    body: JSON.stringify({ override }),
+  });
 
 // ── URL Policies ─────────────────────────────────────────────────────────────
 

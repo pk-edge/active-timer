@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import { getDevices, getUsers } from "@/lib/api";
@@ -26,10 +27,10 @@ function StatCard({
           : "border-gray-200 hover:border-gray-300 hover:shadow-sm"
       }`}
     >
-      <div className={`${active ? "text-brand-500" : "text-gray-400"}`}>{icon}</div>
+      <div className={`${active ? "text-brand-500" : "text-gray-600"}`}>{icon}</div>
       <div>
         <p className={`text-2xl font-semibold ${color}`}>{value}</p>
-        <p className="text-gray-500 text-xs">{label}</p>
+        <p className="text-gray-600 text-xs">{label}</p>
       </div>
     </button>
   );
@@ -113,7 +114,7 @@ export default function DevicesPage() {
       a[1].name.localeCompare(b[1].name));
   }, [filtered]);
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("devices", "view")) return <AccessDenied label="Devices" />;
   if (isLoading) return <PageSkeleton />;
 
@@ -130,7 +131,7 @@ export default function DevicesPage() {
               className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition ${
                 showArchived
                   ? "bg-amber-50 border-amber-300 text-amber-700"
-                  : "bg-white border-gray-200 text-gray-500 hover:border-gray-300"
+                  : "bg-white border-gray-200 text-gray-600 hover:border-gray-300"
               }`}
             >
               <Archive size={14} />
@@ -139,17 +140,17 @@ export default function DevicesPage() {
           )}
           <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
             <button onClick={() => setView("all")}
-                    className={`px-3 py-1.5 text-sm font-medium transition ${view === "all" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
+                    className={`px-3 py-1.5 text-sm font-medium transition ${view === "all" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"}`}>
               All devices
             </button>
             <button onClick={() => setView("byUser")}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition ${view === "byUser" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition ${view === "byUser" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"}`}>
               <Users2 size={14} /> By user
             </button>
           </div>
         </div>
       </div>
-      <p className="text-gray-500 text-sm mb-6">Live — refreshes every 5 seconds</p>
+      <p className="text-gray-600 text-sm mb-6">Live — refreshes every 5 seconds</p>
 
       {/* Stat cards */}
       <div className={`grid gap-4 mb-6 ${showArchived && canArchive ? "grid-cols-4" : "grid-cols-3"}`}>
@@ -172,7 +173,7 @@ export default function DevicesPage() {
           label="Offline"
           value={offline}
           icon={<WifiOff size={18} />}
-          color="text-gray-500"
+          color="text-gray-600"
           active={filter === "offline"}
           onClick={() => setFilter("offline")}
         />
@@ -188,7 +189,7 @@ export default function DevicesPage() {
 
       {/* Search bar */}
       <div className="relative mb-5">
-        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
         <input
           type="text"
           placeholder="Search by hostname, employee or platform…"
@@ -199,7 +200,7 @@ export default function DevicesPage() {
         {search && (
           <button
             onClick={() => setSearch("")}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600"
           >
             <X size={14} />
           </button>
@@ -224,7 +225,7 @@ export default function DevicesPage() {
             />
           ))}
           {filtered.length === 0 && (
-            <p className="col-span-full text-gray-400 text-sm py-12 text-center">
+            <p className="col-span-full text-gray-600 text-sm py-12 text-center">
               {search || filter !== "all"
                 ? "No devices match your filter."
                 : "No devices enrolled yet. Install the agent on a laptop to get started."}
@@ -242,7 +243,7 @@ export default function DevicesPage() {
                 <p className={`text-sm font-semibold ${key === "__unassigned__" ? "text-amber-600" : "text-gray-800"}`}>
                   {group.name}
                 </p>
-                <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full">
+                <span className="text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full">
                   {group.devices.length} device{group.devices.length !== 1 ? "s" : ""}
                 </span>
               </div>
@@ -265,13 +266,13 @@ export default function DevicesPage() {
             </div>
           ))}
           {grouped.length === 0 && (
-            <p className="text-gray-400 text-sm py-12 text-center">No devices match your filter.</p>
+            <p className="text-gray-600 text-sm py-12 text-center">No devices match your filter.</p>
           )}
         </div>
       )}
 
       {search || filter !== "all" ? (
-        <p className="text-xs text-gray-400 mt-3">
+        <p className="text-xs text-gray-600 mt-3">
           {filtered.length} of {devices?.length ?? 0} device{devices?.length !== 1 ? "s" : ""}
         </p>
       ) : null}

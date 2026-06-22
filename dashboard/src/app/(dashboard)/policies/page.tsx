@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import {
@@ -39,7 +40,7 @@ function DetectedPicker({ selected, onToggle, existing }: DetectedPickerProps) {
     <div className="border border-gray-200 rounded-xl overflow-hidden">
       {/* Search inside picker */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-gray-100 bg-gray-50">
-        <Search size={13} className="text-gray-400 shrink-0" />
+        <Search size={13} className="text-gray-600 shrink-0" />
         <input
           value={search}
           onChange={e => setSearch(e.target.value)}
@@ -47,11 +48,11 @@ function DetectedPicker({ selected, onToggle, existing }: DetectedPickerProps) {
           className="flex-1 bg-transparent text-sm outline-none placeholder-gray-400"
         />
         {search && (
-          <button onClick={() => setSearch("")} className="text-gray-400 hover:text-gray-600">
+          <button onClick={() => setSearch("")} className="text-gray-600 hover:text-gray-600">
             <X size={12} />
           </button>
         )}
-        <span className="text-xs text-gray-400 shrink-0">
+        <span className="text-xs text-gray-600 shrink-0">
           {selected.size > 0 ? `${selected.size} selected` : `${filtered.length} sites`}
         </span>
       </div>
@@ -59,9 +60,9 @@ function DetectedPicker({ selected, onToggle, existing }: DetectedPickerProps) {
       {/* URL list */}
       <div className="max-h-52 overflow-y-auto divide-y divide-gray-100">
         {isLoading ? (
-          <p className="text-xs text-gray-400 py-4 text-center">Loading detected sites…</p>
+          <p className="text-xs text-gray-600 py-4 text-center">Loading detected sites…</p>
         ) : filtered.length === 0 ? (
-          <p className="text-xs text-gray-400 py-4 text-center">
+          <p className="text-xs text-gray-600 py-4 text-center">
             {search ? "No matches" : "No sites detected yet (requires URL visit activity)"}
           </p>
         ) : (
@@ -84,10 +85,10 @@ function DetectedPicker({ selected, onToggle, existing }: DetectedPickerProps) {
               >
                 {isSelected
                   ? <CheckSquare size={14} className="text-red-500 shrink-0" />
-                  : <Square     size={14} className="text-gray-300 shrink-0" />}
+                  : <Square     size={14} className="text-gray-500 shrink-0" />}
                 <span className="flex-1 text-sm text-gray-800 truncate">{host}</span>
-                <span className="text-xs text-gray-400 shrink-0">{visits.toLocaleString()} visits</span>
-                {isExisting && <span className="text-[10px] text-gray-400 shrink-0">already blocked</span>}
+                <span className="text-xs text-gray-600 shrink-0">{visits.toLocaleString()} visits</span>
+                {isExisting && <span className="text-[10px] text-gray-600 shrink-0">already blocked</span>}
               </button>
             );
           })
@@ -110,7 +111,7 @@ function DetectedPicker({ selected, onToggle, existing }: DetectedPickerProps) {
             <button
               type="button"
               onClick={() => Array.from(selected).forEach(h => onToggle(h))}
-              className="text-xs text-gray-500 hover:underline"
+              className="text-xs text-gray-600 hover:underline"
             >
               Clear selection
             </button>
@@ -207,7 +208,7 @@ function RuleForm({ initial, devices, users, existingRules, onClose, onSave }: R
             <Shield size={16} className="text-red-500" />
             {isEdit ? "Edit Block Rule" : "Block URLs"}
           </h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-600"><X size={18} /></button>
         </div>
 
         <form onSubmit={submit} className="flex flex-col flex-1 min-h-0 overflow-y-auto">
@@ -217,7 +218,7 @@ function RuleForm({ initial, devices, users, existingRules, onClose, onSave }: R
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1.5">
                   Sites from Your Devices
-                  <span className="ml-1 text-gray-400 font-normal">(select to add to block list)</span>
+                  <span className="ml-1 text-gray-600 font-normal">(select to add to block list)</span>
                 </label>
                 <DetectedPicker
                   selected={selected}
@@ -230,7 +231,7 @@ function RuleForm({ initial, devices, users, existingRules, onClose, onSave }: R
             {/* ── Selected pills ── */}
             {!isEdit && selected.size > 0 && (
               <div>
-                <p className="text-xs text-gray-500 mb-1.5">
+                <p className="text-xs text-gray-600 mb-1.5">
                   Selected ({selected.size}):
                 </p>
                 <div className="flex flex-wrap gap-1.5">
@@ -259,7 +260,7 @@ function RuleForm({ initial, devices, users, existingRules, onClose, onSave }: R
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-200"
               />
               {!isEdit && (
-                <p className="text-xs text-gray-400 mt-1">
+                <p className="text-xs text-gray-600 mt-1">
                   Enter a domain to block all pages, or a subdomain for a specific section.
                 </p>
               )}
@@ -278,7 +279,7 @@ function RuleForm({ initial, devices, users, existingRules, onClose, onSave }: R
                   <option value="employee">Specific user</option>
                   <option value="device">Specific device</option>
                 </select>
-                <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
               </div>
             </div>
 
@@ -293,7 +294,7 @@ function RuleForm({ initial, devices, users, existingRules, onClose, onSave }: R
                       <option key={u.id} value={u.id}>{u.name} ({u.email})</option>
                     ))}
                   </select>
-                  <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
                 </div>
               </div>
             )}
@@ -311,7 +312,7 @@ function RuleForm({ initial, devices, users, existingRules, onClose, onSave }: R
                       </option>
                     ))}
                   </select>
-                  <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                  <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
                 </div>
               </div>
             )}
@@ -419,7 +420,7 @@ export default function PoliciesPage() {
     finally { setDeleting(false); }
   }
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("policy", "view")) return <AccessDenied label="URL Policies" />;
 
   const totalActive   = (rules ?? []).filter(r => r.is_active).length;
@@ -435,7 +436,7 @@ export default function PoliciesPage() {
             <Shield size={22} className="text-red-500" />
             URL Policies
           </h1>
-          <p className="text-sm text-gray-500 mt-0.5">
+          <p className="text-sm text-gray-600 mt-0.5">
             Block websites and URLs for specific users, devices, or company-wide.
             Rules sync to agents every 5 minutes and are enforced at OS level.
           </p>
@@ -473,7 +474,7 @@ export default function PoliciesPage() {
             </div>
             <div>
               <p className="text-xl font-bold text-gray-900 leading-none">{s.value}</p>
-              <p className="text-xs text-gray-500 mt-0.5">{s.label}</p>
+              <p className="text-xs text-gray-600 mt-0.5">{s.label}</p>
             </div>
           </div>
         ))}
@@ -485,14 +486,14 @@ export default function PoliciesPage() {
           {(["active", "all", "inactive"] as const).map(f => (
             <button key={f} onClick={() => setFilter(f)}
                     className={`px-3 py-1.5 text-sm capitalize transition ${
-                      filter === f ? "bg-white text-gray-900 shadow-sm font-medium" : "text-gray-500"
+                      filter === f ? "bg-white text-gray-900 shadow-sm font-medium" : "text-gray-600"
                     }`}>
               {f === "all" ? "All" : f === "active" ? "Active" : "Inactive"}
             </button>
           ))}
         </div>
         <div className="relative flex-1 min-w-[200px]">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" />
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
@@ -507,7 +508,7 @@ export default function PoliciesPage() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[720px]">
           <thead>
-            <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide border-b border-gray-200">
+            <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide border-b border-gray-200">
               <th className="text-left px-5 py-3 font-semibold">Pattern</th>
               <th className="text-left px-5 py-3 font-semibold">Scope</th>
               <th className="text-left px-5 py-3 font-semibold">Notes</th>
@@ -520,14 +521,14 @@ export default function PoliciesPage() {
               <tr key={rule.id} className={`border-t border-gray-100 hover:bg-gray-50 ${!rule.is_active ? "opacity-50" : ""}`}>
                 <td className="px-5 py-3">
                   <div className="flex items-center gap-2">
-                    <Globe size={13} className="text-gray-400 shrink-0" />
+                    <Globe size={13} className="text-gray-600 shrink-0" />
                     <span className="font-mono text-sm text-gray-800">{rule.pattern}</span>
                   </div>
                 </td>
                 <td className="px-5 py-3">
                   <TargetBadge rule={rule} devices={devices ?? []} users={users ?? []} />
                 </td>
-                <td className="px-5 py-3 text-xs text-gray-400 max-w-[200px] truncate">
+                <td className="px-5 py-3 text-xs text-gray-600 max-w-[200px] truncate">
                   {rule.notes ?? "—"}
                 </td>
                 <td className="px-5 py-3">
@@ -536,10 +537,10 @@ export default function PoliciesPage() {
                             className="flex items-center gap-1.5 text-xs font-medium transition">
                       {rule.is_active
                         ? <><ToggleRight size={18} className="text-green-500" /><span className="text-green-600">Active</span></>
-                        : <><ToggleLeft  size={18} className="text-gray-400"  /><span className="text-gray-500">Inactive</span></>}
+                        : <><ToggleLeft  size={18} className="text-gray-600"  /><span className="text-gray-600">Inactive</span></>}
                     </button>
                   ) : (
-                    <span className={`text-xs font-medium ${rule.is_active ? "text-green-600" : "text-gray-400"}`}>
+                    <span className={`text-xs font-medium ${rule.is_active ? "text-green-600" : "text-gray-600"}`}>
                       {rule.is_active ? "Active" : "Inactive"}
                     </span>
                   )}
@@ -548,11 +549,11 @@ export default function PoliciesPage() {
                   <td className="px-5 py-3">
                     <div className="flex items-center gap-1 justify-end">
                       <button onClick={() => { setEditing(rule); setShowForm(true); }}
-                              className="p-1.5 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition">
+                              className="p-1.5 text-gray-600 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition">
                         <Edit2 size={13} />
                       </button>
                       <button onClick={() => setPendingDeleteId(rule.id)}
-                              className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition">
+                              className="p-1.5 text-gray-600 hover:text-red-500 hover:bg-red-50 rounded-lg transition">
                         <Trash2 size={13} />
                       </button>
                     </div>
@@ -564,10 +565,10 @@ export default function PoliciesPage() {
               <tr>
                 <td colSpan={canEdit ? 5 : 4} className="px-5 py-12 text-center">
                   <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-3">
-                    <Shield size={20} className="text-gray-400" />
+                    <Shield size={20} className="text-gray-600" />
                   </div>
                   <p className="text-gray-700 font-medium">No block rules</p>
-                  <p className="text-gray-400 text-sm mt-1">
+                  <p className="text-gray-600 text-sm mt-1">
                     {filter === "active" ? 'No active rules. Click "Block URL" to add one.' : "No rules match your search."}
                   </p>
                 </td>

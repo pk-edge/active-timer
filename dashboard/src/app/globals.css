@@ -28,7 +28,54 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
-::-webkit-scrollbar        { width: 6px; height: 6px; }
-::-webkit-scrollbar-track  { background: transparent; }
-::-webkit-scrollbar-thumb  { background: #d1d5db; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+/* ── Global futuristic scrollbar ───────────────────────────────────────────── */
+::-webkit-scrollbar              { width: 5px; height: 5px; }
+::-webkit-scrollbar-track        { background: transparent; }
+::-webkit-scrollbar-thumb        {
+  background: linear-gradient(180deg, #a855f7 0%, #7c3aed 100%);
+  border-radius: 99px;
+  box-shadow: 0 0 6px rgba(168, 85, 247, 0.45);
+}
+::-webkit-scrollbar-thumb:hover  {
+  background: linear-gradient(180deg, #c084fc 0%, #9333ea 100%);
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.75);
+}
+::-webkit-scrollbar-corner       { background: transparent; }
+
+/* ── Sidebar scrollbar — darker track so the glow pops on the purple bg ───── */
+.sidebar-scroll::-webkit-scrollbar              { width: 4px; }
+.sidebar-scroll::-webkit-scrollbar-track        {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 99px;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb        {
+  background: linear-gradient(180deg, rgba(255,255,255,0.55) 0%, rgba(255,255,255,0.25) 100%);
+  border-radius: 99px;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
+}
+.sidebar-scroll::-webkit-scrollbar-thumb:hover  {
+  background: linear-gradient(180deg, rgba(255,255,255,0.85) 0%, rgba(255,255,255,0.5) 100%);
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.55);
+}
+
+/* ── Site-wide interaction polish ───────────────────────────────────────────
+   Every button gets a smooth, visible hover; every form field gets the same
+   brand-purple focus ring. Element-level Tailwind classes still win where set. */
+@layer base {
+  button:not(:disabled) {
+    cursor: pointer;
+    transition: filter .15s ease, background-color .15s ease, color .15s ease,
+                border-color .15s ease, box-shadow .15s ease, opacity .15s ease;
+  }
+  /* Darken slightly on hover — visible on both light and brand-purple buttons. */
+  button:not(:disabled):hover { filter: brightness(0.93); }
+  button:disabled { cursor: not-allowed; }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: none;
+    border-color: #7c3aed;                      /* brand-500 */
+    box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.22);
+  }
+}

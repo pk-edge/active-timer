@@ -28,6 +28,7 @@ from capture.url_watcher       import UrlWatcher
 from sync.sync_worker          import SyncWorker
 from lock.lock_detector        import LockDetector
 from updater                   import UpdateWorker
+from config_worker             import ConfigWorker
 from policy.policy_manager     import PolicyManager
 
 pause_event = threading.Event()
@@ -94,12 +95,22 @@ def _enroll_background(shared: dict) -> None:
 
 
 def _fetch_today_active(jwt_token: str) -> int | None:
-    """Fetch today's authoritative active-seconds from the backend (device JWT)."""
+    """Fetch today's authoritative active-seconds from the backend (device JWT).
+
+    Sends this device's LOCAL midnight as an absolute unix timestamp so the
+    server's "today" window matches the user's local day exactly — preventing the
+    restart baseline from jumping when the server/DB timezone differs from the
+    device (the cause of '+1 hour added on restart')."""
     try:
         import httpx
+        from datetime import datetime
         from config import Config
+        local_midnight = int(
+            datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        )
         r = httpx.get(
             Config.DEVICE_TODAY_ENDPOINT,
+            params={"since": local_midnight},
             headers={"Authorization": f"Bearer {jwt_token}"},
             timeout=8,
         )
@@ -153,6 +164,7 @@ def main() -> None:
         "lock_time":           None,
         "policy_manager":      policy_manager,
         "today_active_secs":   None,  # None until enrollment resolves the real value
+        "headless":            True,   # default invisible; admin can override via backend
     }
 
     # 3. Register auto-start on login
@@ -165,6 +177,7 @@ def main() -> None:
         UrlWatcher(shared),
         SyncWorker(shared),
         UpdateWorker(shared),
+        ConfigWorker(shared),
     ]
     if Config.SCREENSHOTS_ENABLED:
         workers.insert(1, Screenshotter(shared))
@@ -226,7 +239,10 @@ def _run_widget(shared: dict) -> None:
         app.setQuitOnLastWindowClosed(False)
 
         widget = FloatingWidget(shared)
-        widget.show()
+        # Start hidden if the device is already known headless (avoids a flash);
+        # otherwise show. ConfigWorker + the widget's status tick keep it in sync.
+        if not shared.get("headless"):
+            widget.show()
 
         # ── Periodic daily flush — saves active seconds every 60s ────────────
         # The delta is computed against the PERSISTED total (not an in-memory

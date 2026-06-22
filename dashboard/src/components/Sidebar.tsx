@@ -97,36 +97,36 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
 
       <aside
         className={clsx(
-          "bg-white border-r border-gray-200 flex flex-col shadow-sm w-60 shrink-0",
+          "bg-brand-700 flex flex-col shadow-sm w-60 shrink-0",
           // Mobile: fixed slide-out drawer. Desktop: static column.
           "fixed inset-y-0 left-0 z-50 transform transition-transform duration-200 ease-in-out",
           "lg:static lg:translate-x-0 lg:z-auto lg:transition-none",
           open ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         )}
       >
-        <div className="h-14 shrink-0 flex items-center gap-3 px-5 border-b border-gray-200">
+        <div className="h-14 shrink-0 flex items-center gap-3 px-5 border-b border-white/10">
           <EdgeLogo variant="icon" size={30} />
-          <span className="font-bold text-sm tracking-tight" style={{ color: "#4a0f70" }}>
+          <span className="font-bold text-sm tracking-tight text-white">
             TimeTracker
           </span>
           {/* Close button — mobile only */}
           <button
             onClick={onClose}
             aria-label="Close menu"
-            className="lg:hidden ml-auto p-1.5 -mr-1.5 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100"
+            className="lg:hidden ml-auto p-1.5 -mr-1.5 text-white/70 hover:text-white rounded-lg hover:bg-white/10"
           >
             <X size={18} />
           </button>
         </div>
 
-        <nav className="flex-1 px-3 py-3 space-y-4 overflow-y-auto">
+        <nav className="flex-1 px-3 py-3 space-y-4 overflow-y-auto sidebar-scroll">
           {NAV_GROUPS.map(group => {
             const visible = group.items.filter(it => can(it.module, "view"));
             if (visible.length === 0) return null;
             return (
               <div key={group.title ?? "x"}>
                 {group.title && (
-                  <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">
+                  <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-white/60">
                     {group.title}
                   </p>
                 )}
@@ -139,13 +139,13 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
                         href={href}
                         onClick={onClose}
                         className={clsx(
-                          "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition",
+                          "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all duration-150",
                           active
-                            ? "bg-brand-50 text-brand-600 font-medium"
-                            : "text-gray-600 hover:text-gray-900 hover:bg-gray-50",
+                            ? "bg-white/20 text-white font-semibold shadow-sm"
+                            : "text-white/85 hover:text-white hover:bg-white/12",
                         )}
                       >
-                        <Icon size={16} />
+                        <Icon size={15} className={active ? "opacity-100" : "opacity-75"} />
                         {label}
                       </Link>
                     );
@@ -156,16 +156,16 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           })}
         </nav>
 
-        <div className="px-3 py-3 border-t border-gray-200">
+        <div className="px-3 py-3 border-t border-white/10">
           {me && (
             <div className="px-3 pb-2">
-              <p className="text-xs font-medium text-gray-700 truncate">{me.name}</p>
-              <p className="text-[11px] text-gray-400 truncate">{me.role_name ?? "—"}</p>
+              <p className="text-xs font-medium text-white truncate">{me.name}</p>
+              <p className="text-[11px] text-white/75 truncate">{me.role_name ?? "—"}</p>
             </div>
           )}
           <button
             onClick={() => setConfirmSignOut(true)}
-            className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition w-full"
+            className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-white/85 hover:text-white hover:bg-white/12 transition-all duration-150 w-full"
           >
             <LogOut size={16} />
             Sign out

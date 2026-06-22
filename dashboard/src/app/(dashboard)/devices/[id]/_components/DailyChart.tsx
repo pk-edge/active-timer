@@ -12,7 +12,7 @@ interface Props {
 export default function DailyChart({ stats, selDate }: Props) {
   return (
     <div className="bg-white border border-gray-200 rounded-xl px-4 pt-3 pb-2 shadow-sm shrink-0">
-      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">
+      <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">
         Active hours — last 7 days
       </p>
       <ResponsiveContainer width="100%" height={110}>

@@ -4,11 +4,12 @@ import Link from "next/link";
 import useSWR from "swr";
 import { format } from "date-fns";
 import { ArrowLeft, Laptop, User } from "lucide-react";
-import { getTimeline, getDailyStats, getDevices, fmtSeconds } from "@/lib/api";
+import { getTimeline, getDailyStats, getDevices, setDeviceHeadless, fmtSeconds } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
 import DailyChart       from "./_components/DailyChart";
 import ActivityTimeline from "./_components/ActivityTimeline";
 import InsightsPanel    from "./_components/InsightsPanel";
+import MeetingsCard     from "@/components/MeetingsCard";
 import type { TimelineEvent, DailyStat, Device } from "@/types";
 
 export default function DevicePage({ params }: { params: Promise<{ id: string }> }) {
@@ -34,8 +35,13 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
   );
 
   // Fetch device info for hostname / employee name
-  const { data: devices } = useSWR<Device[]>("devices", getDevices);
+  const { data: devices, mutate: mutateDevices } = useSWR<Device[]>("devices", getDevices);
   const device = devices?.find(d => d.id === id);
+
+  async function changeHeadless(override: boolean | null) {
+    await setDeviceHeadless(id, override);
+    mutateDevices();
+  }
 
   // OS lock/login screen apps — never count as active work time.
   // Must stay in sync with backend SYSTEM_IDLE_APPS and agent LOCK_SCREEN_APPS.
@@ -70,7 +76,7 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
       {/* ── Back link ── */}
       <Link
         href="/"
-        className="inline-flex items-center gap-1.5 text-gray-400 text-sm mb-3 hover:text-gray-700 transition w-fit"
+        className="inline-flex items-center gap-1.5 text-gray-600 text-sm mb-3 hover:text-gray-700 transition w-fit"
       >
         <ArrowLeft size={13} /> All devices
       </Link>
@@ -84,35 +90,35 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
           </h1>
           <div className="flex items-center gap-3 mt-1 flex-wrap">
             {device?.employee_name && (
-              <span className="flex items-center gap-1 text-xs text-gray-500">
+              <span className="flex items-center gap-1 text-xs text-gray-600">
                 <User size={11} />
                 {device.employee_name}
               </span>
             )}
             {device?.platform && (
-              <span className="text-xs text-gray-400 capitalize bg-gray-100 px-2 py-0.5 rounded-full">
+              <span className="text-xs text-gray-600 capitalize bg-gray-100 px-2 py-0.5 rounded-full">
                 {device.platform}
               </span>
             )}
             <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
               device?.is_online
                 ? "bg-green-50 text-green-600"
-                : "bg-gray-100 text-gray-500"
+                : "bg-gray-100 text-gray-600"
             }`}>
               {device?.is_online ? "● Online" : "○ Offline"}
             </span>
           </div>
           <p className="text-sm mt-1.5">
-            <span className="text-gray-500">Active on {selDate}:</span>{" "}
+            <span className="text-gray-600">Active on {selDate}:</span>{" "}
             <span className="text-green-600 font-bold">{fmtSeconds(activeSecsToday)}</span>
             {idleSecsToday > 0 && (
-              <span className="text-gray-400 text-xs ml-2">· {fmtSeconds(idleSecsToday)} idle</span>
+              <span className="text-gray-600 text-xs ml-2">· {fmtSeconds(idleSecsToday)} idle</span>
             )}
           </p>
         </div>
 
         <div className="flex flex-col gap-1 items-end shrink-0">
-          <label className="text-xs text-gray-400 font-medium">Date</label>
+          <label className="text-xs text-gray-600 font-medium">Date</label>
           <input
             type="date"
             value={selDate}
@@ -134,6 +140,40 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
             activeSecsToday={activeSecsToday}
             idleSecsToday={idleSecsToday}
           />
+          <MeetingsCard deviceId={id} days={7} />
+
+          {/* ── Agent visibility (per-device override) ── */}
+          <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">
+              Agent visibility
+            </p>
+            <div className="flex gap-1">
+              {([
+                { label: "Inherit", val: null },
+                { label: "Visible", val: false },
+                { label: "Hidden",  val: true },
+              ] as { label: string; val: boolean | null }[]).map(opt => {
+                const active = (device?.headless_override ?? null) === opt.val;
+                return (
+                  <button
+                    key={opt.label}
+                    onClick={() => changeHeadless(opt.val)}
+                    className={`flex-1 text-xs py-1.5 rounded-lg border transition ${
+                      active
+                        ? "bg-brand-50 border-brand-300 text-brand-700 font-semibold"
+                        : "border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-gray-500 mt-2">
+              {device?.headless ? "Hidden — no timer or tray icon." : "Visible — timer shown."}
+              {(device?.headless_override ?? null) === null && " (inheriting company default)"}
+            </p>
+          </div>
         </div>
 
         {/* Activity feed — below on mobile, left column on desktop */}

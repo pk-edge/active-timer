@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Optional, Set
 
-import redis.asyncio as aioredis
+import redis.asyncio as aioredis  # type: ignore  # resolved in the Docker image (requirements.txt: redis==5.2.1); the local IDE interpreter has no backend deps installed
 
 from app.core.config import get_settings
 
