@@ -119,14 +119,14 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           </button>
         </div>
 
-        <nav className="flex-1 px-3 py-3 space-y-4 overflow-y-auto">
+        <nav className="flex-1 px-3 py-3 space-y-4 overflow-y-auto sidebar-scroll">
           {NAV_GROUPS.map(group => {
             const visible = group.items.filter(it => can(it.module, "view"));
             if (visible.length === 0) return null;
             return (
               <div key={group.title ?? "x"}>
                 {group.title && (
-                  <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider text-white/40">
+                  <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-white/60">
                     {group.title}
                   </p>
                 )}
@@ -139,13 +139,13 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
                         href={href}
                         onClick={onClose}
                         className={clsx(
-                          "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition",
+                          "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-all duration-150",
                           active
-                            ? "bg-white/15 text-white font-semibold"
-                            : "text-white/70 hover:text-white hover:bg-white/10",
+                            ? "bg-white/20 text-white font-semibold shadow-sm"
+                            : "text-white/85 hover:text-white hover:bg-white/12",
                         )}
                       >
-                        <Icon size={16} />
+                        <Icon size={15} className={active ? "opacity-100" : "opacity-75"} />
                         {label}
                       </Link>
                     );
@@ -160,12 +160,12 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           {me && (
             <div className="px-3 pb-2">
               <p className="text-xs font-medium text-white truncate">{me.name}</p>
-              <p className="text-[11px] text-white/60 truncate">{me.role_name ?? "—"}</p>
+              <p className="text-[11px] text-white/75 truncate">{me.role_name ?? "—"}</p>
             </div>
           )}
           <button
             onClick={() => setConfirmSignOut(true)}
-            className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-white/70 hover:text-white hover:bg-white/10 transition w-full"
+            className="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-white/85 hover:text-white hover:bg-white/12 transition-all duration-150 w-full"
           >
             <LogOut size={16} />
             Sign out
