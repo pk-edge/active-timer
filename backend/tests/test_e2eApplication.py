@@ -38,6 +38,10 @@ CTX: dict = {
 }
 
 WINDOW_APPS = ["Code", "Chrome", "Slack"]
+# The backend normalizes app names at ingest + query time (app/core/app_normalizer
+# + migration 015): Chrome→Google Chrome, Code→Visual Studio Code, Slack→Slack.
+# Agents still SEND raw names (line below seeds raw), but reports return canonical.
+WINDOW_APPS_NORMALIZED = {"Google Chrome", "Visual Studio Code", "Slack"}
 N_WINDOW, WINDOW_SECS = 6, 300          # 6 × 300s = 1800s active today
 URL_HOSTS = [f"e2e0-{TAG}.com", f"e2e1-{TAG}.com"]
 
@@ -232,7 +236,7 @@ async def test_05_dashboards_and_reports(client):
 
     r = await client.get("/v1/home/app-usage?days=7", headers=_admin_h())
     assert r.status_code == 200
-    assert {a["app_name"] for a in r.json()} >= set(WINDOW_APPS)
+    assert {a["app_name"] for a in r.json()} >= WINDOW_APPS_NORMALIZED
 
     r = await client.get("/v1/home/web-usage?days=7", headers=_admin_h())
     assert r.status_code == 200
@@ -253,7 +257,7 @@ async def test_05_dashboards_and_reports(client):
 
     r = await client.get("/v1/reports/company/top-apps?days=7", headers=_admin_h())
     assert r.status_code == 200
-    assert {a["app_name"] for a in r.json()} >= set(WINDOW_APPS)
+    assert {a["app_name"] for a in r.json()} >= WINDOW_APPS_NORMALIZED
 
     r = await client.get("/v1/reports/company/top-urls?days=7", headers=_admin_h())
     assert r.status_code == 200
@@ -529,7 +533,7 @@ async def test_10_tech_analytics(client):
 
     r = await client.get("/v1/tech/utilization/apps?days=7", headers=_admin_h())
     assert r.status_code == 200
-    assert {a["app_name"] for a in r.json()} >= set(WINDOW_APPS)
+    assert {a["app_name"] for a in r.json()} >= WINDOW_APPS_NORMALIZED
 
     for ep in ("/v1/tech/utilization/app-trends?days=7",
                "/v1/tech/utilization/adoption?days=7",

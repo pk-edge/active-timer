@@ -6,7 +6,7 @@ import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
 import { useDevicesPush } from "@/hooks/useDevicesPush";
 import DeviceCard from "./_components/DeviceCard";
-import { Monitor, Wifi, WifiOff, Search, X, Users2 } from "lucide-react";
+import { Monitor, Wifi, WifiOff, Search, X, Users2, Archive } from "lucide-react";
 import type { Device, User } from "@/types";
 
 type Filter = "all" | "online" | "offline";
@@ -51,16 +51,22 @@ function PageSkeleton() {
 
 export default function DevicesPage() {
   const { loading, can } = useUser();
-  useDevicesPush();
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   const [view, setView] = useState<"all" | "byUser">("all");
+  const [showArchived, setShowArchived] = useState(false);
 
-  const { data: devices, isLoading, mutate } = useSWR<Device[]>("devices", getDevices, {
-    refreshInterval: 5_000,
-    revalidateOnFocus: true,
-    revalidateOnReconnect: true,
-  });
+  const canArchive = can("devices", "archive");
+  const canDelete  = can("devices", "delete");
+
+  useDevicesPush(showArchived);
+
+  const swrKey = showArchived ? "devices?show_archived=true" : "devices";
+  const { data: devices, isLoading, mutate } = useSWR<Device[]>(
+    swrKey,
+    () => getDevices(showArchived),
+    { refreshInterval: 5_000, revalidateOnFocus: true, revalidateOnReconnect: true },
+  );
 
   // Employees for the assign dropdown — needs users.view to populate.
   const canAssign = can("devices", "assign") && can("users", "view");
@@ -70,13 +76,18 @@ export default function DevicesPage() {
     [users],
   );
 
-  const online  = devices?.filter(d => d.is_online).length ?? 0;
-  const offline = (devices?.length ?? 0) - online;
+  const online   = devices?.filter(d => d.is_online).length ?? 0;
+  const archived = devices?.filter(d => d.is_archived).length ?? 0;
+  const offline  = (devices?.filter(d => !d.is_online && !d.is_archived).length) ?? 0;
 
   const filtered = useMemo(() => {
     let list = devices ?? [];
-    if (filter === "online")  list = list.filter(d => d.is_online);
-    if (filter === "offline") list = list.filter(d => !d.is_online);
+    if (showArchived) {
+      list = list.filter(d => d.is_archived);
+    } else {
+      if (filter === "online")  list = list.filter(d => d.is_online);
+      if (filter === "offline") list = list.filter(d => !d.is_online);
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
@@ -87,7 +98,7 @@ export default function DevicesPage() {
       );
     }
     return list;
-  }, [devices, filter, search]);
+  }, [devices, filter, search, showArchived]);
 
   const grouped = useMemo(() => {
     const m = new Map<string, { name: string; devices: Device[] }>();
@@ -106,28 +117,45 @@ export default function DevicesPage() {
   if (!can("devices", "view")) return <AccessDenied label="Devices" />;
   if (isLoading) return <PageSkeleton />;
 
+  const activeCount = (devices?.length ?? 0) - archived;
+
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">All Devices</h1>
-        <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
-          <button onClick={() => setView("all")}
-                  className={`px-3 py-1.5 text-sm font-medium transition ${view === "all" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
-            All devices
-          </button>
-          <button onClick={() => setView("byUser")}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition ${view === "byUser" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
-            <Users2 size={14} /> By user
-          </button>
+        <div className="flex items-center gap-3">
+          {canArchive && (
+            <button
+              onClick={() => { setShowArchived(v => !v); setFilter("all"); }}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border transition ${
+                showArchived
+                  ? "bg-amber-50 border-amber-300 text-amber-700"
+                  : "bg-white border-gray-200 text-gray-500 hover:border-gray-300"
+              }`}
+            >
+              <Archive size={14} />
+              {showArchived ? "Hide archived" : "Show archived"}
+            </button>
+          )}
+          <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
+            <button onClick={() => setView("all")}
+                    className={`px-3 py-1.5 text-sm font-medium transition ${view === "all" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
+              All devices
+            </button>
+            <button onClick={() => setView("byUser")}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition ${view === "byUser" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
+              <Users2 size={14} /> By user
+            </button>
+          </div>
         </div>
       </div>
       <p className="text-gray-500 text-sm mb-6">Live — refreshes every 5 seconds</p>
 
-      {/* Stat cards — clickable filter */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      {/* Stat cards */}
+      <div className={`grid gap-4 mb-6 ${showArchived && canArchive ? "grid-cols-4" : "grid-cols-3"}`}>
         <StatCard
-          label="Total devices"
-          value={devices?.length ?? 0}
+          label="Active devices"
+          value={activeCount}
           icon={<Monitor size={18} />}
           active={filter === "all"}
           onClick={() => setFilter("all")}
@@ -148,6 +176,14 @@ export default function DevicesPage() {
           active={filter === "offline"}
           onClick={() => setFilter("offline")}
         />
+        {showArchived && canArchive && (
+          <StatCard
+            label="Archived"
+            value={archived}
+            icon={<Archive size={18} />}
+            color="text-amber-600"
+          />
+        )}
       </div>
 
       {/* Search bar */}
@@ -174,8 +210,18 @@ export default function DevicesPage() {
       {view === "all" && (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
           {filtered.map(d => (
-            <DeviceCard key={d.id} device={d} employees={employees}
-                        canAssign={canAssign} onAssigned={() => mutate()} />
+            <DeviceCard
+              key={d.id}
+              device={d}
+              employees={employees}
+              canAssign={canAssign}
+              canArchive={canArchive}
+              canDelete={canDelete}
+              onAssigned={() => mutate()}
+              onArchived={() => mutate()}
+              onRestored={() => mutate()}
+              onDeleted={() => mutate()}
+            />
           ))}
           {filtered.length === 0 && (
             <p className="col-span-full text-gray-400 text-sm py-12 text-center">
@@ -202,8 +248,18 @@ export default function DevicesPage() {
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
                 {group.devices.map(d => (
-                  <DeviceCard key={d.id} device={d} employees={employees}
-                              canAssign={canAssign} onAssigned={() => mutate()} />
+                  <DeviceCard
+                    key={d.id}
+                    device={d}
+                    employees={employees}
+                    canAssign={canAssign}
+                    canArchive={canArchive}
+                    canDelete={canDelete}
+                    onAssigned={() => mutate()}
+                    onArchived={() => mutate()}
+                    onRestored={() => mutate()}
+                    onDeleted={() => mutate()}
+                  />
                 ))}
               </div>
             </div>
@@ -215,7 +271,9 @@ export default function DevicesPage() {
       )}
 
       {search || filter !== "all" ? (
-        <p className="text-xs text-gray-400 mt-3">{filtered.length} of {devices?.length ?? 0} device{devices?.length !== 1 ? "s" : ""}</p>
+        <p className="text-xs text-gray-400 mt-3">
+          {filtered.length} of {devices?.length ?? 0} device{devices?.length !== 1 ? "s" : ""}
+        </p>
       ) : null}
     </div>
   );

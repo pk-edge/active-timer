@@ -28,7 +28,9 @@ async def _get_device_for_admin(device_id: str, admin: Employee, db: AsyncSessio
     except ValueError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid device id")
 
-    result = await db.execute(select(Device).where(Device.id == device_uuid))
+    result = await db.execute(
+        select(Device).where(Device.id == device_uuid, Device.is_deleted == False)  # noqa: E712
+    )
     device = result.scalar_one_or_none()
     if not device or device.company_id != admin.company_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
@@ -42,21 +44,40 @@ async def _get_device_for_admin(device_id: str, admin: Employee, db: AsyncSessio
 
 @router.get("", response_model=List[DeviceOut])
 async def list_devices(
+    show_archived: bool = Query(default=False),
     admin: Employee = Depends(require("devices", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     ids = await visible_device_ids(admin, db)
     if ids is not ALL and not ids:
         return []
-    q = (
-        select(Device)
-        .options(joinedload(Device.employee))  # many-to-one: one joined query, not two
-        .where(Device.company_id == admin.company_id, Device.is_active == True)
-        .order_by(Device.last_seen.desc().nullslast())
-    )
+
+    if show_archived:
+        # Active + archived, but never deleted
+        q = (
+            select(Device)
+            .options(joinedload(Device.employee))
+            .where(
+                Device.company_id == admin.company_id,
+                Device.is_deleted == False,  # noqa: E712
+            )
+            .order_by(Device.is_active.desc(), Device.last_seen.desc().nullslast())
+        )
+    else:
+        q = (
+            select(Device)
+            .options(joinedload(Device.employee))
+            .where(
+                Device.company_id == admin.company_id,
+                Device.is_active == True,    # noqa: E712
+                Device.is_deleted == False,  # noqa: E712
+            )
+            .order_by(Device.last_seen.desc().nullslast())
+        )
+
     if ids is not ALL:
         q = q.where(Device.id.in_(ids))
-    result = await db.execute(q)
+    result  = await db.execute(q)
     devices = result.scalars().all()
     cutoff  = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
     return [
@@ -69,6 +90,8 @@ async def list_devices(
             last_seen=d.last_seen,
             last_seen_unix=int(d.last_seen.timestamp()) if d.last_seen else None,
             is_online=bool(d.last_seen and d.last_seen > cutoff),
+            is_archived=d.is_archived,
+            is_deleted=d.is_deleted,
         )
         for d in devices
     ]
@@ -120,7 +143,86 @@ async def assign_device(
         last_seen=device.last_seen,
         last_seen_unix=int(device.last_seen.timestamp()) if device.last_seen else None,
         is_online=bool(device.last_seen and device.last_seen > cutoff),
+        is_archived=device.is_archived,
+        is_deleted=device.is_deleted,
     )
+
+
+@router.patch("/{device_id}/archive", response_model=DeviceOut)
+async def archive_device(
+    device_id: str,
+    admin: Employee = Depends(require("devices", "archive")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Suspend a device. It cannot send data until restored."""
+    device = await _get_device_for_admin(device_id, admin, db)
+    if device.is_archived:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Device is already archived")
+
+    device.is_active   = False
+    device.is_archived = True
+    await audit.record(db, admin, "device.archived", "device", str(device.id), {"source": "portal"})
+    await db.commit()
+
+    return DeviceOut(
+        id=str(device.id),
+        hostname=device.hostname,
+        platform=device.platform,
+        employee_id=str(device.employee_id) if device.employee_id else None,
+        employee_name=device.employee.name if device.employee else None,
+        last_seen=device.last_seen,
+        last_seen_unix=int(device.last_seen.timestamp()) if device.last_seen else None,
+        is_online=False,
+        is_archived=True,
+        is_deleted=False,
+    )
+
+
+@router.patch("/{device_id}/restore", response_model=DeviceOut)
+async def restore_device(
+    device_id: str,
+    admin: Employee = Depends(require("devices", "archive")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Restore an archived device to active status."""
+    device = await _get_device_for_admin(device_id, admin, db)
+    if not device.is_archived:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Device is not archived")
+
+    device.is_active   = True
+    device.is_archived = False
+    await audit.record(db, admin, "device.restored", "device", str(device.id), {"source": "portal"})
+    await db.commit()
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+    return DeviceOut(
+        id=str(device.id),
+        hostname=device.hostname,
+        platform=device.platform,
+        employee_id=str(device.employee_id) if device.employee_id else None,
+        employee_name=device.employee.name if device.employee else None,
+        last_seen=device.last_seen,
+        last_seen_unix=int(device.last_seen.timestamp()) if device.last_seen else None,
+        is_online=bool(device.last_seen and device.last_seen > cutoff),
+        is_archived=False,
+        is_deleted=False,
+    )
+
+
+@router.delete("/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_device(
+    device_id: str,
+    admin: Employee = Depends(require("devices", "delete")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Soft-delete a device. No DB row is removed; the device disappears from the UI."""
+    device = await _get_device_for_admin(device_id, admin, db)
+
+    device.is_deleted  = True
+    device.is_active   = False
+    device.is_archived = False
+    await audit.record(db, admin, "device.deleted", "device", str(device.id), {"source": "portal"})
+    await db.commit()
 
 
 @router.get("/stream")
@@ -131,7 +233,8 @@ async def stream_device_status(
 
     Industrial-standard pattern:
     - Auth and DB work happen before streaming starts; connection released immediately.
-    - Hard cap: 503 when broadcaster is at MAX_SUBSCRIBERS.
+    - No subscriber cap: events fan out via Redis pub/sub (app/core/broadcaster.py),
+      so this scales across workers/replicas.
     - Burst coalescing: rapid ingest flushes are merged so the frontend receives
       at most one push every MIN_PUSH_INTERVAL seconds (same as home/stream).
     - 25 s heartbeat keeps proxies and load-balancers from killing idle connections.
@@ -158,22 +261,10 @@ async def stream_device_status(
 
     # The auth session above is already released (its `async with` block exited),
     # so the long-lived stream below holds NO pooled connection — no per-tab leak.
-    # Reject early if the broadcaster is at capacity before we start streaming.
-    if broadcaster.subscriber_count() >= broadcaster.MAX_SUBSCRIBERS:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="SSE capacity reached, try again later",
-        )
-
     MIN_PUSH_INTERVAL = 2.0  # seconds — matches home/stream throttle
 
     async def event_stream():
         q = broadcaster.subscribe()
-        if q is None:
-            # Capacity was grabbed between the check above and subscribe() —
-            # yield a one-shot error event so the client knows to back off.
-            yield "event: error\ndata: capacity\n\n"
-            return
         try:
             yield "event: connected\ndata: ok\n\n"
             last_push = time.monotonic()
