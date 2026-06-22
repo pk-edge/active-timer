@@ -79,12 +79,15 @@ def _log_oauth_status() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core import broadcaster
     _assert_secure_config()      # refuse to boot a real deployment with a weak secret
     _log_oauth_status()          # surface missing Google OAuth config at startup
     await init_db()              # migrations + RBAC seed + bootstrap admin (all idempotent)
+    await broadcaster.startup()  # open Redis pub/sub + listener BEFORE workers publish
     await ingest_queue.start()   # start async worker pool
     yield
     await ingest_queue.stop()    # drain + shutdown workers cleanly
+    await broadcaster.shutdown() # stop listener + close Redis after workers are done
     from app.db.base import engine, ingest_engine
     await ingest_engine.dispose()
     await engine.dispose()

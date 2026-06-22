@@ -138,6 +138,9 @@ class Config:
     WINDOW_POLL_SECS:    int = 5
     SCREENSHOT_INTERVAL: int = 300
     IDLE_THRESHOLD_SECS: int = 300  # 5 minutes — stop timer if no input for 5 min
+    # NOTE: meeting/media contexts exempt idle indefinitely (live meeting/video
+    # time is never cut by inactivity). A walk-away during a meeting is bounded by
+    # screen lock / display sleep, not by an input timeout — by design.
     URL_POLL_SECS:       int = 30   # poll browser history every 30s for sub-link fidelity
     ACTIVITY_HEARTBEAT_SECS: int = 60  # re-emit current window as a slice even without a switch
 

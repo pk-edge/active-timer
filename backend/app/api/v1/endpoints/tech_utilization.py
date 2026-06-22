@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 
 from app.api.deps import get_db, require
 from app.core import audit
+from app.core.app_normalizer import normalize_app_name
 from app.core.scoping import visible_device_ids, ALL
 from app.db.models import AppCategory, AppCategoryRule, Employee
 from app.schemas.tech import (
@@ -78,7 +79,8 @@ async def _ensure_default_categories(company_id: uuid.UUID, db: AsyncSession) ->
         db.add(cat)
         await db.flush()
 
-        for pattern in DEFAULT_RULES.get(cat_def["name"], []):
+        for raw in DEFAULT_RULES.get(cat_def["name"], []):
+            pattern = normalize_app_name(raw)   # canonical so it matches normalized events
             if pattern not in existing_patterns:
                 existing_patterns.add(pattern)
                 db.add(AppCategoryRule(
@@ -254,16 +256,20 @@ async def add_rule(
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Category not found")
 
+    # Store the canonical form so the rule matches normalized events (e.g. a
+    # "Chrome" rule is saved as "Google Chrome", matching normalize_app_name).
+    pattern = normalize_app_name(body.app_pattern)
+
     existing = await db.execute(
         select(AppCategoryRule).where(
             AppCategoryRule.company_id == admin.company_id,
-            AppCategoryRule.app_pattern == body.app_pattern,
+            AppCategoryRule.app_pattern == pattern,
         )
     )
     if existing.scalars().first():
         raise HTTPException(status_code=409, detail="App pattern already assigned to a category")
 
-    rule = AppCategoryRule(category_id=cid, company_id=admin.company_id, app_pattern=body.app_pattern)
+    rule = AppCategoryRule(category_id=cid, company_id=admin.company_id, app_pattern=pattern)
     db.add(rule)
     await db.commit()
     await db.refresh(rule)
@@ -314,9 +320,9 @@ async def tech_summary(
 
     total_res = await db.execute(text(f"""
         SELECT
-            COALESCE(SUM(ae.duration), 0)       AS total_seconds,
-            COUNT(DISTINCT ae.app_name)          AS total_apps,
-            COUNT(DISTINCT d.employee_id)        AS total_users
+            COALESCE(SUM(ae.duration), 0)                    AS total_seconds,
+            COUNT(DISTINCT normalize_app_name(ae.app_name)) AS total_apps,
+            COUNT(DISTINCT d.employee_id)                   AS total_users
         FROM activity_events ae
         JOIN devices d ON d.id = ae.device_id
         WHERE d.company_id = :company_id
@@ -331,7 +337,7 @@ async def tech_summary(
         SELECT c.name, c.color, SUM(ae.duration) AS seconds
         FROM activity_events ae
         JOIN devices d ON d.id = ae.device_id
-        JOIN app_category_rules r ON r.app_pattern = ae.app_name AND r.company_id = d.company_id
+        JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
         JOIN app_categories c ON c.id = r.category_id
         WHERE d.company_id = :company_id
           AND ae.event_type = 'window_change'
@@ -345,7 +351,8 @@ async def tech_summary(
     top_cat = cat_res.fetchone()
 
     app_res = await db.execute(text(f"""
-        SELECT ae.app_name, SUM(ae.duration) AS seconds
+        SELECT normalize_app_name(ae.app_name) AS app_name,
+               SUM(ae.duration) AS seconds
         FROM activity_events ae
         JOIN devices d ON d.id = ae.device_id
         WHERE d.company_id = :company_id
@@ -353,7 +360,7 @@ async def tech_summary(
           AND ae.app_name IS NOT NULL
           AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           {clause}
-        GROUP BY ae.app_name
+        GROUP BY normalize_app_name(ae.app_name)
         ORDER BY seconds DESC
         LIMIT 1
     """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
@@ -398,7 +405,7 @@ async def category_allocation(
                 COUNT(DISTINCT d.employee_id) AS users
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
-            JOIN app_category_rules r ON r.app_pattern = ae.app_name AND r.company_id = d.company_id
+            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
             JOIN app_categories c ON c.id = r.category_id
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
@@ -422,7 +429,7 @@ async def category_allocation(
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               AND NOT EXISTS (
                   SELECT 1 FROM app_category_rules r2
-                  WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
+                  WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
               )
               {clause}
             GROUP BY category_name, color
@@ -443,7 +450,7 @@ async def category_allocation(
                 COUNT(DISTINCT d.employee_id) AS users
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
-            JOIN app_category_rules r ON r.app_pattern = ae.app_name AND r.company_id = d.company_id
+            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
             JOIN app_categories c ON c.id = r.category_id
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
@@ -465,7 +472,7 @@ async def category_allocation(
               AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
               AND NOT EXISTS (
                   SELECT 1 FROM app_category_rules r2
-                  WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
+                  WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
               )
               {clause}
             GROUP BY category_name
@@ -523,7 +530,7 @@ async def app_trends(
     current_res = await db.execute(text(f"""
         WITH app_data AS (
             SELECT
-                ae.app_name,
+                normalize_app_name(ae.app_name) AS app_name,
                 COALESCE(c.id::text, NULL) AS category_id,
                 COALESCE(c.name, 'Uncategorized') AS category_name,
                 COALESCE(c.color, '#94a3b8') AS color,
@@ -531,14 +538,14 @@ async def app_trends(
                 COUNT(DISTINCT d.employee_id) AS users
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
-            LEFT JOIN app_category_rules r ON r.app_pattern = ae.app_name AND r.company_id = d.company_id
+            LEFT JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
             LEFT JOIN app_categories c ON c.id = r.category_id
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {clause}
-            GROUP BY ae.app_name, c.id, c.name, c.color
+            GROUP BY normalize_app_name(ae.app_name), c.id, c.name, c.color
         ),
         total AS (SELECT SUM(seconds) AS t FROM app_data)
         SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
@@ -549,7 +556,7 @@ async def app_trends(
     prev_res = await db.execute(text(f"""
         WITH app_data AS (
             SELECT
-                ae.app_name,
+                normalize_app_name(ae.app_name) AS app_name,
                 SUM(ae.duration) AS seconds,
                 COUNT(DISTINCT d.employee_id) AS users
             FROM activity_events ae
@@ -559,7 +566,7 @@ async def app_trends(
               AND ae.app_name IS NOT NULL
               AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
               {clause}
-            GROUP BY ae.app_name
+            GROUP BY normalize_app_name(ae.app_name)
         ),
         total AS (SELECT SUM(seconds) AS t FROM app_data)
         SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
@@ -623,7 +630,7 @@ async def app_list(
     result = await db.execute(text(f"""
         WITH app_data AS (
             SELECT
-                ae.app_name,
+                normalize_app_name(ae.app_name) AS app_name,
                 COALESCE(c.id::text, NULL) AS category_id,
                 COALESCE(c.name, 'Uncategorized') AS category_name,
                 COALESCE(c.color, '#94a3b8') AS color,
@@ -631,7 +638,7 @@ async def app_list(
                 COUNT(DISTINCT d.employee_id) AS user_count
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
-            LEFT JOIN app_category_rules r ON r.app_pattern = ae.app_name AND r.company_id = d.company_id
+            LEFT JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
             LEFT JOIN app_categories c ON c.id = r.category_id
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
@@ -639,7 +646,7 @@ async def app_list(
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {cat_filter}
               {clause}
-            GROUP BY ae.app_name, c.id, c.name, c.color
+            GROUP BY normalize_app_name(ae.app_name), c.id, c.name, c.color
         ),
         total AS (SELECT SUM(seconds) AS t FROM app_data)
         SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
@@ -676,7 +683,7 @@ async def app_adoption(
     clause, sparams = await _scope_clause(admin, db)
 
     top_apps_res = await db.execute(text(f"""
-        SELECT ae.app_name, SUM(ae.duration) AS seconds
+        SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS seconds
         FROM activity_events ae
         JOIN devices d ON d.id = ae.device_id
         WHERE d.company_id = :company_id
@@ -684,7 +691,7 @@ async def app_adoption(
           AND ae.app_name IS NOT NULL
           AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
           {clause}
-        GROUP BY ae.app_name
+        GROUP BY normalize_app_name(ae.app_name)
         ORDER BY seconds DESC
         LIMIT :top_n
     """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, "top_n": top_n, **sparams})
@@ -741,7 +748,7 @@ async def get_uncategorized(
 
     apps_res = await db.execute(text(f"""
         SELECT
-            ae.app_name                           AS pattern,
+            normalize_app_name(ae.app_name)       AS pattern,
             'app'                                 AS kind,
             SUM(ae.duration)                      AS seconds,
             COUNT(DISTINCT d.employee_id)         AS user_count,
@@ -755,10 +762,10 @@ async def get_uncategorized(
           AND NOT EXISTS (
               SELECT 1 FROM app_category_rules r
               WHERE r.company_id = d.company_id
-                AND r.app_pattern = ae.app_name
+                AND r.app_pattern = normalize_app_name(ae.app_name)
           )
           {clause}
-        GROUP BY ae.app_name
+        GROUP BY normalize_app_name(ae.app_name)
         ORDER BY seconds DESC
         LIMIT :limit
     """), params)
@@ -1106,7 +1113,7 @@ async def app_usage_list(
 
     res = await db.execute(text(f"""
         WITH agg AS (
-            SELECT ae.app_name,
+            SELECT normalize_app_name(ae.app_name) AS app_name,
                 SUM(ae.duration) AS total_secs,
                 COUNT(DISTINCT d.employee_id) AS users
             FROM activity_events ae
@@ -1116,7 +1123,7 @@ async def app_usage_list(
               AND ae.app_name IS NOT NULL
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
-            GROUP BY ae.app_name
+            GROUP BY normalize_app_name(ae.app_name)
         ),
         tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM agg)
         SELECT a.app_name, a.total_secs, a.users,
@@ -1178,7 +1185,7 @@ async def app_usage_detail(
             JOIN devices d ON d.id = ae.device_id
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
-              AND ae.app_name = :app_name
+              AND normalize_app_name(ae.app_name) = :app_name
               AND ae.window_title IS NOT NULL AND ae.window_title <> ''
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
@@ -1201,7 +1208,7 @@ async def app_usage_detail(
             JOIN employees e ON e.id = d.employee_id
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
-              AND ae.app_name = :app_name
+              AND normalize_app_name(ae.app_name) = :app_name
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY e.name, e.email
@@ -1222,7 +1229,7 @@ async def app_usage_detail(
             JOIN devices d ON d.id = ae.device_id
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
-              AND ae.app_name = :app_name
+              AND normalize_app_name(ae.app_name) = :app_name
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               {combined}
             GROUP BY day ORDER BY day ASC
@@ -1261,7 +1268,7 @@ async def category_usage_list(
                 COUNT(DISTINCT d.employee_id) AS users
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
-            JOIN app_category_rules r ON r.app_pattern = ae.app_name
+            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
                 AND r.company_id = d.company_id
             JOIN app_categories c ON c.id = r.category_id
             WHERE d.company_id = :company_id
@@ -1284,7 +1291,7 @@ async def category_usage_list(
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               AND NOT EXISTS (
                   SELECT 1 FROM app_category_rules r2
-                  WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
+                  WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
               )
               {combined}
             GROUP BY name, color
@@ -1352,7 +1359,7 @@ async def category_usage_detail(
             SELECT COALESCE(SUM(ae.duration), 0) AS total_secs
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
-            JOIN app_category_rules r ON r.app_pattern = ae.app_name
+            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
                 AND r.company_id = d.company_id
             WHERE d.company_id = :company_id
               AND r.category_id = :cat_id
@@ -1371,7 +1378,7 @@ async def category_usage_detail(
               AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
               AND NOT EXISTS (
                   SELECT 1 FROM app_category_rules r2
-                  WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
+                  WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
               )
               {combined}
         """), params)
@@ -1380,21 +1387,21 @@ async def category_usage_detail(
     if tab == "activities":
         if cat_id:
             res = await db.execute(text(f"""
-                SELECT ae.app_name, SUM(ae.duration) AS total_secs
+                SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS total_secs
                 FROM activity_events ae
                 JOIN devices d ON d.id = ae.device_id
-                JOIN app_category_rules r ON r.app_pattern = ae.app_name
+                JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
                     AND r.company_id = d.company_id
                 WHERE d.company_id = :company_id
                   AND r.category_id = :cat_id
                   AND ae.event_type = 'window_change'
                   AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   {combined}
-                GROUP BY ae.app_name ORDER BY total_secs DESC LIMIT 50
+                GROUP BY normalize_app_name(ae.app_name) ORDER BY total_secs DESC LIMIT 50
             """), {**params, "cat_id": cat_id})
         else:
             res = await db.execute(text(f"""
-                SELECT ae.app_name, SUM(ae.duration) AS total_secs
+                SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS total_secs
                 FROM activity_events ae
                 JOIN devices d ON d.id = ae.device_id
                 WHERE d.company_id = :company_id
@@ -1403,10 +1410,10 @@ async def category_usage_detail(
                   AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   AND NOT EXISTS (
                       SELECT 1 FROM app_category_rules r2
-                      WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
+                      WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
                   )
                   {combined}
-                GROUP BY ae.app_name ORDER BY total_secs DESC LIMIT 50
+                GROUP BY normalize_app_name(ae.app_name) ORDER BY total_secs DESC LIMIT 50
             """), params)
         rows = res.fetchall()
         total = out.total_secs or 1
@@ -1423,7 +1430,7 @@ async def category_usage_detail(
                 FROM activity_events ae
                 JOIN devices d ON d.id = ae.device_id
                 JOIN employees e ON e.id = d.employee_id
-                JOIN app_category_rules r ON r.app_pattern = ae.app_name
+                JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
                     AND r.company_id = d.company_id
                 WHERE d.company_id = :company_id
                   AND r.category_id = :cat_id
@@ -1444,7 +1451,7 @@ async def category_usage_detail(
                   AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   AND NOT EXISTS (
                       SELECT 1 FROM app_category_rules r2
-                      WHERE r2.company_id = d.company_id AND r2.app_pattern = ae.app_name
+                      WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
                   )
                   {combined}
                 GROUP BY e.name, e.email ORDER BY total_secs DESC LIMIT 100

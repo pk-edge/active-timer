@@ -384,12 +384,13 @@ async def user_activity_detail(
 
         app_rows = (await db.execute(
             text("""
-                SELECT app_name, SUM(duration) AS seconds
+                SELECT normalize_app_name(app_name) AS app_name,
+                       SUM(duration) AS seconds
                 FROM activity_events
                 WHERE device_id = ANY(:ids)
                   AND event_type = 'window_change' AND app_name IS NOT NULL
                   AND timestamp >= NOW() - INTERVAL '7 days'
-                GROUP BY app_name ORDER BY seconds DESC LIMIT 8
+                GROUP BY normalize_app_name(app_name) ORDER BY seconds DESC LIMIT 8
             """),
             {"ids": dev_ids},
         )).all()

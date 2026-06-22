@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
@@ -47,7 +48,7 @@ export default function ReportsPage() {
 
   const totalActive = summary?.reduce((sum, d) => sum + d.active_seconds, 0) ?? 0;
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("reports", "view")) return <AccessDenied label="Reports" />;
 
   return (
@@ -58,7 +59,7 @@ export default function ReportsPage() {
       <div className="shrink-0 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">Reports</h1>
-          <p className="text-gray-500 text-xs sm:text-sm mt-0.5">
+          <p className="text-gray-600 text-xs sm:text-sm mt-0.5">
             {selectedDevice
               ? `${selectedDevice.hostname}${selectedDevice.employee_name ? ` · ${selectedDevice.employee_name}` : ""}`
               : "Company-wide"}
@@ -81,7 +82,7 @@ export default function ReportsPage() {
                 </option>
               ))}
             </select>
-            <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
           </div>
 
           {/* Period toggle */}
@@ -107,17 +108,17 @@ export default function ReportsPage() {
       {totalActive > 0 && (
         <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3">
           <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
-            <p className="text-xs text-gray-500 mb-0.5">Total active time</p>
+            <p className="text-xs text-gray-600 mb-0.5">Total active time</p>
             <p className="text-lg sm:text-xl font-semibold text-gray-900 leading-tight">{fmtSeconds(totalActive)}</p>
-            <p className="text-xs text-gray-400 mt-0.5">over {days} days</p>
+            <p className="text-xs text-gray-600 mt-0.5">over {days} days</p>
           </div>
           {summary && summary.length > 0 && (
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
-              <p className="text-xs text-gray-500 mb-0.5">Avg per day</p>
+              <p className="text-xs text-gray-600 mb-0.5">Avg per day</p>
               <p className="text-lg sm:text-xl font-semibold text-gray-900 leading-tight">
                 {fmtSeconds(Math.round(totalActive / summary.length))}
               </p>
-              <p className="text-xs text-gray-400 mt-0.5">{summary.length} active days</p>
+              <p className="text-xs text-gray-600 mt-0.5">{summary.length} active days</p>
             </div>
           )}
         </div>
@@ -169,7 +170,7 @@ export default function ReportsPage() {
           <div className="shrink-0 px-4 sm:px-5 pt-4 pb-3 border-b border-gray-100">
             <p className="text-sm font-semibold text-gray-800 mb-3">Top applications</p>
             <div className="relative">
-              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+              <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
               <input
                 type="text"
                 placeholder="Search applications…"
@@ -180,7 +181,7 @@ export default function ReportsPage() {
               {appSearch && (
                 <button
                   onClick={() => setAppSearch("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600"
                 >
                   <X size={13} />
                 </button>
@@ -194,7 +195,7 @@ export default function ReportsPage() {
               const pct = Math.round((app.seconds / (apps[0]?.seconds || 1)) * 100);
               return (
                 <div key={app.app_name} className="flex items-center gap-2 sm:gap-3">
-                  <span className="text-xs text-gray-400 w-5 text-right shrink-0">{i + 1}</span>
+                  <span className="text-xs text-gray-600 w-5 text-right shrink-0">{i + 1}</span>
                   <span className="text-sm text-gray-700 w-28 sm:w-40 truncate shrink-0">{app.app_name}</span>
                   <div className="flex-1 min-w-0 bg-gray-100 rounded-full h-2">
                     <div
@@ -202,14 +203,14 @@ export default function ReportsPage() {
                       style={{ width: `${pct}%` }}
                     />
                   </div>
-                  <span className="text-xs text-gray-500 w-14 sm:w-16 text-right shrink-0">
+                  <span className="text-xs text-gray-600 w-14 sm:w-16 text-right shrink-0">
                     {fmtSeconds(app.seconds)}
                   </span>
                 </div>
               );
             })}
             {filteredApps.length === 0 && (
-              <p className="text-sm text-gray-400 py-6 text-center">No applications match your search.</p>
+              <p className="text-sm text-gray-600 py-6 text-center">No applications match your search.</p>
             )}
           </div>
         </div>

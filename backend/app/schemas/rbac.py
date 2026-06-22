@@ -140,6 +140,12 @@ class InstallerOut(BaseModel):
     notes: Optional[str] = None
     is_active: bool
     uploaded_at: Optional[str] = None
+    # Distribution config (additive; defaults reproduce today's behavior).
+    rollout_percent: int = 100
+    mandatory: bool = False
+    channel: str = "stable"
+    min_supported_version: Optional[str] = None
+    expires_at: Optional[str] = None
 
 
 class InstallerDownloadOut(BaseModel):
@@ -152,3 +158,34 @@ class InstallerDownloadOut(BaseModel):
     downloaded_by_name: str
     downloaded_by_email: str
     downloaded_at: str
+
+
+# ── Auto-update: distribution config + telemetry ──────────────────────────────
+
+class InstallerDistributionIn(BaseModel):
+    rollout_percent: Optional[int] = None
+    mandatory: Optional[bool] = None
+    channel: Optional[str] = None
+    min_supported_version: Optional[str] = None
+    expires_at: Optional[str] = None   # ISO8601
+
+
+class UpdateReportIn(BaseModel):
+    target_version: str
+    from_version: Optional[str] = None
+    status: str
+    error_code: Optional[str] = None
+    progress: Optional[int] = 0
+    platform: Optional[str] = None
+    channel: Optional[str] = None
+
+
+class UpdateRunOut(BaseModel):
+    id: str
+    device_id: str
+    from_version: Optional[str] = None
+    target_version: str
+    status: str
+    error_code: Optional[str] = None
+    progress: int
+    updated_at: Optional[str] = None

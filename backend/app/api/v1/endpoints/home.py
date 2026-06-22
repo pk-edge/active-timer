@@ -118,6 +118,90 @@ async def _status_rows(ids, company_id, db: AsyncSession) -> list[dict]:
     return out
 
 
+# ── SSE snapshot cache (fan-out overload protection) ──────────────────────────
+# A device-update event fans out to EVERY open dashboard tab at once. Without
+# coalescing, 1 500 tabs would each run the heavy double-LATERAL status query on
+# every ingest flush and drain the 10-connection HTTP pool. But the overlaid
+# payload is byte-identical for every connection sharing a (company, scope) —
+# 1 500 admins on the company-wide view are ONE scope. So we compute the final
+# SSE payload once per scope per _SNAPSHOT_TTL and let all same-scope tabs read it:
+#   • single-flight lock → a simultaneous wake-up of N same-scope tabs = 1 query
+#   • _snapshot_db_sem   → at most N concurrent SSE queries ever touch the pool,
+#                          so SSE can never starve real user requests
+#   • TTL pruning        → cache stays O(distinct live scopes); no unbounded growth
+# The cache key includes company_id + the exact visible-id set, so a connection
+# only ever reads a payload built for its OWN authorized scope (no leakage).
+_SNAPSHOT_TTL = 1.0           # seconds — realtime freshness, far under the 60-90s cutoff
+_SNAPSHOT_DB_CONCURRENCY = 4  # max concurrent SSE status queries (HTTP pool is 5+5)
+
+_snapshot_cache: dict[tuple, tuple[float, str]] = {}
+_snapshot_locks: dict[tuple, asyncio.Lock] = {}
+_snapshot_db_sem = asyncio.Semaphore(_SNAPSHOT_DB_CONCURRENCY)
+
+
+def _scope_key(ids, company_id) -> tuple:
+    """Hashable cache key. Same authorized view ⇒ same key ⇒ shared payload."""
+    return (str(company_id), "__ALL__" if ids is ALL else frozenset(str(i) for i in ids))
+
+
+def _build_payload(rows: list[dict]) -> str:
+    """Apply the live ingest-cache overlay and serialize. Pure function of `rows`
+    plus the global device_cache, so its output is identical across same-scope tabs."""
+    from app.core.ingest_queue import ingest_queue
+    cache  = ingest_queue.device_cache
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+    for row in rows:
+        cached = cache.get(row["device_id"])
+        if not cached:
+            continue
+        cached_ts = cached.get("last_seen")
+        if cached_ts and cached_ts > cutoff:
+            if cached.get("current_app"):
+                row["current_app"] = cached["current_app"]
+            row["status"] = (
+                "passive" if cached.get("latest_type") in _PASSIVE_EVENTS else "active"
+            )
+    return f"data: {json.dumps(rows)}\n\n"
+
+
+def _prune_snapshot_cache() -> None:
+    """Drop expired entries and their idle locks so the cache can't grow without
+    bound as scopes come and go. Cheap: only runs once the cache is non-trivial."""
+    if len(_snapshot_cache) <= 64:
+        return
+    now = time.monotonic()
+    for k in [k for k, (exp, _) in _snapshot_cache.items() if exp <= now]:
+        _snapshot_cache.pop(k, None)
+        lk = _snapshot_locks.get(k)
+        if lk is not None and not lk.locked():
+            _snapshot_locks.pop(k, None)
+
+
+async def _scoped_status_payload(ids, company_id) -> str:
+    """Return the SSE payload for a scope, cached for _SNAPSHOT_TTL and shared by
+    every connection on the same scope (single-flight + bounded DB concurrency)."""
+    from app.db.base import AsyncSessionLocal
+    key = _scope_key(ids, company_id)
+
+    hit = _snapshot_cache.get(key)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+
+    lock = _snapshot_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        hit = _snapshot_cache.get(key)          # re-check: another tab may have filled it
+        if hit and hit[0] > time.monotonic():
+            return hit[1]
+        async with _snapshot_db_sem:            # cap concurrent SSE queries on the pool
+            async with AsyncSessionLocal() as sess:
+                rows = await _status_rows(ids, company_id, sess)
+        payload = _build_payload(rows)
+        _snapshot_cache[key] = (time.monotonic() + _SNAPSHOT_TTL, payload)
+
+    _prune_snapshot_cache()
+    return payload
+
+
 @router.get("/overview")
 async def overview(
     group_id:   str | None = Query(default=None),
@@ -323,6 +407,147 @@ async def web_usage(
     return [{"host": r.host, "visits": int(r.visits or 0)} for r in res.fetchall()]
 
 
+# ── Meeting logs ──────────────────────────────────────────────────────────────
+# Apps that represent the lock/login screen — never count toward meeting active
+# time (they emit window_change while the screen is locked).
+_MEETING_EXCLUDED_APPS = frozenset({
+    "loginwindow", "ScreenSaverEngine", "System Idle Process",
+    "LockApp", "LogonUI", "Idle", "screensaver",
+})
+
+
+def _pair_meeting_sessions(events, now_ts):
+    """Pair an ordered stream of meeting_start/meeting_end events into sessions.
+
+    events: iterable of (device_id, event_type, platform, title, ts) ordered by
+            (device_id, ts). Pure — robust to a missing start or end:
+      • start while one is already open → the open one closes at the new start,
+      • end with nothing open → ignored,
+      • still-open at the end → marked ongoing and closed at now_ts.
+    """
+    sessions = []
+    open_by_dev = {}
+    for dev, etype, platform, title, ts in events:
+        if etype == "meeting_start":
+            prev = open_by_dev.get(dev)
+            if prev is not None:
+                prev["end_ts"] = ts
+                sessions.append(prev)
+            open_by_dev[dev] = {
+                "device_id": dev, "platform": platform or "Meeting",
+                "title": title or "", "start_ts": ts, "end_ts": None, "ongoing": False,
+            }
+        else:  # meeting_end
+            prev = open_by_dev.pop(dev, None)
+            if prev is not None:
+                prev["end_ts"] = ts
+                sessions.append(prev)
+    for prev in open_by_dev.values():
+        prev["end_ts"] = now_ts
+        prev["ongoing"] = True
+        sessions.append(prev)
+    return sessions
+
+
+def _enrich_sessions(sessions, window_changes):
+    """Compute each session's active seconds + apps-used from window_change slices
+    overlapping its [start_ts, end_ts] (same device). Pure. Idle/lock contribute
+    nothing because they emit no window_change; locked-app slices are excluded."""
+    for s in sessions:
+        secs, apps = 0, {}
+        for dev, app, dur, ts in window_changes:
+            if dev != s["device_id"]:
+                continue
+            if not (s["start_ts"] <= ts <= s["end_ts"]):
+                continue
+            if not app or app in _MEETING_EXCLUDED_APPS:
+                continue
+            secs += dur
+            apps[app] = apps.get(app, 0) + dur
+        s["active_secs"] = int(secs)
+        s["duration_secs"] = int(s["end_ts"] - s["start_ts"])
+        s["apps"] = sorted(
+            ({"app_name": a, "seconds": int(d)} for a, d in apps.items()),
+            key=lambda x: -x["seconds"],
+        )[:5]
+    return sessions
+
+
+@router.get("/meetings")
+async def meetings(
+    device_id:   str | None = Query(default=None, description="Restrict to one device"),
+    employee_id: str | None = Query(default=None, description="Restrict to one user's devices"),
+    group_id:    str | None = Query(default=None),
+    days:        int = Query(default=1, ge=1, le=31),
+    user: Employee = Depends(require("home", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Meeting sessions for the visible devices over the last `days`.
+
+    A session is bounded by a meeting_start/meeting_end pair; its active time is
+    the window_change activity within the session (so other apps used during the
+    meeting count, while idle/locked time does not). Trivial sessions (<30s active)
+    are dropped as noise. Scoping mirrors the other home endpoints — company +
+    the caller's visible devices, optionally narrowed to one device or employee.
+    """
+    ids = await _resolve_ids(user, group_id, db)
+    if ids is not ALL and not ids:
+        return {"total_active_secs": 0, "count": 0, "sessions": []}
+
+    frag, params = _clause(ids, "ae.device_id")
+    params.update({"company_id": str(user.company_id), "days": days})
+    extra = ""
+    if device_id:
+        extra += " AND ae.device_id = :only_device"
+        params["only_device"] = device_id
+    if employee_id:
+        extra += " AND d.employee_id = :only_emp"
+        params["only_emp"] = employee_id
+
+    mres = await db.execute(
+        text(f"""
+            SELECT ae.device_id::text AS device_id, ae.event_type,
+                   ae.app_name, ae.window_title,
+                   EXTRACT(EPOCH FROM ae.timestamp)::bigint AS ts
+            FROM activity_events ae JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type IN ('meeting_start', 'meeting_end')
+              AND ae.timestamp >= NOW() - make_interval(days => :days){frag}{extra}
+            ORDER BY ae.device_id, ae.timestamp ASC
+        """),
+        params,
+    )
+    mevents = [(r.device_id, r.event_type, r.app_name, r.window_title, int(r.ts))
+               for r in mres.fetchall()]
+    if not mevents:
+        return {"total_active_secs": 0, "count": 0, "sessions": []}
+
+    wres = await db.execute(
+        text(f"""
+            SELECT ae.device_id::text AS device_id, ae.app_name, ae.duration,
+                   EXTRACT(EPOCH FROM ae.timestamp)::bigint AS ts
+            FROM activity_events ae JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'window_change' AND ae.app_name IS NOT NULL
+              AND ae.timestamp >= NOW() - make_interval(days => :days){frag}{extra}
+        """),
+        params,
+    )
+    wchanges = [(r.device_id, r.app_name, int(r.duration or 0), int(r.ts))
+                for r in wres.fetchall()]
+
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    sessions = _enrich_sessions(_pair_meeting_sessions(mevents, now_ts), wchanges)
+    sessions = [s for s in sessions if s["active_secs"] >= 30 or s["ongoing"]]
+    sessions.sort(key=lambda s: s["start_ts"], reverse=True)
+
+    return {
+        "total_active_secs": int(sum(s["active_secs"] for s in sessions)),
+        "count": len(sessions),
+        "sessions": sessions,
+    }
+
+
 @router.get("/my-stats")
 async def my_stats(
     user: Employee = Depends(get_current_user),
@@ -402,68 +627,39 @@ async def stream(
 
     Industrial-standard pattern:
     - Auth and scope resolved before streaming; DB connection released immediately.
-    - Hard cap: 503 when broadcaster is at MAX_SUBSCRIBERS.
+    - No subscriber cap: events fan out via Redis pub/sub (app/core/broadcaster.py),
+      so this scales across workers/replicas. Connection limits belong at the
+      proxy/uvicorn/OS layer, not here.
     - Initial snapshot sent on connect so the client never shows a blank state.
-    - Burst coalescing: rapid ingest flushes are merged so the DB query runs at
-      most once every MIN_PUSH_INTERVAL seconds per subscriber.
+    - Fan-out safe: the status query is computed once per (company, scope) and
+      shared by all same-scope tabs (single-flight + bounded DB concurrency), so
+      N open dashboards do NOT become N queries per event.
     - 25 s heartbeat keeps proxies and load-balancers from killing idle connections.
     - CancelledError caught explicitly so client disconnect is always clean.
     """
     from app.core import broadcaster
-    from app.core.ingest_queue import ingest_queue
-    from app.db.base import AsyncSessionLocal
 
     ids        = await _resolve_ids(user, group_id, db)
     company_id = user.company_id
 
-    # Reject early (before releasing DB connection) if broadcaster is at capacity.
-    if broadcaster.subscriber_count() >= broadcaster.MAX_SUBSCRIBERS:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="SSE capacity reached, try again later",
-        )
-
     # CRITICAL: release the request's pooled connection NOW. This response
     # streams for the life of the dashboard tab — holding the dependency
     # session would pin one connection per viewer and drain the pool (the
-    # "QueuePool limit reached" production jam). Payload queries below use
-    # their own short-lived sessions.
+    # "QueuePool limit reached" production jam). The shared payload cache uses
+    # its own short-lived sessions.
     await db.close()
 
     async def _payload() -> str:
-        async with AsyncSessionLocal() as sess:
-            rows = await _status_rows(ids, company_id, sess)
+        # Scope-keyed, single-flight cache: every same-scope tab that wakes on
+        # this event reuses ONE query+build instead of each hammering the pool.
+        return await _scoped_status_payload(ids, company_id)
 
-        cache  = ingest_queue.device_cache
-        now    = datetime.now(timezone.utc)
-        cutoff = now - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
-
-        for row in rows:
-            cached = cache.get(row["device_id"])
-            if not cached:
-                continue
-            cached_ts = cached.get("last_seen")
-            if cached_ts and cached_ts > cutoff:
-                if cached.get("current_app"):
-                    row["current_app"] = cached["current_app"]
-                row["status"] = (
-                    "passive" if cached.get("latest_type") in _PASSIVE_EVENTS
-                    else "active"
-                )
-
-        return f"data: {json.dumps(rows)}\n\n"
-
-    # Each push re-runs the device-status query, so cap the per-subscriber rate:
-    # under sustained ingest a dashboard tab refreshes at most every MIN_PUSH_INTERVAL
-    # instead of once per worker batch flush (which can be several times a second).
+    # Per-subscriber push throttle. The heavy DB work is already coalesced by the
+    # shared scope cache; this just bounds how often each tab re-renders.
     MIN_PUSH_INTERVAL = 2.0
 
     async def _event_generator():
         q = broadcaster.subscribe()
-        if q is None:
-            # Capacity was grabbed between the check above and subscribe().
-            yield "event: error\ndata: capacity\n\n"
-            return
         try:
             yield await _payload()
             last_push = time.monotonic()
@@ -499,6 +695,12 @@ async def stream(
 
 @router.get("/device-today-active")
 async def device_today_active(
+    since: int | None = Query(
+        default=None,
+        description="Unix epoch (UTC seconds) of the DEVICE's local midnight. The "
+                    "agent sends this so 'today' matches the user's local day exactly, "
+                    "independent of the server/DB timezone.",
+    ),
     device: Device = Depends(get_current_device),
     db: AsyncSession = Depends(get_db),
 ):
@@ -508,9 +710,28 @@ async def device_today_active(
 
     The agent calls this on startup so the widget baseline always matches
     the portal — no drift from local daily_totals accumulation errors.
+
+    Day boundary: when the agent supplies `since` (its local midnight as an
+    absolute unix timestamp) we filter `timestamp >= to_timestamp(since)`, which
+    is unambiguous and matches the device's local day. The previous boundary
+    (`date_trunc('day', NOW() AT TIME ZONE 'UTC')`) both (a) used the UTC day
+    rather than the device's local day, and (b) re-applied the DB session
+    timezone on comparison — on a non-UTC production DB that shifted the boundary
+    by the session offset (e.g. +1h on a UTC+1 server), inflating "today" and
+    making the agent jump forward on restart. `to_timestamp` avoids both.
+    The no-`since` fallback computes a correct UTC-midnight timestamptz.
     """
+    if since is not None:
+        boundary_sql = "ae.timestamp >= to_timestamp(:since)"
+        params = {"did": str(device.id), "since": int(since)}
+    else:
+        # Backward-compatible fallback (older agents): correct UTC-midnight,
+        # session-timezone-independent.
+        boundary_sql = "ae.timestamp >= (date_trunc('day', NOW() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')"
+        params = {"did": str(device.id)}
+
     result = await db.execute(
-        text("""
+        text(f"""
             SELECT COALESCE(SUM(
                 CASE
                     WHEN ae.event_type = 'window_change'
@@ -524,9 +745,9 @@ async def device_today_active(
             ), 0) AS active_secs
             FROM activity_events ae
             WHERE ae.device_id = :did
-              AND ae.timestamp >= date_trunc('day', NOW() AT TIME ZONE 'UTC')
+              AND {boundary_sql}
         """),
-        {"did": str(device.id)},
+        params,
     )
     row = result.fetchone()
     return {"active_seconds_today": int(row.active_secs or 0)}

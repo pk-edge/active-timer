@@ -60,6 +60,22 @@ services:
         mc anonymous set download local/${S3_BUCKET:-timetracker-screenshots}
       "
 
+  # ── Redis (SSE pub/sub fan-out) ──────────────────────────────────────────────
+  # Backs app/core/broadcaster.py so device-update events reach every backend
+  # worker/replica. Pub/sub only — no persistence, so RDB+AOF are disabled and
+  # the container stays stateless (no volume).
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "16379:6379"   # host port avoids clashing with a local redis on 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ── FastAPI backend ─────────────────────────────────────────────────────────
   backend:
     build:
@@ -71,8 +87,13 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL:           postgresql+asyncpg://timetracker:${POSTGRES_PASSWORD:-timetracker_dev}@db:5432/timetracker
+      # Redis pub/sub for SSE fan-out. Staging/prod MUST override with a managed
+      # endpoint (e.g. ElastiCache); rediss:// for TLS. See app/core/config.py.
+      REDIS_URL:              ${REDIS_URL:-redis://redis:6379/0}
       # development | staging | production. On staging/production the backend
       # refuses to boot with a default/dev JWT_SECRET (forge-admin-token guard).
       ENVIRONMENT:            ${ENVIRONMENT:-development}

@@ -18,8 +18,16 @@ from app.api.deps import get_db, get_current_device, require
 from app.core import audit
 from app.api.v1.endpoints.screenshots import _s3_client
 from app.core.config import get_settings
-from app.db.models import Employee, Device, InstallerVersion, InstallerDownload
-from app.schemas.rbac import InstallerOut, InstallerDownloadOut
+from app.db.models import Employee, Device, InstallerVersion, InstallerDownload, UpdateRun
+from app.schemas.rbac import (
+    InstallerOut, InstallerDownloadOut,
+    InstallerDistributionIn, UpdateReportIn, UpdateRunOut,
+)
+
+from datetime import datetime, timezone
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from app.core import semver, rollout as rollout_util, manifest as manifest_util
+from app.core.release_urls import download_url
 
 log = logging.getLogger(__name__)
 router = APIRouter()          # mounted at /installers
@@ -38,6 +46,10 @@ def _out(v: InstallerVersion) -> InstallerOut:
         id=str(v.id), platform=v.platform, installer_type=v.installer_type,
         version=v.version, file_size=v.file_size, sha256=v.sha256, notes=v.notes,
         is_active=v.is_active, uploaded_at=v.uploaded_at.isoformat() if v.uploaded_at else None,
+        rollout_percent=v.rollout_percent if v.rollout_percent is not None else 100,
+        mandatory=bool(v.mandatory), channel=v.channel or "stable",
+        min_supported_version=v.min_supported_version,
+        expires_at=v.expires_at.isoformat() if v.expires_at else None,
     )
 
 
@@ -234,8 +246,10 @@ async def check_update(
     device: Device = Depends(get_current_device),
     db: AsyncSession = Depends(get_db),
 ):
-    """Agent calls this with its device JWT. Returns the active installer for the
-    device's platform if its version differs from the agent's current version."""
+    """Agent update check. Backward-compatible: original keys are always present;
+    new keys (mandatory/min_supported_version/channel/manifest/signature) are
+    additive. The decision (semver + rollout + mandatory + min-version + expiry)
+    is made server-side, so old agents keep working via the original keys."""
     plat = _AGENT_PLATFORM.get((device.platform or "").lower())
     if not plat:
         return {"update_available": False}
@@ -248,23 +262,198 @@ async def check_update(
         )
     )
     active = row.scalar_one_or_none()
-    if not active or active.version == (device.agent_version or ""):
+    if not active:
+        return {"update_available": False}
+
+    # Expiry guard: never serve a stale release.
+    if active.expires_at and active.expires_at < datetime.now(timezone.utc):
+        return {"update_available": False}
+
+    current = device.agent_version or ""
+    below_min = not semver.meets_minimum(current, active.min_supported_version)
+    if not semver.is_newer(active.version, current):
+        return {"update_available": False}
+
+    # None-safe: a legitimate rollout_percent of 0 must NOT fall back to 100.
+    rp = active.rollout_percent if active.rollout_percent is not None else 100
+    eligible = (
+        active.mandatory
+        or below_min
+        or rollout_util.in_rollout(str(device.id), active.version, rp)
+    )
+    if not eligible:
         return {"update_available": False}
 
     try:
-        url = _s3_client(public=True).generate_presigned_url(
-            "get_object",
-            Params={"Bucket": settings.S3_BUCKET, "Key": active.s3_key},
-            ExpiresIn=3600,
-        )
+        url = download_url(active.s3_key)
     except Exception as e:
-        log.error("Update presign error: %s", e)
+        log.error("Update URL error: %s", e)
         return {"update_available": False}
 
+    # Use a cached signed manifest if present; otherwise sign on the fly so the
+    # response is always verifiable even for rows published before manifest cols.
+    if active.manifest_json and active.manifest_sig:
+        canonical, sig = active.manifest_json, active.manifest_sig
+    else:
+        canonical, sig = manifest_util.signed_manifest(
+            version=active.version, company_id=active.company_id, platform=active.platform,
+            installer_type=active.installer_type, sha256=active.sha256 or "", size=active.file_size or 0,
+            channel=active.channel or "stable", mandatory=bool(active.mandatory),
+            min_supported_version=active.min_supported_version,
+            release_date=(active.published_at or active.uploaded_at).isoformat(),
+            expires_at=active.expires_at.isoformat() if active.expires_at else None,
+            filename=active.s3_key.rsplit("/", 1)[-1],
+        )
+    import json as _json
     return {
         "update_available": True,
         "version": active.version,
         "installer_type": active.installer_type,
         "download_url": url,
         "sha256": active.sha256,
+        "mandatory": bool(active.mandatory),
+        "min_supported_version": active.min_supported_version,
+        "channel": active.channel or "stable",
+        "manifest": _json.loads(canonical),
+        "signature": sig,
+        "manifest_url": f"/v1/updates/manifest/{active.id}",
+        "public_key_id": "v1",
     }
+
+
+def _signed_manifest_for(v: InstallerVersion) -> tuple[str, str]:
+    """Return (canonical_json, signature) for an installer row, using the cached
+    signed manifest when present, otherwise signing on the fly."""
+    if v.manifest_json and v.manifest_sig:
+        return v.manifest_json, v.manifest_sig
+    return manifest_util.signed_manifest(
+        version=v.version, company_id=v.company_id, platform=v.platform,
+        installer_type=v.installer_type, sha256=v.sha256 or "", size=v.file_size or 0,
+        channel=v.channel or "stable", mandatory=bool(v.mandatory),
+        min_supported_version=v.min_supported_version,
+        release_date=(v.published_at or v.uploaded_at).isoformat(),
+        expires_at=v.expires_at.isoformat() if v.expires_at else None,
+        filename=v.s3_key.rsplit("/", 1)[-1],
+    )
+
+
+@updates_router.get("/manifest/{installer_id}")
+async def get_manifest(
+    installer_id: uuid.UUID,
+    device: Device = Depends(get_current_device),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await db.execute(
+        select(InstallerVersion).where(
+            InstallerVersion.id == installer_id,
+            InstallerVersion.company_id == device.company_id,
+        )
+    )
+    v = row.scalar_one_or_none()
+    if not v:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Manifest not found")
+    import json as _json
+    canonical, sig = _signed_manifest_for(v)
+    return {"manifest": _json.loads(canonical), "signature": sig}
+
+
+@updates_router.post("/report", status_code=202)
+async def report_update(
+    body: UpdateReportIn,
+    device: Device = Depends(get_current_device),
+    db: AsyncSession = Depends(get_db),
+):
+    """Agent telemetry. Lenient + idempotent: upsert by (device_id, target_version).
+    Never 5xx the agent into a retry loop."""
+    try:
+        stmt = pg_insert(UpdateRun).values(
+            id=uuid.uuid4(), device_id=device.id, company_id=device.company_id,
+            from_version=body.from_version, target_version=body.target_version,
+            platform=body.platform, channel=body.channel, status=body.status,
+            error_code=body.error_code, progress=body.progress or 0,
+        ).on_conflict_do_update(
+            index_elements=["device_id", "target_version"],
+            set_={"status": body.status, "error_code": body.error_code,
+                  "progress": body.progress or 0, "from_version": body.from_version,
+                  "updated_at": datetime.now(timezone.utc)},
+        )
+        await db.execute(stmt)
+        await db.commit()
+    except Exception as e:
+        log.warning("update report ignored: %s", e)
+    return {"ok": True}
+
+
+@updates_router.get("/runs")
+async def list_update_runs(
+    user: Employee = Depends(require("agents", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = await db.execute(
+        select(UpdateRun).where(UpdateRun.company_id == user.company_id)
+        .order_by(UpdateRun.updated_at.desc()).limit(500)
+    )
+    runs = [
+        UpdateRunOut(
+            id=str(r.id), device_id=str(r.device_id), from_version=r.from_version,
+            target_version=r.target_version, status=r.status, error_code=r.error_code,
+            progress=r.progress, updated_at=r.updated_at.isoformat() if r.updated_at else None,
+        ).model_dump()
+        for r in rows.scalars().all()
+    ]
+    adoption_rows = await db.execute(
+        select(Device.agent_version).where(Device.company_id == user.company_id)
+    )
+    adoption: dict[str, int] = {}
+    for (v,) in adoption_rows.all():
+        adoption[v or "unknown"] = adoption.get(v or "unknown", 0) + 1
+    return {"runs": runs, "adoption": adoption}
+
+
+@router.patch("/{installer_id}")
+async def patch_installer_distribution(
+    installer_id: uuid.UUID,
+    body: InstallerDistributionIn,
+    user: Employee = Depends(require("agents", "edit")),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await db.execute(
+        select(InstallerVersion).where(
+            InstallerVersion.id == installer_id,
+            InstallerVersion.company_id == user.company_id,
+        )
+    )
+    v = row.scalar_one_or_none()
+    if not v:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Installer not found")
+
+    if body.rollout_percent is not None:
+        v.rollout_percent = max(0, min(100, body.rollout_percent))
+    if body.mandatory is not None:
+        v.mandatory = body.mandatory
+    if body.channel is not None:
+        v.channel = body.channel
+    if body.min_supported_version is not None:
+        v.min_supported_version = body.min_supported_version or None
+    if body.expires_at is not None:
+        v.expires_at = (
+            datetime.fromisoformat(body.expires_at.replace("Z", "+00:00"))
+            if body.expires_at else None
+        )
+    if v.published_at is None:
+        v.published_at = datetime.now(timezone.utc)
+
+    canonical, sig = manifest_util.signed_manifest(
+        version=v.version, company_id=v.company_id, platform=v.platform,
+        installer_type=v.installer_type, sha256=v.sha256 or "", size=v.file_size or 0,
+        channel=v.channel or "stable", mandatory=bool(v.mandatory),
+        min_supported_version=v.min_supported_version,
+        release_date=(v.published_at or v.uploaded_at).isoformat(),
+        expires_at=v.expires_at.isoformat() if v.expires_at else None,
+        filename=v.s3_key.rsplit("/", 1)[-1],
+    )
+    v.manifest_json, v.manifest_sig = canonical, sig
+    await db.commit()
+    return {"id": str(v.id), "rollout_percent": v.rollout_percent, "mandatory": v.mandatory,
+            "channel": v.channel, "min_supported_version": v.min_supported_version,
+            "expires_at": v.expires_at.isoformat() if v.expires_at else None}

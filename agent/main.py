@@ -94,12 +94,22 @@ def _enroll_background(shared: dict) -> None:
 
 
 def _fetch_today_active(jwt_token: str) -> int | None:
-    """Fetch today's authoritative active-seconds from the backend (device JWT)."""
+    """Fetch today's authoritative active-seconds from the backend (device JWT).
+
+    Sends this device's LOCAL midnight as an absolute unix timestamp so the
+    server's "today" window matches the user's local day exactly — preventing the
+    restart baseline from jumping when the server/DB timezone differs from the
+    device (the cause of '+1 hour added on restart')."""
     try:
         import httpx
+        from datetime import datetime
         from config import Config
+        local_midnight = int(
+            datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        )
         r = httpx.get(
             Config.DEVICE_TODAY_ENDPOINT,
+            params={"since": local_midnight},
             headers={"Authorization": f"Bearer {jwt_token}"},
             timeout=8,
         )
@@ -303,6 +313,13 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--watchdog":
         _watchdog_entry()
         sys.exit(0)
+
+    # Updater subprocess (spawned by UpdateWorker): swap binaries, relaunch,
+    # health-check, rollback. Runs as its OWN process while the agent exits, so it
+    # skips the single-instance guard below. Additive — normal launch is unaffected.
+    if "--update" in sys.argv:
+        from updater import run_update_install
+        sys.exit(run_update_install())
 
     if sys.platform == "win32":
         from protection.win_guard import acquire_single_instance, protect_process, install_watchdog

@@ -313,10 +313,14 @@ class UrlWatcher:
             key   = str(path)
             since = self._last_seen.get(key, time.time() - 120)
             visits = _query_safari(path, since)
-            if not visits and not self._warned_safari and not _can_read(path):
+            if not self._warned_safari and not _can_read(path):
                 self._warned_safari = True
-                log.warning("Safari history exists but is unreadable — "
-                            "grant Full Disk Access to TimeTracker to capture Safari URLs")
+                log.warning(
+                    "Safari history exists at %s but is unreadable — Safari URL capture "
+                    "is disabled. To enable it: System Settings → Privacy & Security → "
+                    "Full Disk Access → add TimeTracker. Window activity (app=Safari, "
+                    "duration) is still tracked without this permission.", path
+                )
             self._emit(visits, key)
 
     def _emit(self, visits: list[tuple[str, str, float]], key: str):

@@ -49,6 +49,24 @@ export interface AppUsage {
   seconds:  number;
 }
 
+export interface MeetingSession {
+  device_id:     string;
+  platform:      string;   // "Zoom" | "Microsoft Teams" | "Google Meet" | "Slack huddle" | ...
+  title:         string;
+  start_ts:      number;   // unix seconds
+  end_ts:        number;   // unix seconds
+  ongoing:       boolean;
+  active_secs:   number;   // live activity during the meeting (other apps included)
+  duration_secs: number;   // wall-clock span
+  apps:          AppUsage[];
+}
+
+export interface MeetingsResponse {
+  total_active_secs: number;
+  count:             number;
+  sessions:          MeetingSession[];
+}
+
 export interface LogEvent {
   id:             string;
   event_type:     string;

@@ -7,6 +7,7 @@ Progress bar, green accents, muted labels — all from the SVG palette.
 """
 
 import json
+import logging
 import sys
 import time
 import subprocess
@@ -33,7 +34,21 @@ W      = W_CARD + PAD * 2   # 294
 H      = H_CARD + PAD * 2   # 164
 RADIUS = 16
 
+log = logging.getLogger("floating_widget")
+
 DAILY_GOAL_SECS = 8 * 3600
+
+
+def _clock_advances(paused: bool, is_idle: bool, gap_secs: int) -> bool:
+    """Whether the active-time clock should count this second — LIVE activity only.
+
+    Stops while the screen is locked/asleep (paused), while the user is idle (no
+    live input — note InputMonitor EXEMPTS idle during meetings/media, so live
+    meetings/video keep counting), and across a large gap (process was suspended
+    by system sleep / lid-close, so we must never jump the counter forward)."""
+    if paused or is_idle:
+        return False
+    return gap_secs <= 10
 
 # ── SVG palette (exact) ───────────────────────────────────────────────────────
 CARD_BG     = QColor(0xFC, 0xFB, 0xF9, 224)   # #FCFBF9 @ 88 % — readable, light glass
@@ -157,11 +172,34 @@ class FloatingWidget(QWidget):
             app.commitDataRequest.connect(self._on_session_end)
         except Exception:
             pass
-        # macOS: a shutdown/restart arrives as a Quit event on the application.
+        # macOS: QEvent.Quit is NOT reliably delivered to the app before the
+        # window close during a real shutdown (applicationShouldTerminate sends
+        # close events directly), so this filter alone let the close be vetoed
+        # and the OS reported the agent as preventing shutdown. The reliable
+        # signal is NSWorkspace's power-off notification (logout/restart/shutdown).
         app.installEventFilter(self)
+        if sys.platform == "darwin":
+            try:
+                from AppKit import NSWorkspace
+                nc = NSWorkspace.sharedWorkspace().notificationCenter()
+                # Keep the returned token on self so the observer isn't GC'd.
+                self._poweroff_observer = nc.addObserverForName_object_queue_usingBlock_(
+                    "NSWorkspaceWillPowerOffNotification", None, None,
+                    lambda _n: self._on_macos_power_off(),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("macOS power-off observer setup failed: %s", e)
 
     def _on_session_end(self, *_a):
         self._allow_close = True
+
+    def _on_macos_power_off(self, *_a):
+        # Logout / restart / shutdown requested: lift the close veto and quit
+        # promptly so the agent never blocks the power action. aboutToQuit runs
+        # the final daily flush + session end; autostart relaunches on next login.
+        log.info("macOS power-off/logout detected — quitting agent cleanly")
+        self._allow_close = True
+        QApplication.quit()
 
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.Type.Quit:
@@ -501,15 +539,16 @@ class FloatingWidget(QWidget):
             self._redraw()
             return
 
-        pause = self._shared.get("pause_event")
-        if pause and pause.is_set():
-            self._last_tick = now; return
+        pause  = self._shared.get("pause_event")
+        paused = bool(pause and pause.is_set())
+        idle   = bool(self._shared.get("is_idle"))   # set by InputMonitor (idle-exempt in meetings)
 
-        gap = now - self._last_tick; self._last_tick = now
-        if gap > 10: return
-
-        self._elapsed += 1
-        self._redraw()
+        gap = now - self._last_tick
+        self._last_tick = now
+        # Count only LIVE activity: not locked/asleep, not idle, no suspend gap.
+        if _clock_advances(paused, idle, gap):
+            self._elapsed += 1
+            self._redraw()
 
     def _redraw(self):
         h, r = divmod(self._elapsed, 3600)
@@ -532,7 +571,7 @@ class FloatingWidget(QWidget):
         self._date_lbl.setText(_date_str())
 
         pause   = self._shared.get("pause_event")
-        is_idle = bool(pause and pause.is_set())
+        is_idle = bool((pause and pause.is_set()) or self._shared.get("is_idle"))
         if is_idle != self._is_idle:
             self._is_idle = is_idle
             self._hdr_lbl.setText("IDLE" if is_idle else "ACTIVE TODAY")

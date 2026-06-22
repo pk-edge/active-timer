@@ -32,3 +32,25 @@ body {
 ::-webkit-scrollbar-track  { background: transparent; }
 ::-webkit-scrollbar-thumb  { background: #d1d5db; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* ── Site-wide interaction polish ───────────────────────────────────────────
+   Every button gets a smooth, visible hover; every form field gets the same
+   brand-purple focus ring. Element-level Tailwind classes still win where set. */
+@layer base {
+  button:not(:disabled) {
+    cursor: pointer;
+    transition: filter .15s ease, background-color .15s ease, color .15s ease,
+                border-color .15s ease, box-shadow .15s ease, opacity .15s ease;
+  }
+  /* Darken slightly on hover — visible on both light and brand-purple buttons. */
+  button:not(:disabled):hover { filter: brightness(0.93); }
+  button:disabled { cursor: not-allowed; }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: none;
+    border-color: #7c3aed;                      /* brand-500 */
+    box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.22);
+  }
+}

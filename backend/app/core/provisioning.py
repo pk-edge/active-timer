@@ -1,9 +1,3 @@
-"""Auto-provisioning for device→employee linking at enrollment.
-
-A device enrolling with an employee_email is linked to the matching employee,
-or to a freshly created 'Talent' employee when no match exists. Linking NEVER
-overrides an existing assignment — the portal always wins.
-"""
 import logging
 import uuid
 

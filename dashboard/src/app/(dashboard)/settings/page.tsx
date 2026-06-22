@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState } from "react";
 import useSWR from "swr";
 import { useUser } from "@/hooks/useUser";
@@ -45,7 +46,7 @@ function SettingRow({
     <div className="flex items-start justify-between py-4 border-b border-gray-100 last:border-0">
       <div className="flex-1 min-w-0 pr-8">
         <p className="text-sm font-medium text-gray-800">{label}</p>
-        {description && <p className="text-xs text-gray-500 mt-0.5">{description}</p>}
+        {description && <p className="text-xs text-gray-600 mt-0.5">{description}</p>}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -112,7 +113,7 @@ export default function SettingsPage() {
     setTimeout(() => setSaved(false), 2500);
   }
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("settings", "view")) return <AccessDenied label="Settings" />;
 
   return (
@@ -120,7 +121,7 @@ export default function SettingsPage() {
       <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 mb-1">Settings</h1>
-          <p className="text-gray-500 text-sm">Configure tracking, screenshots, and notifications</p>
+          <p className="text-gray-600 text-sm">Configure tracking, screenshots, and notifications</p>
         </div>
         <button
           onClick={handleSave}
@@ -165,7 +166,7 @@ export default function SettingsPage() {
           {tab === "general" && (
             <div>
               <h2 className="text-base font-semibold text-gray-900 mb-1">General</h2>
-              <p className="text-sm text-gray-500 mb-5">Organization details and working hours</p>
+              <p className="text-sm text-gray-600 mb-5">Organization details and working hours</p>
 
               <SettingRow label="Organization name" description="Displayed in reports and notifications">
                 <input
@@ -215,7 +216,7 @@ export default function SettingsPage() {
           {tab === "tracking" && (
             <div>
               <h2 className="text-base font-semibold text-gray-900 mb-1">Tracking</h2>
-              <p className="text-sm text-gray-500 mb-5">Control what activity data the agent captures</p>
+              <p className="text-sm text-gray-600 mb-5">Control what activity data the agent captures</p>
 
               <SettingRow label="Track active applications" description="Record which app is in focus and for how long">
                 <Toggle checked={true} onChange={() => {}} />
@@ -256,7 +257,7 @@ export default function SettingsPage() {
           {tab === "screenshots" && (
             <div>
               <h2 className="text-base font-semibold text-gray-900 mb-1">Screenshots</h2>
-              <p className="text-sm text-gray-500 mb-5">Configure automatic screenshot capture</p>
+              <p className="text-sm text-gray-600 mb-5">Configure automatic screenshot capture</p>
 
               <SettingRow label="Enable screenshots" description="Capture screenshots at regular intervals">
                 <Toggle checked={screenshotsEnabled} onChange={setScreenshotsEnabled} />
@@ -304,14 +305,14 @@ export default function SettingsPage() {
           {tab === "integration" && (
             <div>
               <h2 className="text-base font-semibold text-gray-900 mb-1">Integration</h2>
-              <p className="text-sm text-gray-500 mb-5">
+              <p className="text-sm text-gray-600 mb-5">
                 Company enrollment token — used to register agent installers with this backend
               </p>
 
               <div className="border border-gray-200 rounded-xl p-5 space-y-4">
                 <div>
                   <p className="text-sm font-medium text-gray-800 mb-1">Enrollment Token</p>
-                  <p className="text-xs text-gray-500 mb-3">
+                  <p className="text-xs text-gray-600 mb-3">
                     Embed this token in your agent installer so devices can self-enroll.
                     Keep it secret — anyone with this token can enroll new devices.
                   </p>
@@ -327,7 +328,7 @@ export default function SettingsPage() {
                       <button
                         onClick={() => setTokenVisible(v => !v)}
                         title={tokenVisible ? "Hide token" : "Reveal token"}
-                        className="px-3 py-2 border-l border-gray-300 text-gray-500 hover:text-gray-700 hover:bg-gray-100 transition"
+                        className="px-3 py-2 border-l border-gray-300 text-gray-600 hover:text-gray-700 hover:bg-gray-100 transition"
                       >
                         {tokenVisible ? <EyeOff size={15} /> : <Eye size={15} />}
                       </button>
@@ -348,7 +349,7 @@ export default function SettingsPage() {
 
                 <div className="pt-3 border-t border-gray-100">
                   <p className="text-sm font-medium text-gray-800 mb-1">Backend URL</p>
-                  <p className="text-xs text-gray-500 mb-2">
+                  <p className="text-xs text-gray-600 mb-2">
                     The API base URL agents use to connect. Pass this alongside the enrollment token when building installers.
                   </p>
                   <div className="flex items-center gap-2">
@@ -375,7 +376,7 @@ export default function SettingsPage() {
           {tab === "notifications" && (
             <div>
               <h2 className="text-base font-semibold text-gray-900 mb-1">Notifications</h2>
-              <p className="text-sm text-gray-500 mb-5">Alerts and automated report delivery</p>
+              <p className="text-sm text-gray-600 mb-5">Alerts and automated report delivery</p>
 
               <SettingRow label="Email alerts" description="Send alerts to the admin email address">
                 <Toggle checked={emailAlerts} onChange={setEmailAlerts} />

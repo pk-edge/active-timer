@@ -50,13 +50,13 @@ function SetPasswordModal({ onDone }: { onDone: () => void }) {
           <h2 className="text-lg font-semibold text-gray-900">Set up your password</h2>
           <button
             onClick={onDone}
-            className="text-gray-400 hover:text-gray-600 transition -mt-1 -mr-1 p-1"
+            className="text-gray-600 hover:text-gray-600 transition -mt-1 -mr-1 p-1"
             aria-label="Skip for now"
           >
             <X size={18} />
           </button>
         </div>
-        <p className="text-sm text-gray-500 mb-6">
+        <p className="text-sm text-gray-600 mb-6">
           You&apos;re signed in with Google. Optionally set a password so you can also
           sign in with email.
         </p>
@@ -78,7 +78,7 @@ function SetPasswordModal({ onDone }: { onDone: () => void }) {
               <button
                 type="button"
                 onClick={() => setShow(s => !s)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600"
                 tabIndex={-1}
               >
                 {show ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -112,7 +112,7 @@ function SetPasswordModal({ onDone }: { onDone: () => void }) {
           <button
             type="button"
             onClick={onDone}
-            className="w-full text-sm text-gray-400 hover:text-gray-600 transition py-1"
+            className="w-full text-sm text-gray-600 hover:text-gray-600 transition py-1"
           >
             Skip for now
           </button>
@@ -252,7 +252,7 @@ export default function LoginPage() {
             {/* ── Divider ───────────────────────────────────────────────── */}
             <div className="flex items-center gap-3 mb-5">
               <div className="flex-1 h-px bg-gray-200" />
-              <span className="text-xs text-gray-400">or sign in with email</span>
+              <span className="text-xs text-gray-600">or sign in with email</span>
               <div className="flex-1 h-px bg-gray-200" />
             </div>
 
@@ -309,7 +309,7 @@ export default function LoginPage() {
               </button>
             </form>
 
-            <p className="text-center text-sm text-gray-500 mt-5">
+            <p className="text-center text-sm text-gray-600 mt-5">
               Don&apos;t have an account?{" "}
               <Link href="/register" className="text-brand-600 hover:text-brand-700 font-medium">
                 Request access
