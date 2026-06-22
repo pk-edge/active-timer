@@ -27,7 +27,12 @@ async def visible_device_ids(user, db: AsyncSession):
         return ALL
 
     if scope == "own":
-        rows = await db.execute(select(Device.id).where(Device.employee_id == user.id))
+        rows = await db.execute(
+            select(Device.id).where(
+                Device.employee_id == user.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )
         return [r[0] for r in rows.all()]
 
     # scope == "groups" — one round-trip: groups the user may access, their direct

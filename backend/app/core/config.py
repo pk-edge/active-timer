@@ -54,6 +54,28 @@ class Settings(BaseSettings):
     S3_PUBLIC_ENDPOINT_URL: str = ""   # external URL for presigned URLs given to agents (e.g. http://localhost:9000)
     PRESIGNED_URL_EXPIRY: int = 300    # seconds
 
+    # ── Redis (SSE pub/sub) ─────────────────────────────────────────────────────
+    # Backs app/core/broadcaster.py. Every backend process subscribes to one
+    # channel here and fans incoming events out to its local SSE connections, so a
+    # device-update published by ANY worker/replica reaches ALL dashboard tabs on
+    # ALL replicas. Local dev default targets the compose `redis` service; staging
+    # and production MUST point this at a managed instance (e.g. ElastiCache):
+    #   REDIS_URL=redis://my-cluster.abc123.ng.0001.use1.cache.amazonaws.com:6379/0
+    # Use rediss:// for TLS. If Redis is unreachable the API still serves and
+    # ingests normally — only live SSE push degrades (clients fall back to polling).
+    REDIS_URL: str = "redis://redis:6379/0"
+
+    # ── Agent update signing ─────────────────────────────────────────────────
+    # Base64 of a 32-byte Ed25519 seed. Blank in dev → a stable key is derived
+    # from JWT_SECRET so signing works without provisioning. Set a real value in
+    # production; the matching public key is embedded in the agent build.
+    AGENT_SIGNING_PRIVATE_KEY: str = ""
+
+    # Optional CDN in front of S3 for release files. Blank → presigned S3 URLs
+    # (today's behavior). Set to a CDN origin (e.g. https://cdn.tracker.onedge.co)
+    # to serve installers/manifests through the edge later — no code change.
+    CDN_BASE_URL: str = ""
+
     # ── Online detection ──────────────────────────────────────────────────────
     ONLINE_CUTOFF_SECS: int = 60
 

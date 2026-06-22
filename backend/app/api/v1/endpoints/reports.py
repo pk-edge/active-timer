@@ -53,7 +53,11 @@ async def _get_visible_device(device_id: str, admin: Employee, db: AsyncSession)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid device id")
 
     ids = await visible_device_ids(admin, db)
-    q = select(Device).where(Device.id == device_uuid, Device.company_id == admin.company_id)
+    q = select(Device).where(
+        Device.id == device_uuid,
+        Device.company_id == admin.company_id,
+        Device.is_deleted == False,  # noqa: E712
+    )
     if ids is not ALL:
         q = q.where(Device.id.in_(ids))
     device = (await db.execute(q)).scalar_one_or_none()
@@ -101,7 +105,8 @@ async def top_apps(
     clause, sparams = await _scope_clause(admin, db)
     result = await db.execute(
         text(f"""
-            SELECT ae.app_name, SUM(ae.duration) AS seconds
+            SELECT normalize_app_name(ae.app_name) AS app_name,
+                   SUM(ae.duration) AS seconds
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
             WHERE d.company_id = :company_id
@@ -109,7 +114,7 @@ async def top_apps(
               AND ae.app_name IS NOT NULL
               AND ae.timestamp >= NOW() - make_interval(days => :days)
               {_EXCL_IDLE}{clause}
-            GROUP BY ae.app_name ORDER BY seconds DESC LIMIT :limit
+            GROUP BY normalize_app_name(ae.app_name) ORDER BY seconds DESC LIMIT :limit
         """),
         {"company_id": str(admin.company_id), "days": days, "limit": limit, **sparams},
     )
@@ -153,14 +158,15 @@ async def device_top_apps(
 
     result = await db.execute(
         text("""
-            SELECT ae.app_name, SUM(ae.duration) AS seconds
+            SELECT normalize_app_name(ae.app_name) AS app_name,
+                   SUM(ae.duration) AS seconds
             FROM activity_events ae
             WHERE ae.device_id = :device_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
               AND ae.timestamp >= NOW() - make_interval(days => :days)
               AND ae.app_name NOT IN ('System Idle Process','LockApp','LogonUI','Idle','screensaver')
-            GROUP BY ae.app_name ORDER BY seconds DESC LIMIT :limit
+            GROUP BY normalize_app_name(ae.app_name) ORDER BY seconds DESC LIMIT :limit
         """),
         {"device_id": str(device.id), "days": days, "limit": limit},
     )

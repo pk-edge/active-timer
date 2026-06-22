@@ -35,6 +35,18 @@ RADIUS = 16
 
 DAILY_GOAL_SECS = 8 * 3600
 
+
+def _clock_advances(paused: bool, is_idle: bool, gap_secs: int) -> bool:
+    """Whether the active-time clock should count this second — LIVE activity only.
+
+    Stops while the screen is locked/asleep (paused), while the user is idle (no
+    live input — note InputMonitor EXEMPTS idle during meetings/media, so live
+    meetings/video keep counting), and across a large gap (process was suspended
+    by system sleep / lid-close, so we must never jump the counter forward)."""
+    if paused or is_idle:
+        return False
+    return gap_secs <= 10
+
 # ── SVG palette (exact) ───────────────────────────────────────────────────────
 CARD_BG     = QColor(0xFC, 0xFB, 0xF9, 224)   # #FCFBF9 @ 88 % — readable, light glass
 CARD_BORDER = QColor(0xEB, 0xE5, 0xDC, 255)   # #EBE5DC
@@ -501,15 +513,16 @@ class FloatingWidget(QWidget):
             self._redraw()
             return
 
-        pause = self._shared.get("pause_event")
-        if pause and pause.is_set():
-            self._last_tick = now; return
+        pause  = self._shared.get("pause_event")
+        paused = bool(pause and pause.is_set())
+        idle   = bool(self._shared.get("is_idle"))   # set by InputMonitor (idle-exempt in meetings)
 
-        gap = now - self._last_tick; self._last_tick = now
-        if gap > 10: return
-
-        self._elapsed += 1
-        self._redraw()
+        gap = now - self._last_tick
+        self._last_tick = now
+        # Count only LIVE activity: not locked/asleep, not idle, no suspend gap.
+        if _clock_advances(paused, idle, gap):
+            self._elapsed += 1
+            self._redraw()
 
     def _redraw(self):
         h, r = divmod(self._elapsed, 3600)
@@ -532,7 +545,7 @@ class FloatingWidget(QWidget):
         self._date_lbl.setText(_date_str())
 
         pause   = self._shared.get("pause_event")
-        is_idle = bool(pause and pause.is_set())
+        is_idle = bool((pause and pause.is_set()) or self._shared.get("is_idle"))
         if is_idle != self._is_idle:
             self._is_idle = is_idle
             self._hdr_lbl.setText("IDLE" if is_idle else "ACTIVE TODAY")

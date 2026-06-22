@@ -304,6 +304,13 @@ if __name__ == "__main__":
         _watchdog_entry()
         sys.exit(0)
 
+    # Updater subprocess (spawned by UpdateWorker): swap binaries, relaunch,
+    # health-check, rollback. Runs as its OWN process while the agent exits, so it
+    # skips the single-instance guard below. Additive — normal launch is unaffected.
+    if "--update" in sys.argv:
+        from updater import run_update_install
+        sys.exit(run_update_install())
+
     if sys.platform == "win32":
         from protection.win_guard import acquire_single_instance, protect_process, install_watchdog
         if not acquire_single_instance():

@@ -54,6 +54,8 @@ class Device(Base):
     enrolled_at:   Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     last_seen:     Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
     is_active:     Mapped[bool]             = mapped_column(Boolean, default=True)
+    is_archived:   Mapped[bool]             = mapped_column(Boolean, default=False)
+    is_deleted:    Mapped[bool]             = mapped_column(Boolean, default=False)
 
     company:     Mapped["Company"]                   = relationship(back_populates="devices")
     employee:    Mapped["Employee | None"]            = relationship(back_populates="devices", lazy="joined")
@@ -186,6 +188,18 @@ class InstallerVersion(Base):
     uploaded_by:    Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
     uploaded_at:    Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
+    # ── Auto-update release intelligence (migration 016, additive) ────────────
+    # Defaults reproduce today's behavior: an active row rolls out to everyone,
+    # non-mandatory, on the stable channel.
+    rollout_percent:       Mapped[int]              = mapped_column(Integer, default=100)
+    mandatory:             Mapped[bool]             = mapped_column(Boolean, default=False)
+    channel:               Mapped[str]              = mapped_column(String, default="stable")
+    min_supported_version: Mapped[str | None]       = mapped_column(String, nullable=True)
+    manifest_json:         Mapped[str | None]       = mapped_column(Text, nullable=True)
+    manifest_sig:          Mapped[str | None]       = mapped_column(Text, nullable=True)
+    expires_at:            Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at:          Mapped[datetime | None]  = mapped_column(DateTime(timezone=True), nullable=True)
+
 
 class InstallerDownload(Base):
     __tablename__ = "installer_downloads"
@@ -197,6 +211,25 @@ class InstallerDownload(Base):
 
     installer: Mapped["InstallerVersion"] = relationship()
     employee:  Mapped["Employee"]         = relationship()
+
+
+class UpdateRun(Base):
+    """Per-device update telemetry (migration 016). One row per (device, target
+    version), advanced as the agent reports CHECK/DOWNLOAD/INSTALL/ROLLBACK events."""
+    __tablename__ = "update_runs"
+
+    id:             Mapped[uuid.UUID]       = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    device_id:      Mapped[uuid.UUID]       = mapped_column(UUID, ForeignKey("devices.id", ondelete="CASCADE"), nullable=False)
+    company_id:     Mapped[uuid.UUID]       = mapped_column(UUID, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
+    from_version:   Mapped[str | None]      = mapped_column(String, nullable=True)
+    target_version: Mapped[str]             = mapped_column(String, nullable=False)
+    platform:       Mapped[str | None]      = mapped_column(String, nullable=True)
+    channel:        Mapped[str | None]      = mapped_column(String, nullable=True)
+    status:         Mapped[str]             = mapped_column(String, nullable=False)
+    error_code:     Mapped[str | None]      = mapped_column(String, nullable=True)
+    progress:       Mapped[int]             = mapped_column(Integer, default=0)
+    created_at:     Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at:     Mapped[datetime]        = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
 class NotificationRead(Base):

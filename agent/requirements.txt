@@ -1,5 +1,8 @@
 # Core — all platforms
 httpx==0.27.0
+# Verifies the Ed25519-signed update manifest (backend app/core/update_signing).
+# Ships prebuilt wheels for macOS/Windows, so PyInstaller bundles it cleanly.
+cryptography==44.0.0
 psutil==6.1.1
 mss==9.0.2
 Pillow==11.2.1

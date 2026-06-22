@@ -1,0 +1,5 @@
+{
+  "key_id": "v1",
+  "public_key": "RqDArEHiUvyEc708TG5UKzv5QSLhutPc/7wQRUj7o4g=",
+  "_comment": "DEV public key (derived from the dev backend JWT_SECRET signing key). PRODUCTION: replace public_key with your real Ed25519 public key and set AGENT_SIGNING_PRIVATE_KEY on the backend. The agent trusts ONLY this key for update-manifest signatures; sha256 is always enforced regardless."
+}
