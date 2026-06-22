@@ -26,6 +26,7 @@ from collections import defaultdict
 from sqlalchemy import text
 
 from app.core.backfill import pair_windows, slices_to_zero
+from app.core.config import get_settings
 
 BACKUP_TABLE = "activity_events_backfill_backup"
 
@@ -127,6 +128,55 @@ async def run_backfill(session, company_id=None, since_days=None, apply=False):
     return summary
 
 
+async def clamp_oversized(session, company_id=None, since_days=None, cap=None, apply=False):
+    """Reversibly clamp existing window_change slices longer than `cap` (the same
+    sanity ceiling ingest now enforces). Backs up originals before clamping, so
+    --revert restores them exactly. Independent of the idle/lock pass — a slice
+    that is both oversized and idle-overlapping is zeroed by run_backfill and
+    skipped here. cap defaults to settings.MAX_WINDOW_SLICE_SECS."""
+    if cap is None:
+        cap = get_settings().MAX_WINDOW_SLICE_SECS
+    cap = int(cap)
+    where = ["ae.event_type = 'window_change'", "ae.duration > :cap"]
+    params = {"cap": cap}
+    if company_id:
+        where.append("d.company_id = :cid"); params["cid"] = str(company_id)
+    if since_days:
+        where.append("ae.timestamp >= NOW() - make_interval(days => :days)"); params["days"] = int(since_days)
+    cond = " AND ".join(where)
+
+    rows = (await session.execute(
+        text(f"""
+            SELECT ae.id::text AS id, ae.duration AS dur
+            FROM activity_events ae JOIN devices d ON d.id = ae.device_id
+            WHERE {cond}
+        """), params)).fetchall()
+    ids = [r.id for r in rows]
+    secs_removed = sum(int(r.dur) - cap for r in rows)
+    summary = {
+        "clamp_slices": len(ids),
+        "clamp_hours_removed": round(secs_removed / 3600, 1),
+        "cap": cap,
+        "applied": False,
+    }
+    if apply and ids:
+        await session.execute(_CREATE_BACKUP)
+        await session.execute(
+            text(f"""
+                INSERT INTO {BACKUP_TABLE} (id, original_duration)
+                SELECT id, duration FROM activity_events WHERE id::text = ANY(:ids)
+                ON CONFLICT (id) DO NOTHING
+            """),
+            {"ids": ids},
+        )
+        await session.execute(
+            text("UPDATE activity_events SET duration = :cap WHERE id::text = ANY(:ids)"),
+            {"ids": ids, "cap": cap},
+        )
+        summary["applied"] = True
+    return summary
+
+
 async def revert(session):
     """Restore every backed-up duration, then drop the backup rows used."""
     res = await session.execute(
@@ -149,6 +199,7 @@ async def _main():
     ap.add_argument("--revert", action="store_true", help="restore from backup table")
     ap.add_argument("--company", default=None, help="restrict to one company uuid")
     ap.add_argument("--since-days", type=int, default=None, help="only events newer than N days")
+    ap.add_argument("--cap", type=int, default=None, help="oversized-slice ceiling (default: settings)")
     args = ap.parse_args()
 
     from app.db.base import AsyncSessionLocal  # local import: app must be configured
@@ -158,14 +209,18 @@ async def _main():
             await session.commit()
             print(f"REVERT: restored {out['restored']} slices from backup")
             return
-        out = await run_backfill(session, args.company, args.since_days, apply=args.apply)
+        # Two reversible passes: zero idle/lock-overlap slices, clamp oversized ones.
+        idle = await run_backfill(session, args.company, args.since_days, apply=args.apply)
+        clamp = await clamp_oversized(session, args.company, args.since_days, args.cap, apply=args.apply)
         if args.apply:
             await session.commit()
-        mode = "APPLIED" if out["applied"] else ("DRY-RUN (no changes)" if not args.apply else "nothing to do")
-        print(f"[{mode}] slices={out['slices']} hours_removed={out['hours_removed']} "
-              f"devices_affected={out['devices_affected']}")
-        if not args.apply and out["slices"]:
-            print("Re-run with --apply to zero these (originals are backed up; --revert undoes it).")
+        tag = "APPLIED" if args.apply else "DRY-RUN (no changes)"
+        print(f"[{tag}] idle/lock-overlap: zeroed {idle['slices']} slices "
+              f"({idle['hours_removed']}h) across {idle['devices_affected']} devices")
+        print(f"[{tag}] oversized slices : clamped {clamp['clamp_slices']} to {clamp['cap']}s "
+              f"(removed {clamp['clamp_hours_removed']}h)")
+        if not args.apply and (idle["slices"] or clamp["clamp_slices"]):
+            print("Re-run with --apply to fix these (originals are backed up; --revert undoes it).")
 
 
 if __name__ == "__main__":

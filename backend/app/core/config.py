@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     JWT_DEVICE_EXPIRE_DAYS: int = 365
     JWT_ADMIN_EXPIRE_HOURS: int = 12
 
+    # ── Activity sanity caps ────────────────────────────────────────────────────
+    # Hard ceiling on a single window_change slice. The agent emits one slice per
+    # ACTIVITY_HEARTBEAT_SECS (~60s), so a legitimate slice is tiny; anything far
+    # larger means a sleeping/offline/old agent counted hours against one window
+    # ("time keeps counting"). We clamp at ingest so the DB can never store an
+    # impossible slice regardless of agent version. 300s is generous vs the
+    # heartbeat yet kills hour-long slices.
+    MAX_WINDOW_SLICE_SECS: int = 300
+
     # ── AWS / S3 ──────────────────────────────────────────────────────────────
     AWS_REGION: str = "us-east-1"
     AWS_ACCESS_KEY_ID: str = ""

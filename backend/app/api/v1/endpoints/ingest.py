@@ -26,12 +26,27 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.api.deps import get_db, get_current_device
 from app.core import broadcaster
 from app.core.app_normalizer import normalize_app_name
+from app.core.config import get_settings
 from app.core.ingest_queue import ingest_queue
 from app.db.models import Device, ActivityEvent
 from app.schemas.event import ALLOWED_EVENT_TYPES, IngestRequest, IngestResponse
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+settings = get_settings()
+
+
+def capped_duration(event_type: str, duration: int, max_window_slice: int) -> int:
+    """Clamp a single window_change slice to a sane maximum.
+
+    The agent emits one window_change per heartbeat (~60s), so a legit slice is
+    tiny. A sleeping/offline/old agent can report hours against one window
+    ("time keeps counting") — clamp those. Other event types (idle_end, lock,
+    meeting_end) carry genuinely long durations and are never capped.
+    """
+    if event_type == "window_change" and duration > max_window_slice:
+        return max_window_slice
+    return duration
 
 
 @router.post("", status_code=202)
@@ -68,7 +83,7 @@ async def ingest_events(
             "app_name":     normalize_app_name(e.app_name),
             "window_title": (e.window_title or "")[:500],
             "url":          (e.url or "")[:2000],
-            "duration":     e.duration,
+            "duration":     capped_duration(e.event_type, e.duration, settings.MAX_WINDOW_SLICE_SECS),
             "timestamp":    ts,
         })
 

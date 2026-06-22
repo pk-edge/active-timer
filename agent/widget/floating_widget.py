@@ -150,6 +150,9 @@ class FloatingWidget(QWidget):
         self._session_date   = datetime.now().date()
         self._last_tick      = int(time.time())
         self._allow_close    = False   # True when an OS shutdown/restart is in progress
+        # Initialise to current headless state so the first _apply_headless tick
+        # is a no-op and never causes a 3-second visible flash on startup.
+        self._headless_applied = bool(shared.get("headless"))
 
         self._setup_window()
         self._build_ui()
@@ -411,7 +414,8 @@ class FloatingWidget(QWidget):
             self._tray.setContextMenu(m)
             self._tray.activated.connect(self._tray_clicked)
             self._tray.setToolTip("TimeTracker")
-            self._tray.show()
+            if not self._shared.get("headless"):
+                self._tray.show()
         except Exception:
             pass
 
@@ -567,7 +571,27 @@ class FloatingWidget(QWidget):
 
     # ── Tick: status ──────────────────────────────────────────────────────────
 
+    def _apply_headless(self):
+        """Live-apply the admin headless flag (published by ConfigWorker). Headless
+        hides BOTH the floating widget and the tray icon (fully invisible); visible
+        restores both. Acts only on a change so it never fights the normal
+        show/hide paths, and runs on the Qt thread (no cross-thread UI calls)."""
+        headless = bool(self._shared.get("headless"))
+        if headless == self._headless_applied:
+            return
+        self._headless_applied = headless
+        tray = getattr(self, "_tray", None)
+        if headless:
+            self.hide()
+            if tray is not None:
+                tray.hide()
+        else:
+            self.show()
+            if tray is not None:
+                tray.show()
+
     def _tick_status(self):
+        self._apply_headless()
         self._date_lbl.setText(_date_str())
 
         pause   = self._shared.get("pause_event")

@@ -4,7 +4,7 @@ import Link from "next/link";
 import useSWR from "swr";
 import { format } from "date-fns";
 import { ArrowLeft, Laptop, User } from "lucide-react";
-import { getTimeline, getDailyStats, getDevices, fmtSeconds } from "@/lib/api";
+import { getTimeline, getDailyStats, getDevices, setDeviceHeadless, fmtSeconds } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
 import DailyChart       from "./_components/DailyChart";
 import ActivityTimeline from "./_components/ActivityTimeline";
@@ -35,8 +35,13 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
   );
 
   // Fetch device info for hostname / employee name
-  const { data: devices } = useSWR<Device[]>("devices", getDevices);
+  const { data: devices, mutate: mutateDevices } = useSWR<Device[]>("devices", getDevices);
   const device = devices?.find(d => d.id === id);
+
+  async function changeHeadless(override: boolean | null) {
+    await setDeviceHeadless(id, override);
+    mutateDevices();
+  }
 
   // OS lock/login screen apps — never count as active work time.
   // Must stay in sync with backend SYSTEM_IDLE_APPS and agent LOCK_SCREEN_APPS.
@@ -136,6 +141,39 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
             idleSecsToday={idleSecsToday}
           />
           <MeetingsCard deviceId={id} days={7} />
+
+          {/* ── Agent visibility (per-device override) ── */}
+          <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-3">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">
+              Agent visibility
+            </p>
+            <div className="flex gap-1">
+              {([
+                { label: "Inherit", val: null },
+                { label: "Visible", val: false },
+                { label: "Hidden",  val: true },
+              ] as { label: string; val: boolean | null }[]).map(opt => {
+                const active = (device?.headless_override ?? null) === opt.val;
+                return (
+                  <button
+                    key={opt.label}
+                    onClick={() => changeHeadless(opt.val)}
+                    className={`flex-1 text-xs py-1.5 rounded-lg border transition ${
+                      active
+                        ? "bg-brand-50 border-brand-300 text-brand-700 font-semibold"
+                        : "border-gray-200 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-gray-500 mt-2">
+              {device?.headless ? "Hidden — no timer or tray icon." : "Visible — timer shown."}
+              {(device?.headless_override ?? null) === null && " (inheriting company default)"}
+            </p>
+          </div>
         </div>
 
         {/* Activity feed — below on mobile, left column on desktop */}

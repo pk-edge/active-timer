@@ -135,6 +135,7 @@ const OAUTH_ERRORS: Record<string, string> = {
   company_not_found:         "System not set up yet. Contact an administrator.",
   no_access:                 "Your account does not have dashboard access.",
   portal_access_restricted:  "__restricted__",
+  pending_approval:          "__pending__",
 };
 
 /* ── Main login page ─────────────────────────────────────────────────────── */
@@ -161,6 +162,8 @@ export default function LoginPage() {
       const msg = OAUTH_ERRORS[oauthErr];
       if (msg === "__restricted__") {
         setRestricted(true);
+      } else if (msg === "__pending__") {
+        setPending(true);
       } else {
         setError(msg ?? "Google sign-in failed. Please try again.");
       }
