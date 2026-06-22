@@ -150,7 +150,9 @@ class FloatingWidget(QWidget):
         self._session_date   = datetime.now().date()
         self._last_tick      = int(time.time())
         self._allow_close    = False   # True when an OS shutdown/restart is in progress
-        self._headless_applied = False  # last-applied admin headless state (live toggle)
+        # Initialise to current headless state so the first _apply_headless tick
+        # is a no-op and never causes a 3-second visible flash on startup.
+        self._headless_applied = bool(shared.get("headless"))
 
         self._setup_window()
         self._build_ui()
@@ -412,7 +414,8 @@ class FloatingWidget(QWidget):
             self._tray.setContextMenu(m)
             self._tray.activated.connect(self._tray_clicked)
             self._tray.setToolTip("TimeTracker")
-            self._tray.show()
+            if not self._shared.get("headless"):
+                self._tray.show()
         except Exception:
             pass
 

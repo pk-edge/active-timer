@@ -16,7 +16,7 @@ class Company(Base):
     enrollment_token: Mapped[str]       = mapped_column(String, unique=True, nullable=False)
     # Company-wide default agent visibility. TRUE = all agents run headless
     # (no floating widget, no tray icon). Per-device override lives on Device.
-    agent_headless:   Mapped[bool]      = mapped_column(Boolean, default=False)
+    agent_headless:   Mapped[bool]      = mapped_column(Boolean, default=True)
     created_at:       Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     devices:   Mapped[list["Device"]]   = relationship(back_populates="company")

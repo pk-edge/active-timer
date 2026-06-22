@@ -28,7 +28,7 @@ def fetch_headless() -> bool | None:
     try:
         r = httpx.get(Config.AGENT_CONFIG_ENDPOINT, headers=headers, timeout=8)
         if r.status_code == 200:
-            return bool(r.json().get("headless", False))
+            return bool(r.json().get("headless", True))
     except Exception as e:  # noqa: BLE001
         log.debug("agent-config fetch failed: %s", e)
     return None
@@ -58,7 +58,7 @@ class ConfigWorker:
         try:
             r = self._http.get(Config.AGENT_CONFIG_ENDPOINT, headers=headers)
             r.raise_for_status()
-            headless = bool(r.json().get("headless", False))
+            headless = bool(r.json().get("headless", True))
         except Exception as e:  # noqa: BLE001
             # A failed poll must never crash the agent or flip visibility — keep
             # the last known value until the next successful fetch.
