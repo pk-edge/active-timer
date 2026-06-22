@@ -115,10 +115,12 @@ class Config:
     UPDATE_CHECK_ENDPOINT:  str = f"{API_BASE}/v1/updates/check"
     POLICY_ENDPOINT:        str = f"{API_BASE}/v1/policy/blocked-urls"
     DEVICE_TODAY_ENDPOINT:  str = f"{API_BASE}/v1/home/device-today-active"
+    AGENT_CONFIG_ENDPOINT:  str = f"{API_BASE}/v1/agent/config"
 
     # ── Auto-update ──────────────────────────────────────────────────────────
     AUTO_UPDATE_ENABLED: bool = os.environ.get("TT_AUTO_UPDATE", "1") != "0"
     UPDATE_CHECK_SECS:   int  = 6 * 3600   # poll for updates every 6 hours
+    AGENT_CONFIG_SECS:   int  = 60         # poll admin agent-config (headless) every 60s
 
     # ── Local storage ────────────────────────────────────────────────────────
     DB_PATH:        Path = BASE_DIR / "queue.db"

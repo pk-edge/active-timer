@@ -308,30 +308,28 @@ async def google_oauth_callback(
             await db.commit()
     else:
         new_user = True
-        # New SSO users default to VIEWER (read-only, group-scoped). They are
-        # NEVER auto-provisioned as admin and get no edit access — an existing
-        # admin must explicitly elevate the role before they can change anything.
-        viewer_role = (await db.execute(
-            select(Role).where(
-                Role.company_id == company.id,
-                Role.name == "Viewer",
-                Role.is_deleted == False,  # noqa: E712
-            )
-        )).scalar_one_or_none()
+        # First-time Google user → admin approval queue (Users → Pending). No role
+        # and no usable session yet; an admin must approve and assign a role before
+        # they can reach the dashboard. Mirrors the self-registration flow.
         employee = Employee(
             company_id=company.id,
             email=email,
             name=name,
             google_sub=google_sub,
-            role="viewer",
-            role_id=viewer_role.id if viewer_role else None,
+            role="employee",
+            role_id=None,
             is_active=True,
-            is_approved=True,
+            is_approved=False,
         )
         db.add(employee)
         await db.commit()
-        await db.refresh(employee)
-        log.info("Auto-provisioned Google user as Viewer (read-only): %s", email)
+        log.info("New Google user queued for admin approval: %s", email)
+        return RedirectResponse(f"{dash}/login?error=pending_approval")
+
+    # Existing account: enforce the same approval gate the password login uses, so
+    # a not-yet-approved user can't slip in via Google.
+    if not employee.is_approved:
+        return RedirectResponse(f"{dash}/login?error=pending_approval")
 
     jwt_token = create_admin_token(str(employee.id), employee.role, str(employee.company_id))
     return RedirectResponse(

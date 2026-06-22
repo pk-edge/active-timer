@@ -1,5 +1,5 @@
 import type {
-  Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
+  Device, TimelineEvent, DailyStat, CompanyDay, AppUsage, LogEvent,
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
   OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
@@ -120,10 +120,6 @@ export const getTimeline = (deviceId: string, since?: number, until?: number) =>
 export const getDailyStats = (deviceId: string, days = 7) =>
   request<DailyStat[]>(`/v1/devices/${deviceId}/stats?days=${days}`);
 
-// ── Screenshots ───────────────────────────────────────────────────────────────
-
-export const getScreenshots = (deviceId: string) =>
-  request<Screenshot[]>(`/v1/screenshots/${deviceId}`);
 
 // ── Reports ───────────────────────────────────────────────────────────────────
 
@@ -479,9 +475,21 @@ export const getCategoryUsageDetail = (cat_id: string | null, tab: string, since
 export interface CompanyInfo {
   name: string;
   enrollment_token: string;
+  agent_headless: boolean;
 }
 
 export const getCompanyInfo = () => request<CompanyInfo>("/v1/company/info");
+export const updateCompanySettings = (agent_headless: boolean) =>
+  request<CompanyInfo>("/v1/company/settings", {
+    method: "PATCH",
+    body: JSON.stringify({ agent_headless }),
+  });
+// Per-device visibility override: null = inherit company default, true/false = force.
+export const setDeviceHeadless = (deviceId: string, override: boolean | null) =>
+  request<Device>(`/v1/devices/${deviceId}/headless`, {
+    method: "PATCH",
+    body: JSON.stringify({ override }),
+  });
 
 // ── URL Policies ─────────────────────────────────────────────────────────────
 

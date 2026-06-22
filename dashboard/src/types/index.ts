@@ -9,6 +9,8 @@ export interface Device {
   is_online:      boolean;
   is_archived:    boolean;
   is_deleted:     boolean;
+  headless?:          boolean;        // effective: what the agent applies
+  headless_override?: boolean | null; // raw per-device override (null = inherit)
 }
 
 export interface TimelineEvent {
@@ -27,14 +29,6 @@ export interface DailyStat {
   active_seconds: number;
   idle_seconds:   number;
   total_seconds:  number;
-}
-
-export interface Screenshot {
-  id:               string;
-  s3_url:           string;
-  captured_at:      string;
-  captured_at_unix: number;
-  file_size:        number;
 }
 
 export interface CompanyDay {

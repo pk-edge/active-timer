@@ -15,8 +15,8 @@ from app.core import audit, broadcaster
 from app.core.config import get_settings
 from app.core.security import decode_token
 from app.core.scoping import visible_device_ids, ALL
-from app.db.models import Device, ActivityEvent, Employee
-from app.schemas.device import DeviceOut, TimelineEventOut, DailyStatOut, AssignDeviceRequest
+from app.db.models import Device, ActivityEvent, Employee, Company
+from app.schemas.device import DeviceOut, TimelineEventOut, DailyStatOut, AssignDeviceRequest, HeadlessRequest
 
 router   = APIRouter()
 settings = get_settings()
@@ -80,6 +80,9 @@ async def list_devices(
     result  = await db.execute(q)
     devices = result.scalars().all()
     cutoff  = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+    company_headless = bool((await db.execute(
+        select(Company.agent_headless).where(Company.id == admin.company_id)
+    )).scalar_one_or_none())
     return [
         DeviceOut(
             id=str(d.id),
@@ -92,6 +95,8 @@ async def list_devices(
             is_online=bool(d.last_seen and d.last_seen > cutoff),
             is_archived=d.is_archived,
             is_deleted=d.is_deleted,
+            headless_override=d.headless_override,
+            headless=(d.headless_override if d.headless_override is not None else company_headless),
         )
         for d in devices
     ]
@@ -145,6 +150,47 @@ async def assign_device(
         is_online=bool(device.last_seen and device.last_seen > cutoff),
         is_archived=device.is_archived,
         is_deleted=device.is_deleted,
+    )
+
+
+@router.patch("/{device_id}/headless", response_model=DeviceOut)
+async def set_device_headless(
+    device_id: str,
+    body: HeadlessRequest,
+    admin: Employee = Depends(require("settings", "edit")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a device's visibility override: null = inherit the company default,
+    true = force headless, false = force visible. The agent applies it within ~60s."""
+    device = await _get_device_for_admin(device_id, admin, db)
+    device.headless_override = body.override
+    await audit.record(db, admin, "device.headless", "device", str(device.id),
+                       {"override": body.override})
+    await db.commit()
+
+    company_headless = bool((await db.execute(
+        select(Company.agent_headless).where(Company.id == admin.company_id)
+    )).scalar_one_or_none())
+    emp_name = None
+    if device.employee_id:
+        emp_name = (await db.execute(
+            select(Employee.name).where(Employee.id == device.employee_id)
+        )).scalar_one_or_none()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+    eff = device.headless_override if device.headless_override is not None else company_headless
+    return DeviceOut(
+        id=str(device.id),
+        hostname=device.hostname,
+        platform=device.platform,
+        employee_id=str(device.employee_id) if device.employee_id else None,
+        employee_name=emp_name,
+        last_seen=device.last_seen,
+        last_seen_unix=int(device.last_seen.timestamp()) if device.last_seen else None,
+        is_online=bool(device.last_seen and device.last_seen > cutoff),
+        is_archived=device.is_archived,
+        is_deleted=device.is_deleted,
+        headless_override=device.headless_override,
+        headless=eff,
     )
 
 

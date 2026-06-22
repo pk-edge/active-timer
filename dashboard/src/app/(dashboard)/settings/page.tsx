@@ -4,18 +4,17 @@ import { useState } from "react";
 import useSWR from "swr";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
-import { getCompanyInfo, type CompanyInfo } from "@/lib/api";
+import { getCompanyInfo, updateCompanySettings, type CompanyInfo } from "@/lib/api";
 import {
-  Building2, Camera, Activity, Bell, Link2,
+  Building2, Activity, Bell, Link2,
   Check, ChevronRight, Copy, Eye, EyeOff,
 } from "lucide-react";
 
-type Tab = "general" | "tracking" | "screenshots" | "notifications" | "integration";
+type Tab = "general" | "tracking" | "notifications" | "integration";
 
 const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
   { key: "general",       label: "General",       icon: <Building2 size={16} /> },
   { key: "tracking",      label: "Tracking",      icon: <Activity  size={16} /> },
-  { key: "screenshots",   label: "Screenshots",   icon: <Camera    size={16} /> },
   { key: "notifications", label: "Notifications", icon: <Bell      size={16} /> },
   { key: "integration",   label: "Integration",   icon: <Link2     size={16} /> },
 ];
@@ -75,7 +74,17 @@ export default function SettingsPage() {
   const [tokenVisible, setTokenVisible] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const { data: companyInfo } = useSWR<CompanyInfo>("company-info", getCompanyInfo);
+  const { data: companyInfo, mutate: mutateCompany } = useSWR<CompanyInfo>("company-info", getCompanyInfo);
+  const [savingHeadless, setSavingHeadless] = useState(false);
+  async function toggleHeadless(v: boolean) {
+    if (savingHeadless) return;
+    setSavingHeadless(true);
+    try {
+      const updated = await updateCompanySettings(v);
+      mutateCompany(updated, { revalidate: false });
+    } catch { /* keep previous value on failure */ }
+    finally { setSavingHeadless(false); }
+  }
 
   function copyToken() {
     if (!companyInfo) return;
@@ -96,12 +105,6 @@ export default function SettingsPage() {
   const [idleTimeout,     setIdleTimeout]     = useState("5");
   const [trackKeyboard,   setTrackKeyboard]   = useState(false);
 
-  // Screenshots
-  const [screenshotsEnabled, setScreenshotsEnabled] = useState(true);
-  const [screenshotInterval, setScreenshotInterval] = useState("10");
-  const [blurScreenshots,    setBlurScreenshots]    = useState(false);
-  const [screenshotQuality,  setScreenshotQuality]  = useState("medium");
-
   // Notifications
   const [emailAlerts,      setEmailAlerts]      = useState(true);
   const [idleAlertMins,    setIdleAlertMins]    = useState("30");
@@ -121,7 +124,7 @@ export default function SettingsPage() {
       <div className="flex flex-wrap items-start justify-between gap-3 mb-6">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 mb-1">Settings</h1>
-          <p className="text-gray-600 text-sm">Configure tracking, screenshots, and notifications</p>
+          <p className="text-gray-600 text-sm">Configure tracking and notifications</p>
         </div>
         <button
           onClick={handleSave}
@@ -218,6 +221,13 @@ export default function SettingsPage() {
               <h2 className="text-base font-semibold text-gray-900 mb-1">Tracking</h2>
               <p className="text-sm text-gray-600 mb-5">Control what activity data the agent captures</p>
 
+              <SettingRow
+                label="Make agents invisible (headless)"
+                description="Hide the floating timer AND tray icon on ALL agents in this company. Tracking continues silently; running agents apply it within ~60s. You can override this per device on the device page."
+              >
+                <Toggle checked={!!companyInfo?.agent_headless} onChange={toggleHeadless} />
+              </SettingRow>
+
               <SettingRow label="Track active applications" description="Record which app is in focus and for how long">
                 <Toggle checked={true} onChange={() => {}} />
               </SettingRow>
@@ -247,54 +257,6 @@ export default function SettingsPage() {
                     { label: "10 minutes", value: "10" },
                     { label: "15 minutes", value: "15" },
                     { label: "30 minutes", value: "30" },
-                  ]}
-                />
-              </SettingRow>
-            </div>
-          )}
-
-          {/* ── Screenshots ─────────────────────────────────────────── */}
-          {tab === "screenshots" && (
-            <div>
-              <h2 className="text-base font-semibold text-gray-900 mb-1">Screenshots</h2>
-              <p className="text-sm text-gray-600 mb-5">Configure automatic screenshot capture</p>
-
-              <SettingRow label="Enable screenshots" description="Capture screenshots at regular intervals">
-                <Toggle checked={screenshotsEnabled} onChange={setScreenshotsEnabled} />
-              </SettingRow>
-
-              <SettingRow
-                label="Capture interval"
-                description="How often screenshots are taken (when enabled)"
-              >
-                <SelectInput
-                  value={screenshotInterval}
-                  onChange={setScreenshotInterval}
-                  options={[
-                    { label: "Every 5 min", value: "5" },
-                    { label: "Every 10 min", value: "10" },
-                    { label: "Every 15 min", value: "15" },
-                    { label: "Every 30 min", value: "30" },
-                    { label: "Every 60 min", value: "60" },
-                  ]}
-                />
-              </SettingRow>
-
-              <SettingRow
-                label="Blur screenshots"
-                description="Apply a blur effect before uploading for added privacy"
-              >
-                <Toggle checked={blurScreenshots} onChange={setBlurScreenshots} />
-              </SettingRow>
-
-              <SettingRow label="Image quality" description="Higher quality uses more storage">
-                <SelectInput
-                  value={screenshotQuality}
-                  onChange={setScreenshotQuality}
-                  options={[
-                    { label: "Low (faster)", value: "low" },
-                    { label: "Medium", value: "medium" },
-                    { label: "High", value: "high" },
                   ]}
                 />
               </SettingRow>

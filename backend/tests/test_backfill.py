@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import text as sa_text
 
 from app.core.backfill import pair_windows, merge_windows, slices_to_zero
-from app.maintenance.idle_backfill import run_backfill, revert, BACKUP_TABLE
+from app.maintenance.idle_backfill import run_backfill, clamp_oversized, revert, BACKUP_TABLE
 
 
 # ── Pure logic ────────────────────────────────────────────────────────────────
@@ -89,13 +89,72 @@ async def test_backfill_zeroes_only_overlapping_then_reverts(db_session):
     assert applied["applied"] is True and applied["slices"] == 2
     assert await dur_of(A) == 0 and await dur_of(B) == 0
     assert await dur_of(C) == 400                       # outside windows → untouched
+    # Scope to THIS test's ids — the shared backup table may hold rows from a
+    # real prior --apply on the same DB; we only assert about our own slices.
     backup = await db_session.execute(
-        sa_text(f"SELECT id::text, original_duration FROM {BACKUP_TABLE} ORDER BY original_duration"))
+        sa_text(f"SELECT id::text, original_duration FROM {BACKUP_TABLE} "
+                "WHERE id::text = ANY(:ids) ORDER BY original_duration"),
+        {"ids": [A, B]})
     assert [(r[0], r[1]) for r in backup.fetchall()] == [(B, 300), (A, 600)]
 
-    # REVERT: exact prior durations restored, backup emptied.
+    # REVERT: exact prior durations restored, our backup rows cleared.
     rev = await revert(db_session)
-    assert rev["restored"] == 2
+    assert rev["restored"] >= 2
     assert await dur_of(A) == 600 and await dur_of(B) == 300 and await dur_of(C) == 400
-    empty = await db_session.execute(sa_text(f"SELECT COUNT(*) FROM {BACKUP_TABLE}"))
+    empty = await db_session.execute(
+        sa_text(f"SELECT COUNT(*) FROM {BACKUP_TABLE} WHERE id::text = ANY(:ids)"),
+        {"ids": [A, B]})
     assert empty.scalar() == 0
+
+
+# ── ingest cap (pure) ──────────────────────────────────────────────────────────
+
+def test_capped_duration_clamps_window_change_only():
+    from app.api.v1.endpoints.ingest import capped_duration
+    assert capped_duration("window_change", 40000, 300) == 300   # sleep/offline inflation
+    assert capped_duration("window_change", 120, 300) == 120     # normal slice untouched
+    assert capped_duration("idle_end", 40000, 300) == 40000      # long idle is legitimate
+    assert capped_duration("meeting_end", 7200, 300) == 7200     # long meeting is legitimate
+    assert capped_duration("lock", 50000, 300) == 50000          # long lock is legitimate
+
+
+# ── clamp_oversized round-trip ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_clamp_oversized_then_revert(db_session):
+    cid = uuid.uuid4(); did = uuid.uuid4(); tag = uuid.uuid4().hex[:8]
+    await db_session.execute(sa_text(
+        "INSERT INTO companies (id, name, enrollment_token) VALUES (:i,:n,:t)"),
+        {"i": str(cid), "n": f"CLP-{tag}", "t": tag})
+    await db_session.execute(sa_text(
+        "INSERT INTO devices (id, company_id, hostname, platform, is_active) "
+        "VALUES (:i,:c,:h,'darwin',TRUE)"),
+        {"i": str(did), "c": str(cid), "h": f"h-{tag}"})
+
+    O, N = str(uuid.uuid4()), str(uuid.uuid4())   # O = oversized, N = normal
+    for eid, dur in ((O, 40000), (N, 120)):
+        await db_session.execute(sa_text(
+            "INSERT INTO activity_events (id, device_id, event_type, app_name, duration, timestamp) "
+            "VALUES (:i,:d,'window_change','Microsoft Edge',:dur, NOW())"),
+            {"i": eid, "d": str(did), "dur": dur})
+    await db_session.flush()
+
+    async def dur_of(eid):
+        r = await db_session.execute(
+            sa_text("SELECT duration FROM activity_events WHERE id = :i"), {"i": eid})
+        return r.scalar()
+
+    dry = await clamp_oversized(db_session, company_id=cid, cap=300, apply=False)
+    assert dry["clamp_slices"] == 1 and dry["applied"] is False
+    assert await dur_of(O) == 40000 and await dur_of(N) == 120        # nothing changed
+
+    applied = await clamp_oversized(db_session, company_id=cid, cap=300, apply=True)
+    assert applied["applied"] is True and applied["clamp_slices"] == 1
+    assert await dur_of(O) == 300          # oversized clamped to cap
+    assert await dur_of(N) == 120          # normal slice untouched
+    bk = await db_session.execute(
+        sa_text(f"SELECT original_duration FROM {BACKUP_TABLE} WHERE id::text = :i"), {"i": O})
+    assert bk.scalar() == 40000            # true original preserved
+
+    await revert(db_session)
+    assert await dur_of(O) == 40000        # exact restore
