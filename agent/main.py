@@ -164,7 +164,7 @@ def main() -> None:
         "lock_time":           None,
         "policy_manager":      policy_manager,
         "today_active_secs":   None,  # None until enrollment resolves the real value
-        "headless":            False,  # admin-controlled; updated live by ConfigWorker
+        "headless":            True,   # default invisible; admin can override via backend
     }
 
     # 3. Register auto-start on login
