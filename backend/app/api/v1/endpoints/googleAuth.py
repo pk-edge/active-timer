@@ -46,14 +46,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.core.config import get_settings
 from app.core.secrets import load_google_credentials
 from app.core.security import create_admin_token, hash_password_async
-from app.db.models import Company, Employee, Role
+from app.db.models import Company, Employee, EmployeeGroupAccess, Role
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -282,10 +282,34 @@ async def google_oauth_callback(
     employee = emp_row.scalar_one_or_none()
     new_user = False
 
+    if employee and employee.is_deleted:
+        # A DELETED account signing in again is treated as a brand-new user: the
+        # person is gone from the UI and intends to re-join. The email and
+        # google_sub UNIQUE constraints forbid a fresh INSERT, so resurrect the
+        # soft-deleted row in place and drop it back into the pending-approval
+        # queue with no role/groups — mirrors self-registration. This is distinct
+        # from a DEACTIVATED account (is_active=False, not deleted), which an
+        # admin disabled on purpose and must NOT silently come back below.
+        employee.name          = name
+        employee.google_sub    = google_sub
+        employee.role          = "employee"
+        employee.role_id       = None
+        employee.password_hash = None
+        employee.is_active     = True
+        employee.is_approved   = False
+        employee.is_deleted    = False
+        await db.execute(
+            delete(EmployeeGroupAccess).where(EmployeeGroupAccess.employee_id == employee.id)
+        )
+        await db.commit()
+        log.info("Deleted Google user re-registered, queued for admin approval: %s", email)
+        return RedirectResponse(f"{dash}/login?error=pending_approval")
+
     if employee:
-        # Reject disabled accounts BEFORE persisting anything — never mutate a
-        # deactivated/deleted record's identity (it could later be reactivated).
-        if not employee.is_active or employee.is_deleted:
+        # Reject DEACTIVATED accounts BEFORE persisting anything — never mutate a
+        # deactivated record's identity (an admin turned it off and it may later be
+        # reactivated). Deleted accounts were already handled above.
+        if not employee.is_active:
             return RedirectResponse(f"{dash}/login?error=account_inactive")
 
         # Block talent (device-only) accounts — auto-provisioned by enrollment with the

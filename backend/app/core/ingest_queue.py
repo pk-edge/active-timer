@@ -57,6 +57,11 @@ log = logging.getLogger("ingest_queue")
 QUEUE_MAXSIZE   = 100_000   # drop back-pressure threshold
 BATCH_SIZE      = 200       # events per DB write cycle
 BATCH_WAIT      = 0.4       # seconds to wait for a full batch before flushing
+MAX_WRITE_RETRIES = 3       # cap re-enqueues of a row that fails for a DATA reason
+                            # (poison-pill guard) before dead-lettering it
+TRANSIENT_RETRY_BACKOFF = 1.0  # seconds to wait before retrying a batch after a
+                               # TRANSIENT DB error (failover/outage) so workers
+                               # don't hot-loop against a down database
 _settings        = get_settings()
 MIN_WORKERS     = _settings.INGEST_MIN_WORKERS   # always-on workers
 # Hard ceiling: never run more workers than the ingest pool has connections, or
@@ -227,11 +232,120 @@ class IngestQueue:
                               worker_id, len(rows), len(device_ids))
 
                 except Exception as exc:
-                    log.error("Worker %d DB write failed: %s", worker_id, exc)
+                    # The agent already got its 202 and dropped these events from
+                    # its local buffer, so the backend now owns them — we must NOT
+                    # silently lose them. Recover based on WHY the write failed.
+                    await self._handle_write_failure(batch, worker_id, exc)
 
         except asyncio.CancelledError:
             pass
         log.debug("Worker %d stopped", worker_id)
+
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        """True for connection/operational errors (failover, saturation, deadlock)
+        that a retry can fix — as opposed to a data/constraint error that never
+        will."""
+        from sqlalchemy.exc import OperationalError, InterfaceError, DBAPIError
+        if isinstance(exc, (OperationalError, InterfaceError)):
+            return True
+        if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+            return True
+        return False
+
+    async def _handle_write_failure(self, batch: list[dict], worker_id: int, exc: Exception) -> None:
+        """Recover a failed batch WITHOUT losing events.
+
+        • Transient error (DB failover/outage/saturation): re-enqueue the whole
+          batch UNCOUNTED after a short backoff, so a multi-minute outage never
+          burns through a retry budget and drops data. The 100k queue + upstream
+          503 back-pressure bound memory while the DB is down.
+        • Non-transient error (a constraint/data problem): a single poison row
+          would otherwise fail the whole 200-row bulk insert and take 199 good
+          events with it — so fall back to writing each row on its OWN
+          transaction. Good rows commit; only a genuinely bad row is isolated and
+          dead-lettered (logged with full payload, recoverable), never silently
+          dropped.
+        """
+        if self._is_transient(exc):
+            await asyncio.sleep(TRANSIENT_RETRY_BACKOFF)
+            requeued = self._requeue(batch, count_attempt=False)
+            log.warning("Worker %d transient write error (%s) — requeued %d for retry",
+                        worker_id, exc, requeued)
+            return
+        await self._rescue_per_row(batch, worker_id, exc)
+
+    def _requeue(self, items: list[dict], count_attempt: bool) -> int:
+        """Put items back on the queue. When count_attempt is True, a row that has
+        exceeded MAX_WRITE_RETRIES is dead-lettered instead of requeued."""
+        n = 0
+        for item in items:
+            if count_attempt:
+                item["attempts"] = item.get("attempts", 0) + 1
+                if item["attempts"] > MAX_WRITE_RETRIES:
+                    self._dead_letter(item, "exceeded max write retries")
+                    continue
+            try:
+                self._q.put_nowait(item)
+                n += 1
+            except asyncio.QueueFull:
+                self._dead_letter(item, "queue full on requeue")
+        return n
+
+    async def _rescue_per_row(self, batch: list[dict], worker_id: int, exc: Exception) -> None:
+        """Write each row in its own transaction so one poison row can't sink the
+        rest of the batch."""
+        from app.db.base import IngestSessionLocal
+        from app.core import broadcaster
+        from app.db.models import ActivityEvent
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy import text
+
+        log.warning("Worker %d non-transient write error (%s) — isolating %d rows row-by-row",
+                    worker_id, exc, len(batch))
+        ok_devices: set[str] = set()
+        poison = 0
+        for item in batch:
+            try:
+                async with IngestSessionLocal() as db:
+                    await db.execute(
+                        pg_insert(ActivityEvent).values([item["row"]])
+                        .on_conflict_do_nothing(index_elements=["id"])
+                    )
+                    await db.commit()
+                ok_devices.add(item["device_id"])
+            except Exception as row_exc:
+                if self._is_transient(row_exc):
+                    # DB went down mid-rescue — requeue this row (uncounted) to
+                    # retry once it recovers; do not dead-letter a transient error.
+                    self._requeue([item], count_attempt=False)
+                else:
+                    self._dead_letter(item, str(row_exc))
+                    poison += 1
+
+        if ok_devices:
+            try:
+                async with IngestSessionLocal() as db:
+                    await db.execute(
+                        text("UPDATE devices SET last_seen = NOW() WHERE id = ANY(:ids)"),
+                        {"ids": list(ok_devices)},
+                    )
+                    await db.commit()
+                await broadcaster.publish("devices_updated")
+            except Exception as last_seen_exc:
+                log.warning("Worker %d rescue last_seen update failed: %s", worker_id, last_seen_exc)
+
+        if poison:
+            log.error("Worker %d dead-lettered %d poison row(s) after row-by-row rescue",
+                      worker_id, poison)
+
+    def _dead_letter(self, item: dict, reason: str) -> None:
+        """Last resort for an unwritable event: log the FULL payload at ERROR so it
+        is recoverable from logs (grep + replay) rather than vanishing silently.
+        Intentionally no new table/infra — keeps the durability net architecture-
+        light while making any loss loud and auditable."""
+        log.error("INGEST_DEAD_LETTER reason=%s device=%s row=%r",
+                  reason, item.get("device_id"), item.get("row"))
 
     # ── Device state cache ────────────────────────────────────────────────────
 

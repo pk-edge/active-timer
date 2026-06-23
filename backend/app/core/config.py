@@ -16,7 +16,18 @@ class Settings(BaseSettings):
     #   ingest writers: INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW (default 2+2 = 4)
     # One task therefore holds at most 14 connections; a 2-task rolling deploy
     # spikes to 2x that (28), which fits even the smallest RDS/Postgres tiers
-    # (max_connections >= 60). Raise per-environment only with the math above.
+    # (max_connections >= 60).
+    #
+    # AWS / RDS SIZING — READ BEFORE RAISING ANY OF THESE:
+    #   Total Postgres connections used = REPLICAS * (HTTP + ingest pool)
+    #     = REPLICAS * 14 in steady state, REPLICAS * 28 mid rolling-deploy.
+    #   Keep that comfortably under your RDS instance's max_connections
+    #   (e.g. db.t3.micro≈87, db.t3.small≈198, db.t3.medium≈410). Example: 3
+    #   replicas → 3*28 = 84 peak, safe on ~100+. Scaling to more devices is
+    #   done by adding REPLICAS, NOT by inflating these pools — an oversized
+    #   per-process pool is exactly what exhausts max_connections and takes the
+    #   DB down. The ingest auth cache below removes the per-post auth SELECT so
+    #   you do NOT need a bigger HTTP pool to absorb 1000+ devices.
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 5
     DB_POOL_TIMEOUT: int = 10   # fail fast instead of stacking 30s waits
@@ -33,6 +44,34 @@ class Settings(BaseSettings):
     # the pool has room to scale up under load and back down when idle.
     INGEST_MIN_WORKERS: int = 2
     INGEST_MAX_WORKERS: int = 4
+
+    # ── Ingest auth cache ──────────────────────────────────────────────────────
+    # Caches (device token → device_id) in-process so the per-POST /v1/ingest auth
+    # lookup does NOT borrow a connection from the HTTP pool on every 5s post.
+    # This is the single biggest relief for pool contention at 1000+ devices: warm
+    # tokens resolve from memory (zero DB), only cold/expired tokens do one short,
+    # concurrency-bounded DB read. TTL bounds how long a revoked device keeps
+    # validating (archive/delete/re-enroll also invalidate it immediately).
+    # No Redis dependency — purely in-process, so it degrades to nothing if Redis
+    # is unavailable. Raise TTL to cut DB auth reads further; lower it to tighten
+    # revocation latency.
+    INGEST_AUTH_CACHE_TTL_SECS: int = 60
+    INGEST_AUTH_CACHE_MAX: int = 50_000
+    # Retry-After (seconds) returned when the ingest queue is saturated (503).
+    # Matches the agent's SYNC_INTERVAL so it retries on its normal cadence.
+    INGEST_RETRY_AFTER_SECS: int = 5
+    # Max concurrent COLD auth lookups (cache misses) allowed onto the HTTP pool
+    # at once. Bounds a cold-start stampede (e.g. 1500 agents reconnecting) so
+    # miss traffic can NEVER exhaust the 10-slot HTTP pool — kept well below it.
+    INGEST_AUTH_MISS_CONCURRENCY: int = 4
+
+    # ── Logs feed fairness ──────────────────────────────────────────────────────
+    # GET /v1/logs is a cross-device feed. A flat global LIMIT lets the busiest
+    # devices monopolize the newest rows, so quieter-but-online devices vanish from
+    # the page once the fleet is large (the "logs stop past ~100 devices" report).
+    # We instead take the most-recent N events PER device (LATERAL, index-backed)
+    # so every visible device is represented, then order+cap the merged feed.
+    LOGS_PER_DEVICE_DEFAULT: int = 10
 
     # ── Runtime environment ────────────────────────────────────────────────────
     # "development" | "staging" | "production". Anything other than development

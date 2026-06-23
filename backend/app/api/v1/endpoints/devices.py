@@ -13,6 +13,7 @@ from sqlalchemy.orm import joinedload
 from app.api.deps import get_db, get_current_admin, require
 from app.core import audit, broadcaster
 from app.core.config import get_settings
+from app.core.device_auth_cache import device_auth_cache
 from app.core.security import decode_token
 from app.core.scoping import visible_device_ids, ALL
 from app.db.models import Device, ActivityEvent, Employee, Company
@@ -209,6 +210,9 @@ async def archive_device(
     device.is_archived = True
     await audit.record(db, admin, "device.archived", "device", str(device.id), {"source": "portal"})
     await db.commit()
+    # Drop any cached ingest-auth entry so the archived device stops ingesting now,
+    # not after the cache TTL.
+    device_auth_cache.invalidate_device(str(device.id))
 
     return DeviceOut(
         id=str(device.id),
@@ -269,6 +273,8 @@ async def delete_device(
     device.is_archived = False
     await audit.record(db, admin, "device.deleted", "device", str(device.id), {"source": "portal"})
     await db.commit()
+    # Drop any cached ingest-auth entry so the deleted device stops ingesting now.
+    device_auth_cache.invalidate_device(str(device.id))
 
 
 @router.get("/stream")

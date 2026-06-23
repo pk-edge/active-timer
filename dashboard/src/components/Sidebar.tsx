@@ -107,7 +107,7 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
         <div className="h-14 shrink-0 flex items-center gap-3 px-5 border-b border-white/10">
           <EdgeLogo variant="icon" size={30} />
           <span className="font-bold text-sm tracking-tight text-white">
-            TimeTracker
+            Edge Tracker
           </span>
           {/* Close button — mobile only */}
           <button
