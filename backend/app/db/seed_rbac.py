@@ -73,8 +73,8 @@ async def run() -> None:
                 # Always backfill — covers modules added in upgrades.
                 wanted = all_permissions()
             elif (cid, name) in created:
-                # Viewer is admin-editable, Talent is fixed; either way only the
-                # starter permissions are seeded, and only at creation time.
+                # Starter permissions are seeded only at creation time; admins may
+                # customize Viewer and Talent permissions later from the Roles UI.
                 wanted = _VIEWER_PERMS if name == "Viewer" else _TALENT_PERMS
             else:
                 continue

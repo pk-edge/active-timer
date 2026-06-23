@@ -160,8 +160,20 @@ export interface Group {
   id:           string;
   name:         string;
   description:  string | null;
+  parent_id:    string | null;
+  path:         string | null;
+  is_archived:  boolean;
   member_count: number;
+  child_count:  number;
   created_at:   string | null;
+}
+
+export interface GroupChild {
+  id:           string;
+  name:         string;
+  member_count: number;
+  child_count:  number;
+  is_archived:  boolean;
 }
 
 export interface GroupMember {
@@ -174,6 +186,8 @@ export interface GroupMember {
 
 export interface GroupDetail extends Group {
   members: GroupMember[];
+  children: GroupChild[];
+  breadcrumb: GroupChild[];
 }
 
 export interface Installer {

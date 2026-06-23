@@ -12,6 +12,7 @@ import {
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { GroupCheckboxTree } from "@/components/GroupPicker";
 import type { User, UserActivity, Role, Group, Device } from "@/types";
 
 // ── Create / Edit modal ───────────────────────────────────────────────────────
@@ -102,20 +103,8 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
           {showGroups && (
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Groups this user can view</label>
-              <div className="max-h-36 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-1">
-                {groups.length === 0 && <p className="text-xs text-gray-600 px-1">No groups yet.</p>}
-                {groups.map(g => (
-                  <label key={g.id} className="flex items-center gap-2 text-sm px-1 py-0.5 cursor-pointer">
-                    <input type="checkbox" className="accent-[#4a0f70]" checked={groupIds.has(g.id)}
-                           onChange={() => {
-                             const n = new Set(groupIds);
-                             n.has(g.id) ? n.delete(g.id) : n.add(g.id);
-                             setGroupIds(n);
-                           }} />
-                    {g.name}
-                  </label>
-                ))}
-              </div>
+              <p className="text-[11px] text-gray-500 mb-1.5">Access includes all subgroups beneath each selected group.</p>
+              <GroupCheckboxTree selected={groupIds} onChange={setGroupIds} />
             </div>
           )}
           {showDevices && (
@@ -222,20 +211,8 @@ function ApproveModal({ user: pending, roles, groups, onClose, onSaved }: {
           {showGroups && (
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Groups this user can view</label>
-              <div className="max-h-36 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-1">
-                {groups.length === 0 && <p className="text-xs text-gray-600 px-1">No groups yet.</p>}
-                {groups.map(g => (
-                  <label key={g.id} className="flex items-center gap-2 text-sm px-1 py-0.5 cursor-pointer">
-                    <input type="checkbox" className="accent-[#4a0f70]" checked={groupIds.has(g.id)}
-                           onChange={() => {
-                             const n = new Set(groupIds);
-                             n.has(g.id) ? n.delete(g.id) : n.add(g.id);
-                             setGroupIds(n);
-                           }} />
-                    {g.name}
-                  </label>
-                ))}
-              </div>
+              <p className="text-[11px] text-gray-500 mb-1.5">Access includes all subgroups beneath each selected group.</p>
+              <GroupCheckboxTree selected={groupIds} onChange={setGroupIds} />
             </div>
           )}
           {err && <p className="text-red-500 text-sm">{err}</p>}

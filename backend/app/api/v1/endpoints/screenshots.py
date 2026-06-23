@@ -92,7 +92,7 @@ async def list_screenshots(
     device_id: str,
     limit:     int = Query(default=48, ge=1, le=200),
     offset:    int = Query(default=0, ge=0),
-    admin: Employee = Depends(require("screenshots", "view")),
+    admin: Employee = Depends(require("devices", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     try:

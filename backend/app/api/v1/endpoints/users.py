@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, require
 from app.core import audit
 from app.core.config import get_settings
+from app.core.group_tree import descendant_group_ids
 from app.core.ingest_queue import ingest_queue
 from app.core.security import hash_password_async
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
@@ -109,12 +110,13 @@ async def list_users(
         my_gids = [g[0] for g in gid_rows.all()]
         if not my_gids:
             return []
-        # Employees who are direct group members
+        expanded = await descendant_group_ids(my_gids, user.company_id, db)
+        # Employees who are direct group members in assigned groups + subgroups.
         q = q.where(
             Employee.id.in_(
                 select(GroupMember.employee_id)
                 .where(
-                    GroupMember.group_id.in_(my_gids),
+                    GroupMember.group_id.in_(expanded),
                     GroupMember.member_type == "employee",
                     GroupMember.employee_id.isnot(None),
                 )
@@ -225,10 +227,11 @@ async def _visible_employees(user: Employee, db: AsyncSession) -> list[Employee]
         my_gids = [g[0] for g in gid_rows.all()]
         if not my_gids:
             return []
+        expanded = await descendant_group_ids(my_gids, user.company_id, db)
         q = q.where(
             Employee.id.in_(
                 select(GroupMember.employee_id).where(
-                    GroupMember.group_id.in_(my_gids),
+                    GroupMember.group_id.in_(expanded),
                     GroupMember.member_type == "employee",
                     GroupMember.employee_id.isnot(None),
                 )
@@ -430,22 +433,51 @@ async def create_user(
     user: Employee = Depends(require("users", "create")),
     db: AsyncSession = Depends(get_db),
 ):
-    dup = await db.execute(select(Employee).where(Employee.email == body.email.lower()))
+    # Only block on active (non-deleted) duplicates.
+    dup = await db.execute(
+        select(Employee).where(
+            Employee.email == body.email.lower(),
+            Employee.is_deleted == False,  # noqa: E712
+        )
+    )
     if dup.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already exists")
 
     role = await _resolve_role(body.role_id, user.company_id, db)
-    emp = Employee(
-        company_id=user.company_id,
-        email=body.email.lower(),
-        name=body.name,
-        role="employee",
-        role_id=role.id if role else None,
-        password_hash=await hash_password_async(body.password) if body.password else None,
-        is_active=True,
+
+    # If a soft-deleted row exists for this email, resurrect it in place.
+    # The DB unique constraint on email prevents inserting a second row.
+    deleted = await db.execute(
+        select(Employee).where(
+            Employee.email == body.email.lower(),
+            Employee.is_deleted == True,  # noqa: E712
+        )
     )
-    db.add(emp)
-    await db.flush()
+    emp = deleted.scalar_one_or_none()
+    if emp:
+        emp.name = body.name
+        emp.role = "employee"
+        emp.role_id = role.id if role else None
+        emp.password_hash = await hash_password_async(body.password) if body.password else None
+        emp.is_active = True
+        emp.is_approved = True
+        emp.is_deleted = False
+        emp.google_sub = None
+        await db.execute(delete(EmployeeGroupAccess).where(EmployeeGroupAccess.employee_id == emp.id))
+        await db.flush()
+    else:
+        emp = Employee(
+            company_id=user.company_id,
+            email=body.email.lower(),
+            name=body.name,
+            role="employee",
+            role_id=role.id if role else None,
+            password_hash=await hash_password_async(body.password) if body.password else None,
+            is_active=True,
+        )
+        db.add(emp)
+        await db.flush()
+
     await _set_group_access(emp.id, user.company_id, body.group_ids, db)
     await audit.record(db, user, "user.create", "user", str(emp.id), {"email": emp.email})
     await db.commit()

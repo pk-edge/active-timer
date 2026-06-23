@@ -35,23 +35,27 @@ async def visible_device_ids(user, db: AsyncSession):
         )
         return [r[0] for r in rows.all()]
 
-    # scope == "groups" — one round-trip: groups the user may access, their direct
-    # device members, and devices owned by employee members, all in a single UNION.
+    # scope == "groups" — expand assigned groups to include all descendants, then
+    # resolve devices from direct members in one round-trip.
     rows = await db.execute(
         text(
             """
-            WITH my_groups AS (
-                SELECT group_id FROM employee_group_access WHERE employee_id = :uid
+            WITH RECURSIVE expanded AS (
+                SELECT group_id AS id FROM employee_group_access WHERE employee_id = :uid
+                UNION ALL
+                SELECT g.id FROM groups g
+                JOIN expanded e ON g.parent_id = e.id
+                WHERE g.is_deleted = FALSE
             )
             SELECT gm.device_id AS id
             FROM group_members gm
-            JOIN my_groups mg ON mg.group_id = gm.group_id
+            JOIN expanded ex ON ex.id = gm.group_id
             WHERE gm.member_type = 'device' AND gm.device_id IS NOT NULL
             UNION
             SELECT d.id
             FROM devices d
             JOIN group_members gm ON gm.employee_id = d.employee_id
-            JOIN my_groups mg ON mg.group_id = gm.group_id
+            JOIN expanded ex ON ex.id = gm.group_id
             WHERE gm.member_type = 'employee'
             """
         ),
