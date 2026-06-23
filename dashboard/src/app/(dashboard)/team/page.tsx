@@ -3,7 +3,8 @@ import PageLoader from "@/components/PageLoader";
 import { useState, useEffect } from "react";
 import useSWR from "swr";
 import { ChevronDown, RefreshCw, Users2, Wifi, Coffee, WifiOff } from "lucide-react";
-import { getGroups, getOverview, getHomeAppUsage, fmtSeconds } from "@/lib/api";
+import { getOverview, getHomeAppUsage, getGroups, fmtSeconds } from "@/lib/api";
+import GroupPicker from "@/components/GroupPicker";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, StatusDonut, ActivityTrend, UsagePie } from "@/components/charts";
 import type { Group, OverviewStats, AppUsage } from "@/types";
@@ -14,9 +15,12 @@ export default function TeamPage() {
 
   const { data: groups } = useSWR<Group[]>("groups-for-team", getGroups);
 
-  // Default to the first group once loaded.
+  // Default to the first root group once loaded.
   useEffect(() => {
-    if (!groupId && groups && groups.length) setGroupId(groups[0].id);
+    if (!groupId && groups && groups.length) {
+      const roots = groups.filter(g => !g.parent_id);
+      setGroupId((roots[0] ?? groups[0]).id);
+    }
   }, [groups, groupId]);
 
   const { data: stats, mutate } = useSWR<OverviewStats>(
@@ -48,16 +52,13 @@ export default function TeamPage() {
 
       {/* Group selector */}
       <div className="flex items-center gap-3 my-4">
-        <div className="relative">
-          <Users2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-          <select value={groupId} onChange={e => setGroupId(e.target.value)}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-9 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
-            {(!groups || groups.length === 0) && <option value="">No groups yet</option>}
-            {groups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-          </select>
-          <ChevronDown size={14} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-        </div>
-        {selected && <span className="text-sm text-gray-600">{selected.member_count} members</span>}
+        <GroupPicker value={groupId} onChange={setGroupId} allowEmpty={false} emptyLabel="Select group" className="min-w-[200px]" />
+        {selected && (
+          <span className="text-sm text-gray-500">
+            {selected.path ?? selected.name} · {selected.member_count} members
+            {selected.child_count > 0 ? ` (+ subgroups)` : ""}
+          </span>
+        )}
       </div>
 
       {!groupId ? (

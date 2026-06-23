@@ -20,7 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, require, get_current_user, get_current_device
 from app.core.config import get_settings
 from app.core.scoping import visible_device_ids, ALL
-from app.db.models import Device, Employee, GroupMember, Group
+from app.core.group_tree import descendant_group_ids, devices_for_groups
+from app.db.models import Device, Group, Employee
 
 router = APIRouter()
 settings = get_settings()
@@ -34,22 +35,14 @@ async def _group_device_ids(group_id: str, company_id, db: AsyncSession) -> set:
         gid = uuid.UUID(group_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid group id")
-    exists = await db.execute(select(Group.id).where(Group.id == gid, Group.company_id == company_id))
+    exists = await db.execute(
+        select(Group.id).where(Group.id == gid, Group.company_id == company_id, Group.is_deleted == False)  # noqa: E712
+    )
     if not exists.first():
         raise HTTPException(status_code=404, detail="Group not found")
-    direct = await db.execute(
-        select(GroupMember.device_id).where(
-            GroupMember.group_id == gid, GroupMember.member_type == "device")
-    )
-    via_emp = await db.execute(
-        text("""
-            SELECT d.id FROM devices d
-            JOIN group_members gm ON gm.employee_id = d.employee_id
-            WHERE gm.group_id = :gid AND gm.member_type = 'employee'
-        """),
-        {"gid": str(gid)},
-    )
-    return {r[0] for r in direct.all() if r[0]} | {r[0] for r in via_emp.all()}
+    expanded = await descendant_group_ids([gid], company_id, db)
+    device_ids = await devices_for_groups(expanded, db)
+    return set(device_ids)
 
 
 async def _resolve_ids(user: Employee, group_id: str | None, db: AsyncSession):

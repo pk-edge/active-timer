@@ -7,10 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 
 from app.api.deps import get_db, require
+from app.core.group_tree import descendant_group_ids, devices_for_groups
 from app.core import audit
 from app.core.app_normalizer import normalize_app_name
 from app.core.scoping import visible_device_ids, ALL
-from app.db.models import AppCategory, AppCategoryRule, Employee
+from app.db.models import AppCategory, AppCategoryRule, Employee, Group
 from app.schemas.tech import (
     CategoryOut, CategoryRuleOut, CategoryCreate, CategoryUpdate, RuleCreate,
     CategoryAllocationItem, AppTrendsOut, AppTrendItem, TechSummaryOut,
@@ -856,14 +857,18 @@ def _employee_clause(employee_id: Optional[str]) -> tuple[str, dict]:
 async def _group_clause(group_id: Optional[str], db: AsyncSession) -> tuple[str, dict]:
     if not group_id:
         return "", {}
-    res = await db.execute(text("""
-        SELECT DISTINCT COALESCE(gm.device_id, d2.id) AS did
-        FROM group_members gm
-        LEFT JOIN devices d2 ON d2.employee_id = gm.employee_id
-            AND gm.member_type = 'employee'
-        WHERE gm.group_id = :gid AND COALESCE(gm.device_id, d2.id) IS NOT NULL
-    """), {"gid": group_id})
-    ids = [str(r.did) for r in res.fetchall()]
+    try:
+        gid = uuid.UUID(group_id)
+    except ValueError:
+        return " AND 1=0", {}
+    row = await db.execute(
+        select(Group.company_id).where(Group.id == gid, Group.is_deleted == False)  # noqa: E712
+    )
+    company_id = row.scalar_one_or_none()
+    if not company_id:
+        return " AND 1=0", {}
+    expanded = await descendant_group_ids([gid], company_id, db)
+    ids = [str(d) for d in await devices_for_groups(expanded, db)]
     if not ids:
         return " AND 1=0", {}
     return " AND ae.device_id = ANY(:gids)", {"gids": ids}

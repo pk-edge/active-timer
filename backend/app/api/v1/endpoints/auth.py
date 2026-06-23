@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from app.api.deps import get_db, get_current_user
 from app.core import audit
@@ -10,7 +10,7 @@ from app.core.provisioning import link_or_provision_employee
 from app.core.security import (
     create_device_token, create_admin_token, hash_password_async, verify_password_async,
 )
-from app.db.models import Company, Device, Employee
+from app.db.models import Company, Device, Employee, EmployeeGroupAccess
 from app.schemas.auth import EnrollRequest, EnrollResponse, AdminLoginRequest, AdminLoginResponse
 from app.schemas.rbac import MeOut, PermissionItem, RegisterRequest, RegisterResponse
 
@@ -85,21 +85,46 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                             detail="System not yet set up. Contact an administrator.")
 
-    dup = await db.execute(select(Employee).where(Employee.email == body.email.lower()))
+    # Only block on active (non-deleted) duplicates.
+    dup = await db.execute(
+        select(Employee).where(
+            Employee.email == body.email.lower(),
+            Employee.is_deleted == False,  # noqa: E712
+        )
+    )
     if dup.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                             detail="An account with this email already exists.")
 
-    emp = Employee(
-        company_id=company.id,
-        email=body.email.lower(),
-        name=body.name,
-        role="employee",
-        password_hash=await hash_password_async(body.password),
-        is_active=True,
-        is_approved=False,
+    # Resurrect a soft-deleted row rather than inserting a duplicate (unique constraint).
+    deleted = await db.execute(
+        select(Employee).where(
+            Employee.email == body.email.lower(),
+            Employee.is_deleted == True,  # noqa: E712
+        )
     )
-    db.add(emp)
+    emp = deleted.scalar_one_or_none()
+    if emp:
+        emp.name = body.name
+        emp.role = "employee"
+        emp.role_id = None
+        emp.password_hash = await hash_password_async(body.password)
+        emp.is_active = True
+        emp.is_approved = False
+        emp.is_deleted = False
+        emp.google_sub = None
+        await db.execute(delete(EmployeeGroupAccess).where(EmployeeGroupAccess.employee_id == emp.id))
+    else:
+        emp = Employee(
+            company_id=company.id,
+            email=body.email.lower(),
+            name=body.name,
+            role="employee",
+            password_hash=await hash_password_async(body.password),
+            is_active=True,
+            is_approved=False,
+        )
+        db.add(emp)
     await db.flush()
     await audit.record(db, emp, "user.register", "user", str(emp.id), {"email": emp.email})
     await db.commit()
@@ -113,7 +138,10 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
 @router.post("/admin/login", response_model=AdminLoginResponse)
 async def admin_login(body: AdminLoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Employee).where(Employee.email == body.email.lower())
+        select(Employee).where(
+            Employee.email == body.email.lower(),
+            Employee.is_deleted == False,  # noqa: E712
+        )
     )
     employee = result.scalar_one_or_none()
 

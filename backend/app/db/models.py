@@ -151,9 +151,14 @@ class Group(Base):
     created_by:  Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
     created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     is_deleted:  Mapped[bool]             = mapped_column(Boolean, default=False)
+    is_archived: Mapped[bool]             = mapped_column(Boolean, default=False)
+    parent_id:   Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("groups.id"), nullable=True)
 
     members:     Mapped[list["GroupMember"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
+    )
+    parent:      Mapped["Group | None"] = relationship(
+        remote_side="Group.id", foreign_keys=[parent_id]
     )
 
 

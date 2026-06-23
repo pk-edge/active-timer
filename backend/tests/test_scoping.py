@@ -74,3 +74,41 @@ async def test_scoping_rules():
         assert visible == {dev_a1.id, dev_a2.id}
 
         await db.rollback()  # discard all test rows
+
+
+@pytest.mark.asyncio
+async def test_subgroup_inherits_parent_access():
+    """RM assigned to a parent group sees devices in child subgroups."""
+    async with AsyncSessionLocal() as db:
+        tag = uuid.uuid4().hex[:8]
+        company = Company(name=f"SubGrp-{tag}", enrollment_token=f"tok-{tag}")
+        db.add(company)
+        await db.flush()
+
+        parent = Group(company_id=company.id, name=f"Parent-{tag}")
+        db.add(parent)
+        await db.flush()
+        child = Group(company_id=company.id, name=f"Child-{tag}", parent_id=parent.id)
+        db.add(child)
+        await db.flush()
+
+        emp = Employee(company_id=company.id, email=f"e-{tag}@x.io", name="Emp")
+        db.add(emp)
+        await db.flush()
+
+        dev = Device(company_id=company.id, hostname=f"d-{tag}", platform="macos", employee_id=emp.id)
+        db.add(dev)
+        await db.flush()
+
+        db.add(GroupMember(group_id=child.id, member_type="employee", employee_id=emp.id))
+
+        rm = Employee(company_id=company.id, email=f"rm-{tag}@x.io", name="RM")
+        db.add(rm)
+        await db.flush()
+        db.add(EmployeeGroupAccess(employee_id=rm.id, group_id=parent.id))
+        await db.flush()
+
+        ids = await visible_device_ids(_ScopedUser(rm.id, "groups"), db)
+        assert dev.id in set(ids), "parent access should include child subgroup devices"
+
+        await db.rollback()

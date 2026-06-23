@@ -199,11 +199,12 @@ export async function registerUser(body: { name: string; email: string; password
 
 // ── Groups ──────────────────────────────────────────────────────────────────
 
-export const getGroups  = () => request<Group[]>("/v1/groups");
+export const getGroups  = (includeArchived = false) =>
+  request<Group[]>(`/v1/groups${includeArchived ? "?include_archived=true" : ""}`);
 export const getGroup   = (id: string) => request<GroupDetail>(`/v1/groups/${id}`);
-export const createGroup = (body: { name: string; description?: string }) =>
+export const createGroup = (body: { name: string; description?: string; parent_id?: string | null }) =>
   request<Group>("/v1/groups", { method: "POST", body: JSON.stringify(body) });
-export const updateGroup = (id: string, body: { name: string; description?: string }) =>
+export const updateGroup = (id: string, body: { name: string; description?: string; parent_id?: string | null }) =>
   request<Group>(`/v1/groups/${id}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deleteGroup = (id: string) =>
   request<void>(`/v1/groups/${id}`, { method: "DELETE" });
@@ -211,6 +212,11 @@ export const addGroupMember = (id: string, body: { member_type: string; employee
   request<GroupMember>(`/v1/groups/${id}/members`, { method: "POST", body: JSON.stringify(body) });
 export const removeGroupMember = (id: string, memberId: string) =>
   request<void>(`/v1/groups/${id}/members/${memberId}`, { method: "DELETE" });
+export const getGroupMembers = (id: string) => request<GroupMember[]>(`/v1/groups/${id}/members`);
+export const archiveGroup = (id: string) =>
+  request<void>(`/v1/groups/${id}/archive`, { method: "POST" });
+export const unarchiveGroup = (id: string) =>
+  request<void>(`/v1/groups/${id}/unarchive`, { method: "POST" });
 
 export async function importGroupsCsv(file: File) {
   const fd = new FormData();
