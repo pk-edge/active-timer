@@ -13,12 +13,12 @@ import {
   getTechSummary, getCategoryAllocation, getAppTrends, getAppList,
   getAdoptionData, getTechCategories, fmtSeconds } from "@/lib/api";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
+import GroupPicker from "@/components/GroupPicker";
 import { format, subDays } from "date-fns";
-import { getGroups } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/charts";
 import type {
-  TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory, Group } from "@/types";
+  TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory } from "@/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -382,7 +382,6 @@ export default function TechUtilizationPage() {
   const [employeeId, setEmployeeId] = useState("");
   const [categoryId, setCategoryId] = useState("");
 
-  const { data: groups }     = useSWR<Group[]>("groups", () => import("@/lib/api").then(m => m.getGroups()));
   const { data: users }      = useSWR("users-tf", () => import("@/lib/api").then(m => m.getUsers()));
   const { data: categories } = useSWR<AppCategory[]>("tech-cats-filter", getTechCategories);
 
@@ -443,14 +442,7 @@ export default function TechUtilizationPage() {
         {/* Activity Date */}
         <DateRangePicker value={dateRange} onChange={setDateRange} />
         {/* Team / Group */}
-        <div className="relative">
-          <select value={groupId} onChange={e => { setGroupId(e.target.value); setEmployeeId(""); }}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
-            <option value="">All Teams</option>
-            {(groups ?? []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-          </select>
-          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-        </div>
+        <GroupPicker value={groupId} onChange={v => { setGroupId(v); setEmployeeId(""); }} />
 
         {/* User */}
         <div className="relative">

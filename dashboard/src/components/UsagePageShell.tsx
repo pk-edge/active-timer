@@ -9,9 +9,10 @@ import {
   Search, RefreshCw, Download, ChevronDown, X,
   CheckCircle2, MinusCircle, Circle, BarChart2,
 } from "lucide-react";
-import { getGroups, getUsers, fmtSeconds } from "@/lib/api";
+import { getUsers, fmtSeconds } from "@/lib/api";
+import GroupPicker from "@/components/GroupPicker";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
-import type { Group, User } from "@/types";
+import type { User } from "@/types";
 
 export type { DateRange };
 
@@ -118,7 +119,6 @@ export function FilterBar({
   showProdFilter = true,
   summaryMode, setSummaryMode,
 }: FilterBarProps) {
-  const { data: groups } = useSWR<Group[]>("groups", getGroups);
   const { data: users }  = useSWR<User[]>("users-filter", () => getUsers());
 
   return (
@@ -141,15 +141,11 @@ export function FilterBar({
       {/* Date range picker */}
       <DateRangePicker value={dateRange} onChange={setDateRange} />
 
-      {/* Team / Group */}
-      <div className="relative shrink-0">
-        <select value={groupId} onChange={e => { setGroupId(e.target.value); setEmployeeId(""); }}
-                className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm">
-          <option value="">All Teams</option>
-          {(groups ?? []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-        </select>
-        <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-      </div>
+      {/* Team / Group — includes subgroups in filter */}
+      <GroupPicker
+        value={groupId}
+        onChange={v => { setGroupId(v); setEmployeeId(""); }}
+      />
 
       {/* User */}
       <div className="relative shrink-0">

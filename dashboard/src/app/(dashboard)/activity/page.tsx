@@ -7,7 +7,9 @@ import {
   DownloadCloud, FileDown, Printer, ChevronDown,
   Monitor, Globe, Search, X,
 } from "lucide-react";
-import { getRealtime, getGroups, getHomeAppUsage, getHomeWebUsage, fmtSeconds, fmtTime } from "@/lib/api";
+import { getRealtime, getHomeAppUsage, getHomeWebUsage, getGroups, fmtSeconds, fmtTime } from "@/lib/api";
+import GroupPicker from "@/components/GroupPicker";
+import { buildGroupTree } from "@/lib/groupTree";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, UsagePie } from "@/components/charts";
 import type { RealtimeDevice, Group, AppUsage, WebUsage } from "@/types";
@@ -110,14 +112,7 @@ export default function ActivityPage() {
             </button>
           ))}
         </div>
-        <div className="relative">
-          <select value={groupId} onChange={e => setGroup(e.target.value)}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
-            <option value="">All groups</option>
-            {groups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-          </select>
-          <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-        </div>
+        <GroupPicker value={groupId} onChange={setGroup} emptyLabel="All groups" />
         {tab === "users" && (
           <div className="relative flex-1 min-w-[180px] max-w-xs">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
@@ -151,10 +146,14 @@ export default function ActivityPage() {
             )
           ) : (
             <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
-              {(groups ?? []).map(g => (
-                <Link key={g.id} href="/team" className="bg-white border border-gray-200 rounded-xl p-3 hover:border-brand-300 hover:shadow-sm transition block">
-                  <p className="text-sm font-medium text-gray-900 truncate">{g.name}</p>
-                  <p className="text-xs text-gray-600 mt-1">{g.member_count} members</p>
+              {buildGroupTree(groups ?? []).map(node => (
+                <Link key={node.group.id} href={`/groups/${node.group.id}`}
+                  className="bg-white border border-gray-200 rounded-xl p-3 hover:border-brand-300 hover:shadow-sm transition block">
+                  <p className="text-sm font-medium text-gray-900 truncate">{node.group.name}</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {node.group.member_count} members
+                    {node.children.length > 0 ? ` · ${node.children.length} subgroups` : ""}
+                  </p>
                 </Link>
               ))}
               {(groups ?? []).length === 0 && <p className="col-span-full text-sm text-gray-600 py-8 text-center">No groups yet.</p>}

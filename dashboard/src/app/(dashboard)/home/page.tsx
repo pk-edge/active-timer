@@ -9,12 +9,13 @@ import {
 } from "lucide-react";
 import { format, subDays, startOfMonth, startOfYear, subMonths } from "date-fns";
 import {
-  getOverview, getHomeAppUsage, getMyStats, getGroups,
+  getOverview, getHomeAppUsage, getMyStats,
   fmtSeconds, fmtTime, BASE,
 } from "@/lib/api";
+import GroupPicker from "@/components/GroupPicker";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied, StatusDonut, UsagePie } from "@/components/charts";
-import type { OverviewStats, RealtimeDevice, AppUsage, MyStats, Group } from "@/types";
+import type { OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
 
 // ── SSE realtime hook ─────────────────────────────────────────────────────────
 
@@ -230,8 +231,6 @@ function AdminHome() {
     ? "Avg active / device"
     : "Avg active / device (period)";
 
-  const { data: groups } = useSWR<Group[]>("home-groups", getGroups);
-
   const { data: stats } = useSWR<OverviewStats>(
     ["home-overview", sinceDate, untilDate, groupId],
     () => getOverview(groupId || undefined, 7, sinceDate, untilDate),
@@ -290,21 +289,8 @@ function AdminHome() {
           onSinceChange={setSinceDate} onUntilChange={setUntilDate}
         />
 
-        {/* Group filter */}
-        {groups && groups.length > 0 && (
-          <div className="relative">
-            <Users2 size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-            <select
-              value={groupId}
-              onChange={e => setGroupId(e.target.value)}
-              className="appearance-none bg-white border border-gray-200 rounded-lg pl-7 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm"
-            >
-              <option value="">All groups</option>
-              {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-            </select>
-            <ChevronDown size={11} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-          </div>
-        )}
+        {/* Group filter — includes subgroups when a parent is selected */}
+        <GroupPicker value={groupId} onChange={setGroupId} emptyLabel="All groups" />
 
         {groupId && (
           <button

@@ -15,6 +15,13 @@ const SCOPES = [
   { value: "own",    label: "Own devices",  hint: "Sees only their own devices" },
 ];
 
+const TALENT_ROLE = "Talent";
+
+/** System roles are locked except Talent, whose permissions admins may customize. */
+function canEditRole(role: Role): boolean {
+  return !role.is_system || role.name === TALENT_ROLE;
+}
+
 function RoleEditor({ role, modules, onClose, onSaved }: {
   role: Role | null; modules: ModuleDef[]; onClose: () => void; onSaved: () => void;
 }) {
@@ -72,8 +79,8 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
             <label className="block text-xs font-medium text-gray-600 mb-1.5">Data scope</label>
             <div className="grid grid-cols-3 gap-2">
               {SCOPES.map(s => (
-                <button key={s.value} onClick={() => setScope(s.value)}
-                        className={`text-left border rounded-lg px-3 py-2 transition ${scope === s.value ? "border-brand-400 ring-2 ring-blue-100" : "border-gray-200 hover:border-gray-300"}`}>
+                <button key={s.value} onClick={() => setScope(s.value)} disabled={role?.is_system}
+                        className={`text-left border rounded-lg px-3 py-2 transition disabled:opacity-60 disabled:cursor-not-allowed ${scope === s.value ? "border-brand-400 ring-2 ring-blue-100" : "border-gray-200 hover:border-gray-300"}`}>
                   <p className="text-sm font-medium text-gray-800">{s.label}</p>
                   <p className="text-[11px] text-gray-600">{s.hint}</p>
                 </button>
@@ -184,7 +191,7 @@ export default function RolesPage() {
                 <td className="px-4 py-3 text-gray-600 capitalize">{r.scope_type}</td>
                 <td className="px-4 py-3 text-gray-600">{r.permissions.length} permissions</td>
                 <td className="px-4 py-3 text-right whitespace-nowrap">
-                  {can("roles", "edit") && !r.is_system && (
+                  {can("roles", "edit") && canEditRole(r) && (
                     <button onClick={() => setEditing(r)} className="text-gray-600 hover:text-brand-600 p-1"><Pencil size={15} /></button>
                   )}
                   {can("roles", "delete") && !r.is_system && (
