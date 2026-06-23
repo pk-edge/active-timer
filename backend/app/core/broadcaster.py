@@ -25,9 +25,10 @@ _stopping: bool = False
 async def startup() -> None:
     """Open the shared Redis client and start the background listener.
 
-    Idempotent and non-fatal: if Redis cannot be reached the API still boots and
-    serves; the listener keeps retrying in the background and live SSE push comes
-    online as soon as Redis is reachable.
+    Idempotent. If Redis is not reachable at startup, SSE push is disabled for the
+    lifetime of this process — no reconnect loop, no log spam, and publish() returns
+    immediately (the _redis is None guard). This prevents publish() from blocking the
+    ingest write path for up to 5 s on every call while waiting for a connect timeout.
     """
     global _redis, _listener_task, _stopping
     if _listener_task is not None:
@@ -35,6 +36,26 @@ async def startup() -> None:
 
     _stopping = False
     settings = get_settings()
+
+    # One-shot probe: check reachability BEFORE creating the shared client.
+    # If Redis is absent (no container, no env var, wrong host) we log once and
+    # return — _redis stays None, publish() is a cheap no-op, no task is spawned.
+    probe = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=2)
+    redis_available = False
+    try:
+        await asyncio.wait_for(probe.ping(), timeout=3.0)
+        redis_available = True
+    except Exception as exc:
+        log.warning("broadcaster: Redis not reachable (%s) — SSE push disabled", exc)
+    finally:
+        try:
+            await probe.aclose()
+        except Exception:
+            pass
+
+    if not redis_available:
+        return  # _redis stays None; no listener task; no reconnect attempts
+
     # health_check_interval pings idle connections so a silently-dropped TCP
     # connection is detected and recycled rather than hanging a publish/listen.
     _redis = aioredis.from_url(
@@ -45,7 +66,7 @@ async def startup() -> None:
         socket_connect_timeout=5,
     )
     _listener_task = asyncio.create_task(_run_listener(), name="sse-broadcaster-listener")
-    log.info("broadcaster: started (channel=%r, url configured)", CHANNEL)
+    log.info("broadcaster: started (channel=%r)", CHANNEL)
 
 
 async def shutdown() -> None:
