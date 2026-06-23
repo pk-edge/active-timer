@@ -6,6 +6,7 @@ from sqlalchemy import select, delete
 
 from app.api.deps import get_db, get_current_user
 from app.core import audit
+from app.core.device_auth_cache import device_auth_cache
 from app.core.provisioning import link_or_provision_employee
 from app.core.security import (
     create_device_token, create_admin_token, hash_password_async, verify_password_async,
@@ -70,6 +71,10 @@ async def enroll_device(body: EnrollRequest, db: AsyncSession = Depends(get_db))
             log.warning("Auto-link failed for %s: %s", body.hostname, e)
 
     await db.commit()
+
+    # Re-enrollment rotates jwt_token. Drop any cached auth entry for this device
+    # so a rotated-out token can't keep validating from cache until its TTL.
+    device_auth_cache.invalidate_device(str(device.id))
 
     log.info("Device enrolled: %s (%s)", body.hostname, device.id)
     return EnrollResponse(device_id=str(device.id), jwt_token=token)
