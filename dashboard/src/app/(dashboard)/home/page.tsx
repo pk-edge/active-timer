@@ -12,8 +12,11 @@ import {
   getOverview, getHomeAppUsage, getMyStats,
   fmtSeconds, fmtTime, BASE,
 } from "@/lib/api";
+import PageLoader from "@/components/PageLoader";
 import GroupPicker from "@/components/GroupPicker";
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartMatch } from "@/lib/smartSearch";
 import { AccessDenied, StatusDonut, UsagePie } from "@/components/charts";
 import type { OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
 
@@ -243,20 +246,24 @@ function AdminHome() {
     { refreshInterval: 300_000 },
   );
 
+  const debouncedEmpSearch = useDebouncedValue(empSearch, 200);
   const filteredRealtime = useMemo(() => {
-    if (!empSearch.trim()) return realtime;
-    const q = empSearch.toLowerCase();
-    return realtime.filter(d =>
-      (d.employee_name ?? "").toLowerCase().includes(q) ||
-      d.hostname.toLowerCase().includes(q),
-    );
-  }, [realtime, empSearch]);
+    if (!debouncedEmpSearch.trim()) return realtime;
+    return realtime.filter(d => smartMatch(debouncedEmpSearch, d.employee_name, d.hostname));
+  }, [realtime, debouncedEmpSearch]);
 
   const s = stats?.status ?? { active: 0, passive: 0, inactive: 0 };
   const avgSecs = stats?.avg_active_seconds_today ?? 0;
   const avgHrs  = (avgSecs / 3600).toFixed(1);
   const avgMins = Math.round(avgSecs / 60);
   const avgDisplay = avgSecs < 3600 ? `${avgMins}m` : `${avgHrs}h`;
+
+  // Online right now = same logic as /v1/devices is_online: any device seen within
+  // the cutoff window, regardless of whether its latest event was lock/idle_start.
+  // Use the live SSE count (active + passive) when available; fall back to overview.
+  const onlineNow = realtime.length > 0
+    ? realtime.filter(d => d.status !== "inactive").length
+    : s.active + s.passive;
 
   const QUICK_ACTIONS = [
     { href: "/devices",  label: "Devices",  icon: Monitor,      module: "devices" },
@@ -306,7 +313,7 @@ function AdminHome() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <StatCard label="Total devices"   value={stats?.total_devices ?? 0} />
         <StatCard label={activeLabel}     value={stats?.active_today ?? 0}  color="text-green-600" />
-        <StatCard label="Online right now" value={s.active}                 color="text-brand-600" />
+        <StatCard label="Online right now" value={onlineNow}               color="text-brand-600" />
         <StatCard
           label={avgLabel}
           value={avgDisplay}
@@ -493,7 +500,7 @@ function EmployeeHome() {
 export default function HomePage() {
   const { me, loading, can } = useUser();
 
-  if (loading || !me) return null;
+  if (loading || !me) return <PageLoader />;
 
   if (me.scope_type === "own") return <EmployeeHome />;
   if (!can("home", "view"))   return <AccessDenied label={`${me.role_name} Home`} />;

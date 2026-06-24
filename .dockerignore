@@ -1,0 +1,63 @@
+# ── Exclude the agent simulator from all main-project Docker builds ───────────
+# The simulator has its OWN Dockerfile inside agent-simulator/ — it must not
+# be baked into the backend or dashboard images.
+agent-simulator/
+
+# ── Development / local artefacts ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+agent/enrollment_token.txt
+agent/identity.json
+backend/secrets/*.json
+backend/secrets/*.p12
+backend/secrets/*.pem
+backend/secrets/*.key
+
+# ── Python caches ─────────────────────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# ── Node / Next.js ────────────────────────────────────────────────────────────
+node_modules/
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/tsconfig.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# ── Agent build outputs ───────────────────────────────────────────────────────
+agent/.venv/
+agent/build/
+agent/dist/
+agent/*.db
+agent/*.db-wal
+agent/*.db-shm
+agent/screenshots/
+*.msi
+*.exe
+*.dmg
+*.pkg
+
+# ── Docs / tooling ────────────────────────────────────────────────────────────
+docs/
+.claude/
+*.log
+logs/

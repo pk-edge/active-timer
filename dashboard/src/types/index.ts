@@ -111,6 +111,7 @@ export interface User {
   is_approved:  boolean;
   group_ids:    string[];
   device_count: number;
+  created_at:   string | null;
 }
 
 export interface UserActivity {

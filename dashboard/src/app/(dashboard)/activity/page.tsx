@@ -11,6 +11,8 @@ import { getRealtime, getHomeAppUsage, getHomeWebUsage, getGroups, fmtSeconds, f
 import GroupPicker from "@/components/GroupPicker";
 import { buildGroupTree } from "@/lib/groupTree";
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartMatch } from "@/lib/smartSearch";
 import { AccessDenied, UsagePie } from "@/components/charts";
 import type { RealtimeDevice, Group, AppUsage, WebUsage } from "@/types";
 
@@ -60,18 +62,19 @@ export default function ActivityPage() {
 
   const { data: groups }   = useSWR<Group[]>("groups-activity", getGroups);
   const { data: realtime } = useSWR<RealtimeDevice[]>(
-    ["realtime", groupId], () => getRealtime(groupId || undefined), { refreshInterval: 10_000 });
+    ["realtime", groupId], () => getRealtime(groupId || undefined),
+    // dedupingInterval prevents a slow poll from stacking behind the 10s timer;
+    // keepPreviousData avoids a blank flash when the group filter changes.
+    { refreshInterval: 10_000, dedupingInterval: 8_000, keepPreviousData: true });
   const { data: apps } = useSWR<AppUsage[]>(["act-apps", groupId], () => getHomeAppUsage(groupId || undefined, 1));
   const { data: webs } = useSWR<WebUsage[]>(["act-webs", groupId], () => getHomeWebUsage(groupId || undefined, 1));
 
+  const debouncedSearch = useDebouncedValue(search, 200);
   const filtered = useMemo(() => {
-    let list = realtime ?? [];
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      list = list.filter(d => d.hostname.toLowerCase().includes(q) || (d.employee_name ?? "").toLowerCase().includes(q));
-    }
-    return list;
-  }, [realtime, search]);
+    const list = realtime ?? [];
+    if (!debouncedSearch.trim()) return list;
+    return list.filter(d => smartMatch(debouncedSearch, d.hostname, d.employee_name));
+  }, [realtime, debouncedSearch]);
 
   if (loading) return <PageLoader />;
   if (!can("home", "view")) return <AccessDenied label="the Activity Dashboard" />;

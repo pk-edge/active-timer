@@ -102,7 +102,10 @@ async def list_users(
         q = q.where(func.lower(Employee.name).like(like) | func.lower(Employee.email).like(like))
 
     # Groups-scoped users only see employees who belong to their assigned groups.
-    if getattr(user, "_scope_type", "own") == "groups":
+    # Pending users have no group memberships yet (they just registered), so skip
+    # this filter for the pending queue — any admin who can view users may see and
+    # approve/reject them regardless of group scope.
+    if not pending and getattr(user, "_scope_type", "own") == "groups":
         gid_rows = await db.execute(
             select(EmployeeGroupAccess.group_id)
             .where(EmployeeGroupAccess.employee_id == user.id)
@@ -156,6 +159,7 @@ async def list_users(
             is_approved=getattr(e, "is_approved", True),
             group_ids=groups_by_emp.get(e.id, []),
             device_count=device_counts.get(e.id, 0),
+            created_at=e.created_at.isoformat() if e.created_at else None,
         )
         for e in employees
     ]
@@ -280,24 +284,32 @@ async def list_user_activity(
     for did, eid, seen in dev_rows:
         devs_by_emp.setdefault(eid, []).append((str(did), seen))
 
-    # Active seconds (today + trailing 7 days) for ALL users in one aggregate.
-    sums = (await db.execute(
-        text("""
-            SELECT d.employee_id AS eid,
-                   COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
-                                      AND ae.timestamp >= date_trunc('day', NOW())
-                                     THEN ae.duration ELSE 0 END), 0) AS today,
-                   COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
-                                     THEN ae.duration ELSE 0 END), 0) AS week
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.employee_id = ANY(:ids)
-              AND ae.timestamp >= NOW() - INTERVAL '7 days'
-            GROUP BY d.employee_id
-        """),
-        {"ids": emp_ids},
-    )).all()
-    time_by_emp = {r.eid: (int(r.today), int(r.week)) for r in sums}
+    # Active seconds (today + trailing 7 days). Query by device_id directly so
+    # the planner can use the (device_id, timestamp) index without a JOIN through
+    # devices — the employee→device mapping is already in devs_by_emp.
+    all_dev_ids = [did for devs in devs_by_emp.values() for did, _ in devs]
+    time_by_emp: dict = {}
+    if all_dev_ids:
+        sums = (await db.execute(
+            text("""
+                SELECT ae.device_id,
+                       COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
+                                          AND ae.timestamp >= date_trunc('day', NOW())
+                                         THEN ae.duration ELSE 0 END), 0) AS today,
+                       COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
+                                         THEN ae.duration ELSE 0 END), 0) AS week
+                FROM activity_events ae
+                WHERE ae.device_id = ANY(:ids)
+                  AND ae.timestamp >= NOW() - INTERVAL '7 days'
+                GROUP BY ae.device_id
+            """),
+            {"ids": all_dev_ids},
+        )).all()
+        time_by_device = {str(r.device_id): (int(r.today), int(r.week)) for r in sums}
+        for eid, devs in devs_by_emp.items():
+            today = sum(time_by_device.get(did, (0, 0))[0] for did, _ in devs)
+            week  = sum(time_by_device.get(did, (0, 0))[1] for did, _ in devs)
+            time_by_emp[eid] = (today, week)
 
     out = []
     for e in employees:
@@ -495,7 +507,8 @@ async def _get_user(user_id: str, company_id, db: AsyncSession) -> Employee:
         raise HTTPException(status_code=400, detail="Invalid user id")
     r = await db.execute(
         select(Employee).options(selectinload(Employee.role_obj))
-        .where(Employee.id == uid, Employee.company_id == company_id)
+        .where(Employee.id == uid, Employee.company_id == company_id,
+               Employee.is_deleted == False)  # noqa: E712
     )
     emp = r.scalar_one_or_none()
     if not emp:

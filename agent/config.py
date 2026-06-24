@@ -26,11 +26,15 @@ BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _bundle_resources() -> Optional[Path]:
-    """Return the bundle resources directory when running as a frozen app."""
+    """Return the directory where bundled data files (backends.json, etc.) live."""
     if not getattr(sys, "frozen", False):
         return None
-    if sys.platform == "darwin":
-        return Path(sys.executable).parent.parent / "Resources"
+    # PyInstaller sets sys._MEIPASS to wherever it extracts datas at runtime.
+    # This is the authoritative location on both macOS and Windows.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    # Fallback for older one-file builds that don't expose _MEIPASS.
     return Path(sys.executable).parent / "_internal"
 
 
