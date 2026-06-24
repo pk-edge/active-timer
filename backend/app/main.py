@@ -85,9 +85,9 @@ async def lifespan(app: FastAPI):
     await init_db()              # migrations + RBAC seed + bootstrap admin (all idempotent)
     await broadcaster.startup()  # open Redis pub/sub + listener BEFORE workers publish
     await audit.start()          # background audit writer — keeps audit off the request path
-    await ingest_queue.start()   # start async worker pool
+    await ingest_queue.start()   # start 30-second COPY flusher
     yield
-    await ingest_queue.stop()    # drain + shutdown workers cleanly
+    await ingest_queue.stop()    # final COPY flush + clean exit
     await audit.stop()           # flush queued audit rows, then stop the writer
     await broadcaster.shutdown() # stop listener + close Redis after workers are done
     from app.db.base import engine, ingest_engine
