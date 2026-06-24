@@ -9,6 +9,8 @@ import {
   Search, X, ChevronDown } from "lucide-react";
 import { getLogs, getDevices, getUsers, fmtTime, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartMatch } from "@/lib/smartSearch";
 import { AccessDenied } from "@/components/charts";
 import type { LogEvent, Device, User } from "@/types";
 
@@ -140,19 +142,14 @@ export default function LogsPage() {
     { refreshInterval: 15_000 },
   );
 
+  const debouncedSearch = useDebouncedValue(search, 200);
   const filtered = useMemo(() => {
     if (!logs) return [];
-    if (!search.trim()) return logs;
-    const q = search.toLowerCase();
-    return logs.filter(
-      e =>
-        (e.app_name      ?? "").toLowerCase().includes(q) ||
-        (e.window_title  ?? "").toLowerCase().includes(q) ||
-        (e.url           ?? "").toLowerCase().includes(q) ||
-        (e.employee_name ?? "").toLowerCase().includes(q) ||
-        e.hostname.toLowerCase().includes(q),
+    if (!debouncedSearch.trim()) return logs;
+    return logs.filter(e =>
+      smartMatch(debouncedSearch, e.app_name, e.window_title, e.url, e.employee_name, e.hostname),
     );
-  }, [logs, search]);
+  }, [logs, debouncedSearch]);
 
   const counts = logs?.reduce<Record<string, number>>((acc, e) => {
     acc[e.event_type] = (acc[e.event_type] ?? 0) + 1;

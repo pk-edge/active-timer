@@ -12,11 +12,12 @@ class Settings(BaseSettings):
 
     # Connection budget — TWO isolated pools so background ingest writes can
     # never starve HTTP auth lookups (the "QueuePool limit reached" jam):
-    #   HTTP requests : DB_POOL_SIZE + DB_MAX_OVERFLOW          (default 5+5 = 10)
-    #   ingest writers: INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW (default 2+2 = 4)
-    # One task therefore holds at most 14 connections; a 2-task rolling deploy
-    # spikes to 2x that (28), which fits even the smallest RDS/Postgres tiers
-    # (max_connections >= 60).
+    #   HTTP requests : DB_POOL_SIZE + DB_MAX_OVERFLOW               (default 5+5 = 10)
+    #   ingest flusher: INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW (default 1+1 = 2)
+    # The ingest pool is now tiny: the 30-second COPY flusher holds exactly ONE
+    # connection for the ~50ms each COPY transaction takes; 1 spare covers any
+    # overlap during pool recycling. One task therefore uses at most 12
+    # connections; a 2-task rolling deploy peaks at 24, safe on all RDS tiers.
     #
     # AWS / RDS SIZING — READ BEFORE RAISING ANY OF THESE:
     #   Total Postgres connections used = REPLICAS * (HTTP + ingest pool)
@@ -34,16 +35,18 @@ class Settings(BaseSettings):
     DB_POOL_RECYCLE: int = 1800
 
     # Dedicated ingest-writer pool (see budget above).
-    INGEST_DB_POOL_SIZE: int = 2
-    INGEST_DB_MAX_OVERFLOW: int = 2
+    # With the 30-second COPY strategy, only ONE connection is active at a time
+    # (the flusher) — pool_size=1 is enough. Keep 1 overflow as a spare in case
+    # the previous flush's connection is still being recycled when the next fires.
+    INGEST_DB_POOL_SIZE: int = 1
+    INGEST_DB_MAX_OVERFLOW: int = 1
 
-    # Ingest queue worker pool — bounded by its OWN connection pool so workers
-    # can NEVER overflow it: more workers than connections just block on checkout
-    # and time out. At startup MAX is hard-clamped to
-    # (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW), and MIN is kept below MAX so
-    # the pool has room to scale up under load and back down when idle.
-    INGEST_MIN_WORKERS: int = 2
-    INGEST_MAX_WORKERS: int = 4
+    # INGEST_MIN_WORKERS / INGEST_MAX_WORKERS are no longer used — the adaptive
+    # worker pool has been replaced by a single timer-based COPY flusher.
+    # The settings are kept here so existing deployments that set them via env
+    # vars don't break on upgrade; they are silently ignored.
+    INGEST_MIN_WORKERS: int = 1
+    INGEST_MAX_WORKERS: int = 1
 
     # ── Ingest auth cache ──────────────────────────────────────────────────────
     # Caches (device token → device_id) in-process so the per-POST /v1/ingest auth

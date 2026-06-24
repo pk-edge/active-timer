@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from app.schemas.device import DeviceOut, TimelineEventOut, DailyStatOut, Assign
 
 router   = APIRouter()
 settings = get_settings()
+log      = logging.getLogger(__name__)
 
 
 async def _get_device_for_admin(device_id: str, admin: Employee, db: AsyncSession) -> Device:
@@ -304,12 +306,27 @@ async def stream_device_status(
     # stream it would hold a pooled connection per open tab → pool exhaustion.
     from app.db.base import AsyncSessionLocal
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Employee).where(Employee.id == user_uuid, Employee.is_active == True)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Employee).where(Employee.id == user_uuid, Employee.is_active == True)
+            )
+            if not result.scalar_one_or_none():
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # The only non-HTTP failure here is a DB/pool problem (e.g. pool checkout
+        # timeout under load). Return a clean 503 with Retry-After so the browser's
+        # EventSource reconnects on its own instead of surfacing a raw 500 (which,
+        # for a connection that never produced a response, the browser misreports
+        # as a CORS error).
+        log.warning("device stream auth unavailable (DB/pool): %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Realtime temporarily unavailable — retry shortly",
+            headers={"Retry-After": "5"},
         )
-        if not result.scalar_one_or_none():
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     # The auth session above is already released (its `async with` block exited),
     # so the long-lived stream below holds NO pooled connection — no per-tab leak.
@@ -333,6 +350,14 @@ async def stream_device_status(
                     yield f"event: {msg}\ndata: 1\n\n"
                     last_push = time.monotonic()
                 except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                except asyncio.CancelledError:
+                    raise  # client disconnected — propagate to the outer handler
+                except Exception:
+                    # A transient error inside the loop must NOT kill the stream
+                    # (the response has already started, so it can't 500 cleanly).
+                    # Log, emit a heartbeat to keep the pipe alive, and continue.
+                    log.exception("device stream loop error — continuing")
                     yield ": ping\n\n"
         except asyncio.CancelledError:
             pass  # client disconnected — finally block handles cleanup

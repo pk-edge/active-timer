@@ -16,7 +16,11 @@ a = Analysis(
     ["main.py"],
     pathex=[str(Path(".").resolve())],
     binaries=[],
-    datas=[],
+    datas=[
+        # backends.json is read by config.py from the bundle Resources (macOS)
+        # or _internal (Windows) at runtime. It must be in the root of that dir.
+        ("backends.json", "."),
+    ],
     hiddenimports=[
         # PySide6 plugins loaded at runtime
         "PySide6.QtWidgets",

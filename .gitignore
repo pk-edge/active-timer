@@ -1,3 +1,6 @@
+# ── Agent simulator (load-testing tool — never commit) ───────────────────────
+agent-simulator/
+
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 .DS_Store?

@@ -65,6 +65,7 @@ class UserOut(BaseModel):
     is_approved: bool = True
     group_ids: list[str] = []
     device_count: int = 0
+    created_at: Optional[str] = None
 
 
 class RegisterRequest(BaseModel):

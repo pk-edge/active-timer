@@ -10,6 +10,8 @@ import {
   getDevices, assignDevice, getUserActivity, fmtSeconds,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartMatch } from "@/lib/smartSearch";
 import { AccessDenied } from "@/components/charts";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { GroupCheckboxTree } from "@/components/GroupPicker";
@@ -248,8 +250,8 @@ function UsersPageInner() {
   const [editing, setEditing] = useState<User | null | "new">(null);
   const [approving, setApproving] = useState<User | null>(null);
 
-  const { data: users,   mutate: mutateUsers }   = useSWR<User[]>("users",         () => getUsers());
-  const { data: pending, mutate: mutatePending }  = useSWR<User[]>("users-pending", getPendingUsers);
+  const { data: users,   mutate: mutateUsers,  isLoading: usersLoading }   = useSWR<User[]>("users",         () => getUsers());
+  const { data: pending, mutate: mutatePending, isLoading: pendingLoading } = useSWR<User[]>("users-pending", getPendingUsers);
   const { data: roles }  = useSWR<Role[]>("roles-for-users",  getRoles);
   const { data: groups } = useSWR<Group[]>("groups-for-users", getGroups);
 
@@ -263,12 +265,12 @@ function UsersPageInner() {
     [activity],
   );
 
+  const debouncedSearch = useDebouncedValue(search, 200);
   const filteredActive = useMemo(() => {
     if (!users) return [];
-    if (!search.trim()) return users;
-    const q = search.toLowerCase();
-    return users.filter(u => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
-  }, [users, search]);
+    if (!debouncedSearch.trim()) return users;
+    return users.filter(u => smartMatch(debouncedSearch, u.name, u.email, u.role_name));
+  }, [users, debouncedSearch]);
 
   function refresh() { mutateUsers(); mutatePending(); }
 
@@ -362,7 +364,19 @@ function UsersPageInner() {
               </tr>
             </thead>
             <tbody>
-              {filteredActive.map(u => {
+              {usersLoading && [...Array(5)].map((_, i) => (
+                <tr key={i} className="border-t border-gray-100 animate-pulse">
+                  <td className="px-4 py-3"><div className="h-4 w-32 bg-gray-200 rounded mb-1" /><div className="h-3 w-24 bg-gray-100 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-5 w-20 bg-gray-200 rounded-full" /></td>
+                  <td className="px-4 py-3"><div className="h-4 w-16 bg-gray-200 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-4 w-12 bg-gray-200 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-4 w-12 bg-gray-200 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-4 w-6 bg-gray-200 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-5 w-14 bg-gray-200 rounded-full" /></td>
+                  <td className="px-4 py-3" />
+                </tr>
+              ))}
+              {!usersLoading && filteredActive.map(u => {
                 const act = actById.get(u.id);
                 return (
                 <tr
@@ -430,7 +444,7 @@ function UsersPageInner() {
                 </tr>
                 );
               })}
-              {filteredActive.length === 0 && <tr><td colSpan={8} className="px-4 py-10 text-center text-gray-600 text-sm">No users found.</td></tr>}
+              {!usersLoading && filteredActive.length === 0 && <tr><td colSpan={8} className="px-4 py-10 text-center text-gray-600 text-sm">No users found.</td></tr>}
             </tbody>
           </table>
           </div>
@@ -440,7 +454,30 @@ function UsersPageInner() {
       {/* Pending registrations table */}
       {tab === "pending" && (
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-          {pendingCount === 0 ? (
+          {pendingLoading ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[720px]">
+                <thead>
+                  <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
+                    <th className="text-left px-4 py-3 font-semibold">Name</th>
+                    <th className="text-left px-4 py-3 font-semibold">Email</th>
+                    <th className="text-left px-4 py-3 font-semibold">Requested</th>
+                    <th className="px-4 py-3" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...Array(3)].map((_, i) => (
+                    <tr key={i} className="border-t border-gray-100 animate-pulse">
+                      <td className="px-4 py-3"><div className="h-4 w-32 bg-gray-200 rounded" /></td>
+                      <td className="px-4 py-3"><div className="h-4 w-48 bg-gray-200 rounded" /></td>
+                      <td className="px-4 py-3"><div className="h-4 w-24 bg-gray-200 rounded" /></td>
+                      <td className="px-4 py-3" />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : pendingCount === 0 ? (
             <div className="px-4 py-12 text-center">
               <UserCheck size={28} className="mx-auto mb-2 text-gray-200" />
               <p className="text-sm text-gray-600">No pending registrations.</p>
@@ -462,7 +499,7 @@ function UsersPageInner() {
                     <td className="px-4 py-3 font-medium text-gray-800">{u.name}</td>
                     <td className="px-4 py-3 text-gray-600">{u.email}</td>
                     <td className="px-4 py-3 text-gray-600 text-xs">
-                      {u.device_count === 0 ? "—" : u.device_count}
+                      {u.created_at ? new Date(u.created_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—"}
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap">
                       {can("users", "edit") && (

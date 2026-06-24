@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, ORJSONResponse
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
@@ -79,14 +79,16 @@ def _log_oauth_status() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.core import broadcaster
+    from app.core import broadcaster, audit
     _assert_secure_config()      # refuse to boot a real deployment with a weak secret
     _log_oauth_status()          # surface missing Google OAuth config at startup
     await init_db()              # migrations + RBAC seed + bootstrap admin (all idempotent)
     await broadcaster.startup()  # open Redis pub/sub + listener BEFORE workers publish
-    await ingest_queue.start()   # start async worker pool
+    await audit.start()          # background audit writer — keeps audit off the request path
+    await ingest_queue.start()   # start 30-second COPY flusher
     yield
-    await ingest_queue.stop()    # drain + shutdown workers cleanly
+    await ingest_queue.stop()    # final COPY flush + clean exit
+    await audit.stop()           # flush queued audit rows, then stop the writer
     await broadcaster.shutdown() # stop listener + close Redis after workers are done
     from app.db.base import engine, ingest_engine
     await ingest_engine.dispose()
@@ -100,6 +102,10 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
+        # orjson for every response: serializes large list payloads in fast C so
+        # the single async worker's event loop is not blocked on stdlib json while
+        # other requests wait (the load-induced "request failed / CORS" symptom).
+        default_response_class=ORJSONResponse,
     )
 
     # ── Middleware ────────────────────────────────────────────────────────────
