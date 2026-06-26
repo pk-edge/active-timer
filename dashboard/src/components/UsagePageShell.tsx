@@ -8,6 +8,7 @@ import useSWR from "swr";
 import {
   Search, RefreshCw, Download, ChevronDown, X,
   CheckCircle2, MinusCircle, Circle, BarChart2,
+  ChevronLeft, ChevronRight,
 } from "lucide-react";
 import { getUsers, fmtSeconds } from "@/lib/api";
 import GroupPicker from "@/components/GroupPicker";
@@ -240,6 +241,44 @@ export function DurationRow({
       </div>
       <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
         <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(pct, 100)}%`, background: color }} />
+      </div>
+    </div>
+  );
+}
+
+// ── List pagination ────────────────────────────────────────────────────────────
+// Client-side pager for the two-panel list views. The list is already fetched in
+// one (now today-scoped, small) response, so this is purely a render/scan bound —
+// it keeps the DOM light and the list navigable without extra API calls.
+
+export const LIST_PAGE_SIZE = 50;
+
+export function Pager({
+  page, total, pageSize = LIST_PAGE_SIZE, onPage,
+}: { page: number; total: number; pageSize?: number; onPage: (p: number) => void }) {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (total <= pageSize) return null;          // nothing to paginate
+  const start = (page - 1) * pageSize + 1;
+  const end   = Math.min(page * pageSize, total);
+  return (
+    <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-t border-gray-200 bg-white shrink-0">
+      <p className="text-xs text-gray-500">{start}–{end} of {total}</p>
+      <div className="flex items-center gap-1">
+        <button
+          onClick={() => onPage(page - 1)}
+          disabled={page === 1}
+          className="flex items-center gap-1 px-2.5 py-1 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+        >
+          <ChevronLeft size={13} /> Prev
+        </button>
+        <span className="text-xs text-gray-600 px-2 tabular-nums">{page} / {totalPages}</span>
+        <button
+          onClick={() => onPage(page + 1)}
+          disabled={page >= totalPages}
+          className="flex items-center gap-1 px-2.5 py-1 text-xs border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+        >
+          Next <ChevronRight size={13} />
+        </button>
       </div>
     </div>
   );

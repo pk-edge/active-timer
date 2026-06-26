@@ -1,5 +1,6 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import { useState, useRef } from "react";
 import useSWR from "swr";
 import { format, parseISO } from "date-fns";
@@ -7,7 +8,7 @@ import { DownloadCloud, Upload, CheckCircle2, Download, Apple, Monitor, History,
 import { getInstallers, uploadInstaller, activateInstaller, deleteInstaller, getInstallerDownload, getInstallerDownloads, getCompanyInfo, patchInstaller, getUpdateRuns, fmtBytes, BASE } from "@/lib/api";
 import type { CompanyInfo } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import type { Installer, InstallerDownload, UpdateRun, UpdateRunsResponse } from "@/types";
 
 function UploadForm({ onUploaded }: { onUploaded: () => void }) {
@@ -243,12 +244,13 @@ function FleetStatus() {
 
 export default function AgentsPage() {
   const { loading, can } = useUser();
-  const { data: installers, mutate } = useSWR<Installer[]>("installers", getInstallers);
+  const { data: installers, mutate, isLoading } = useSWR<Installer[]>("installers", getInstallers);
   const { data: downloads }          = useSWR<InstallerDownload[]>("installer-downloads", getInstallerDownloads);
   const { data: companyInfo }        = useSWR<CompanyInfo>("company-info", getCompanyInfo);
 
   if (loading) return <PageLoader />;
   if (!can("agents", "view")) return <AccessDenied label="Agents" />;
+  if (isLoading && !installers) return <PageSkeleton variant="list" rows={4} />;
 
   async function activate(id: string) {
     try { await activateInstaller(id); mutate(); } catch (e) { alert(String(e instanceof Error ? e.message : e)); }

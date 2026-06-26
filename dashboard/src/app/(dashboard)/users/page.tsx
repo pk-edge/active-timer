@@ -12,7 +12,7 @@ import {
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { smartMatch } from "@/lib/smartSearch";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { GroupCheckboxTree } from "@/components/GroupPicker";
 import type { User, UserActivity, Role, Group, Device } from "@/types";

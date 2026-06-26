@@ -7,13 +7,16 @@ import {
   DownloadCloud, FileDown, Printer, ChevronDown,
   Monitor, Globe, Search, X,
 } from "lucide-react";
-import { getRealtime, getHomeAppUsage, getHomeWebUsage, getGroups, fmtSeconds, fmtTime } from "@/lib/api";
+import { getHomeAppUsage, getHomeWebUsage, getGroups, fmtSeconds, fmtTime } from "@/lib/api";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import GroupPicker from "@/components/GroupPicker";
 import { buildGroupTree } from "@/lib/groupTree";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { smartMatch } from "@/lib/smartSearch";
-import { AccessDenied, UsagePie } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
+import PageSkeleton from "@/components/PageSkeleton";
+import { UsagePie } from "@/components/charts";
 import type { RealtimeDevice, Group, AppUsage, WebUsage } from "@/types";
 
 const STATUS_STYLE: Record<string, string> = {
@@ -56,33 +59,55 @@ function exportCsv(rows: RealtimeDevice[]) {
 
 export default function ActivityPage() {
   const { loading, can } = useUser();
-  const [tab, setTab]       = useState<"users" | "groups">("users");
+  const [tab, setTab]   = useState<"users" | "groups">("users");
   const [groupId, setGroup] = useState("");
   const [search, setSearch] = useState("");
 
-  const { data: groups }   = useSWR<Group[]>("groups-activity", getGroups);
-  const { data: realtime } = useSWR<RealtimeDevice[]>(
-    ["realtime", groupId], () => getRealtime(groupId || undefined),
-    // dedupingInterval prevents a slow poll from stacking behind the 10s timer;
-    // keepPreviousData avoids a blank flash when the group filter changes.
-    { refreshInterval: 10_000, dedupingInterval: 8_000, keepPreviousData: true });
-  const { data: apps } = useSWR<AppUsage[]>(["act-apps", groupId], () => getHomeAppUsage(groupId || undefined, 1));
-  const { data: webs } = useSWR<WebUsage[]>(["act-webs", groupId], () => getHomeWebUsage(groupId || undefined, 1));
+  // ── Realtime via SSE — one persistent connection replaces a 10 s HTTP poll.
+  // The stream endpoint pushes updates whenever ingest lands new events, so
+  // the device grid stays live without any recurring requests.
+  const realtime = useRealtimeStream(groupId || undefined);
+  const hasRealtime = realtime.length > 0;
+
+  // ── Groups — only fetch when the user switches to the Groups tab.
+  // On the default Users tab this request never fires.
+  const { data: groups } = useSWR<Group[]>(
+    tab === "groups" ? "groups-activity" : null,
+    getGroups,
+    { dedupingInterval: 60_000 },
+  );
+
+  // ── Usage charts — deferred until the realtime grid has painted.
+  // Staggering these avoids a 4-request burst on cold mount; SWR cache makes
+  // them instant on subsequent visits regardless.
+  const { data: apps } = useSWR<AppUsage[]>(
+    hasRealtime ? ["act-apps", groupId] : null,
+    () => getHomeAppUsage(groupId || undefined, 1),
+    { dedupingInterval: 60_000 },
+  );
+  const { data: webs } = useSWR<WebUsage[]>(
+    hasRealtime ? ["act-webs", groupId] : null,
+    () => getHomeWebUsage(groupId || undefined, 1),
+    { dedupingInterval: 60_000 },
+  );
 
   const debouncedSearch = useDebouncedValue(search, 200);
   const filtered = useMemo(() => {
-    const list = realtime ?? [];
-    if (!debouncedSearch.trim()) return list;
-    return list.filter(d => smartMatch(debouncedSearch, d.hostname, d.employee_name));
+    if (!debouncedSearch.trim()) return realtime;
+    return realtime.filter(d => smartMatch(debouncedSearch, d.hostname, d.employee_name));
   }, [realtime, debouncedSearch]);
 
   if (loading) return <PageLoader />;
   if (!can("home", "view")) return <AccessDenied label="the Activity Dashboard" />;
+  // Cold load: skeleton while the SSE connection delivers the first snapshot.
+  // keepPreviousData (global SWR config) serves the cache on re-navigation,
+  // so the skeleton only appears on the very first visit.
+  if (!hasRealtime && !loading) return <PageSkeleton variant="dashboard" />;
 
   const counts = {
-    active:   (realtime ?? []).filter(d => d.status === "active").length,
-    passive:  (realtime ?? []).filter(d => d.status === "passive").length,
-    inactive: (realtime ?? []).filter(d => d.status === "inactive").length,
+    active:   realtime.filter(d => d.status === "active").length,
+    passive:  realtime.filter(d => d.status === "passive").length,
+    inactive: realtime.filter(d => d.status === "inactive").length,
   };
 
   return (
@@ -165,15 +190,19 @@ export default function ActivityPage() {
         </div>
       </div>
 
-      {/* Usage charts */}
+      {/* Usage charts — render skeleton until deferred data arrives */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-3"><Monitor size={15} className="text-gray-600" /><p className="text-sm font-semibold text-gray-800">Applications (today)</p></div>
-          <UsagePie items={apps ?? []} labelKey="app_name" valueKey="seconds" format={fmtSeconds} />
+          {apps
+            ? <UsagePie items={apps} labelKey="app_name" valueKey="seconds" format={fmtSeconds} />
+            : <div className="h-[220px] animate-pulse bg-gray-50 rounded-full mx-auto w-[220px]" />}
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-3"><Globe size={15} className="text-gray-600" /><p className="text-sm font-semibold text-gray-800">Websites (today)</p></div>
-          <UsagePie items={webs ?? []} labelKey="host" valueKey="visits" format={(v) => `${v} visits`} />
+          {webs
+            ? <UsagePie items={webs} labelKey="host" valueKey="visits" format={(v) => `${v} visits`} />
+            : <div className="h-[220px] animate-pulse bg-gray-50 rounded-full mx-auto w-[220px]" />}
         </div>
       </div>
     </div>

@@ -14,9 +14,10 @@ import {
   getAdoptionData, getTechCategories, fmtSeconds } from "@/lib/api";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
 import GroupPicker from "@/components/GroupPicker";
-import { format, subDays } from "date-fns";
+import { format } from "date-fns";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
+import PageSkeleton from "@/components/PageSkeleton";
 import type {
   TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory } from "@/types";
 
@@ -44,6 +45,23 @@ function FilterChip({
         {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
       <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
+    </div>
+  );
+}
+
+// Skeleton shown while a tab's data lazy-loads (tabs fetch only when selected).
+function TabSkeleton() {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-5 animate-pulse">
+      <div className="h-4 w-56 bg-gray-200 rounded mb-4" />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="h-[280px] bg-gray-50 rounded-lg" />
+        <div className="space-y-2 py-2">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="h-5 bg-gray-100 rounded" style={{ width: `${90 - i * 7}%` }} />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -377,7 +395,10 @@ type Tab = "overview" | "top-changes" | "adoption";
 export default function TechUtilizationPage() {
   const { loading, can } = useUser();
   const [tab,        setTab]        = useState<Tab>("overview");
-  const [dateRange,  setDateRange]  = useState<DateRange>({ since: format(subDays(new Date(), 29), "yyyy-MM-dd"), until: format(new Date(), "yyyy-MM-dd") });
+  // Default to TODAY only — a single-day aggregation is far cheaper than 30 days,
+  // which is the main reason this page's concurrent query burst was saturating
+  // the backend. Users widen the range via the filter when they need history.
+  const [dateRange,  setDateRange]  = useState<DateRange>({ since: format(new Date(), "yyyy-MM-dd"), until: format(new Date(), "yyyy-MM-dd") });
   const [groupId,    setGroupId]    = useState("");
   const [employeeId, setEmployeeId] = useState("");
   const [categoryId, setCategoryId] = useState("");
@@ -385,30 +406,36 @@ export default function TechUtilizationPage() {
   const { data: users }      = useSWR("users-tf", () => import("@/lib/api").then(m => m.getUsers()));
   const { data: categories } = useSWR<AppCategory[]>("tech-cats-filter", getTechCategories);
 
-  const { data: summary } = useSWR(
+  // summary feeds the always-visible stat cards, so it always loads.
+  const { data: summary, isLoading: summaryLoading } = useSWR(
     ["tech-sum",   dateRange.since, dateRange.until, groupId, employeeId],
     () => getTechSummary(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
   );
+  // Everything below is fetched ONLY for the tab that needs it (key = null when
+  // inactive → SWR skips the request). This turns the old 7-request mount burst
+  // — which was saturating the single backend worker and producing the CORS/5xx
+  // errors — into ~4 concurrent requests, and tab data loads on demand.
   const { data: allocation } = useSWR(
-    ["tech-alloc", dateRange.since, dateRange.until, groupId, employeeId],
+    tab !== "adoption" ? ["tech-alloc", dateRange.since, dateRange.until, groupId, employeeId] : null,
     () => getCategoryAllocation(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
   );
   const { data: trends } = useSWR(
-    ["tech-trends", dateRange.since, dateRange.until, groupId, employeeId],
+    tab === "top-changes" ? ["tech-trends", dateRange.since, dateRange.until, groupId, employeeId] : null,
     () => getAppTrends(dateRange.since, dateRange.until, 10),
   );
   const { data: apps } = useSWR(
-    ["tech-apps", dateRange.since, dateRange.until, categoryId, groupId, employeeId],
+    tab === "overview" ? ["tech-apps", dateRange.since, dateRange.until, categoryId, groupId, employeeId] : null,
     () => getAppList(dateRange.since, dateRange.until, categoryId || undefined, 50, groupId || undefined, employeeId || undefined),
   );
   const { data: adoption } = useSWR(
-    ["tech-adoption", dateRange.since, dateRange.until],
+    tab === "adoption" ? ["tech-adoption", dateRange.since, dateRange.until] : null,
     () => getAdoptionData(dateRange.since, dateRange.until, 5),
   );
 
 
   if (loading) return <PageLoader />;
   if (!can("tech", "view")) return <AccessDenied label="Technology Utilization" />;
+  if (summaryLoading && !summary) return <PageSkeleton variant="dashboard" />;
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "overview",    label: "Overview"    },
@@ -507,15 +534,23 @@ export default function TechUtilizationPage() {
         </div>
       </div>
 
-      {/* Tab content */}
+      {/* Tab content — each tab shows a skeleton until its (lazy) data arrives.
+          Loaded-but-empty responses are arrays/objects (truthy), so the skeleton
+          only shows while genuinely fetching, never on a real empty result. */}
       {tab === "overview" && (
-        <OverviewTab allocation={allocation ?? []} apps={apps ?? []} categoryId={categoryId} />
+        allocation && apps
+          ? <OverviewTab allocation={allocation} apps={apps} categoryId={categoryId} />
+          : <TabSkeleton />
       )}
       {tab === "top-changes" && (
-        <TopChangesTab allocation={allocation ?? []} trends={trends ?? { trending_up: [], trending_down: [] }} />
+        allocation && trends
+          ? <TopChangesTab allocation={allocation} trends={trends} />
+          : <TabSkeleton />
       )}
       {tab === "adoption" && (
-        <AdoptionTab data={adoption ?? { apps: [], series: [] }} />
+        adoption
+          ? <AdoptionTab data={adoption} />
+          : <TabSkeleton />
       )}
     </div>
   );

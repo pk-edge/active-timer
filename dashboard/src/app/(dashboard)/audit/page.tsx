@@ -5,7 +5,7 @@ import useSWR from "swr";
 import { ClipboardList, Search, ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from "lucide-react";
 import { getAudit, getAuditFilterOptions, type AuditEntry, type AuditFilters } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 
 const ACTION_COLOR: Record<string, string> = {
   create:  "bg-green-50 text-green-700 ring-1 ring-green-200",

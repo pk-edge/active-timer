@@ -1,5 +1,5 @@
 "use client";
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
@@ -8,80 +8,17 @@ import {
   AppWindow, ChevronDown, CalendarDays, Search, X,
 } from "lucide-react";
 import { format, subDays, startOfMonth, startOfYear, subMonths } from "date-fns";
-import {
-  getOverview, getHomeAppUsage, getMyStats,
-  fmtSeconds, fmtTime, BASE,
-} from "@/lib/api";
+import { getOverview, getHomeAppUsage, getMyStats, fmtSeconds, fmtTime } from "@/lib/api";
 import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import GroupPicker from "@/components/GroupPicker";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import { smartMatch } from "@/lib/smartSearch";
-import { AccessDenied, StatusDonut, UsagePie } from "@/components/charts";
-import type { OverviewStats, RealtimeDevice, AppUsage, MyStats } from "@/types";
-
-// ── SSE realtime hook ─────────────────────────────────────────────────────────
-
-function useRealtimeStream(groupId?: string): RealtimeDevice[] {
-  const [devices, setDevices] = useState<RealtimeDevice[]>([]);
-  const abortRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    const token = typeof window !== "undefined" ? localStorage.getItem("tt_token") : null;
-    if (!token) return;
-
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-    let backoff = 1_000;
-
-    async function connect() {
-      while (!ctrl.signal.aborted) {
-        try {
-          const qs = groupId ? `?group_id=${groupId}` : "";
-          const res = await fetch(`${BASE}/v1/home/stream${qs}`, {
-            headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
-            signal: ctrl.signal,
-            cache: "no-store",
-          });
-
-          if (!res.ok || !res.body) {
-            await new Promise(r => setTimeout(r, backoff));
-            backoff = Math.min(backoff * 2, 30_000);
-            continue;
-          }
-
-          backoff = 1_000;
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buf = "";
-
-          while (!ctrl.signal.aborted) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buf += decoder.decode(value, { stream: true });
-            const lines = buf.split("\n");
-            buf = lines.pop() ?? "";
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                try { setDevices(JSON.parse(line.slice(6))); } catch { /* skip malformed */ }
-              }
-            }
-          }
-        } catch {
-          if (ctrl.signal.aborted) break;
-          await new Promise(r => setTimeout(r, backoff));
-          backoff = Math.min(backoff * 2, 30_000);
-        }
-      }
-    }
-
-    connect();
-    return () => ctrl.abort();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupId]);
-
-  return devices;
-}
+import { AccessDenied } from "@/components/AccessDenied";
+import { StatusDonut, UsagePie } from "@/components/charts";
+import type { OverviewStats, AppUsage, MyStats } from "@/types";
 
 // ── Stat period filter ────────────────────────────────────────────────────────
 
@@ -99,29 +36,32 @@ const STAT_PRESETS = [
 ];
 
 function StatPeriodFilter({
-  sinceDate, untilDate,
-  onSinceChange, onUntilChange,
+  dateRange,
+  onRangeChange,
 }: {
-  sinceDate: string; untilDate: string;
-  onSinceChange: (v: string) => void; onUntilChange: (v: string) => void;
+  dateRange: { since: string; until: string };
+  onRangeChange: (range: { since: string; until: string }) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [customMode, setCustomMode] = useState(false);
+  const [localSince, setLocalSince] = useState(dateRange.since);
+  const [localUntil, setLocalUntil] = useState(dateRange.until);
 
   const activePreset = STAT_PRESETS.find(
-    p => p.label !== "Custom" && p.getSince() === sinceDate && p.getUntil() === untilDate
+    p => p.label !== "Custom" && p.getSince() === dateRange.since && p.getUntil() === dateRange.until
   );
   const displayLabel = activePreset?.label ?? "Custom";
-  const displayRange = sinceDate === untilDate ? sinceDate : `${sinceDate} – ${untilDate}`;
+  const displayRange = dateRange.since === dateRange.until ? dateRange.since : `${dateRange.since} – ${dateRange.until}`;
 
   function applyPreset(p: typeof STAT_PRESETS[number]) {
     if (p.label === "Custom") {
+      setLocalSince(dateRange.since);
+      setLocalUntil(dateRange.until);
       setCustomMode(true);
       return;
     }
     setCustomMode(false);
-    onSinceChange(p.getSince());
-    onUntilChange(p.getUntil());
+    onRangeChange({ since: p.getSince(), until: p.getUntil() });
     setOpen(false);
   }
 
@@ -165,18 +105,18 @@ function StatPeriodFilter({
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-xs text-gray-600 mb-1">From</label>
-                    <input type="date" value={sinceDate} max={untilDate}
-                           onChange={e => onSinceChange(e.target.value)}
+                    <input type="date" value={localSince} max={localUntil}
+                           onChange={e => setLocalSince(e.target.value)}
                            className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
                   </div>
                   <div>
                     <label className="block text-xs text-gray-600 mb-1">To</label>
-                    <input type="date" value={untilDate} min={sinceDate} max={TODAY()}
-                           onChange={e => onUntilChange(e.target.value)}
+                    <input type="date" value={localUntil} min={localSince} max={TODAY()}
+                           onChange={e => setLocalUntil(e.target.value)}
                            className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
                   </div>
                 </div>
-                <button onClick={() => setOpen(false)}
+                <button onClick={() => { onRangeChange({ since: localSince, until: localUntil }); setOpen(false); }}
                         className="mt-2 w-full bg-brand-600 text-white text-sm py-1.5 rounded-lg hover:bg-brand-700 transition font-medium">
                   Apply
                 </button>
@@ -221,29 +161,32 @@ function AdminHome() {
   const { can } = useUser();
   const todayStr = format(new Date(), "yyyy-MM-dd");
 
-  const [sinceDate, setSinceDate] = useState(todayStr);
-  const [untilDate, setUntilDate] = useState(todayStr);
+  const [dateRange, setDateRange] = useState({ since: todayStr, until: todayStr });
   const [groupId, setGroupId]     = useState("");
   const [empSearch, setEmpSearch] = useState("");
 
-  const isToday = sinceDate === todayStr && untilDate === todayStr;
+  const isToday = dateRange.since === todayStr && dateRange.until === todayStr;
   const activeLabel = isToday
     ? "Active today"
-    : sinceDate === untilDate ? `Active on ${sinceDate}` : "Active in period";
+    : dateRange.since === dateRange.until ? `Active on ${dateRange.since}` : "Active in period";
   const avgLabel = isToday
     ? "Avg active / device"
     : "Avg active / device (period)";
 
   const { data: stats } = useSWR<OverviewStats>(
-    ["home-overview", sinceDate, untilDate, groupId],
-    () => getOverview(groupId || undefined, 7, sinceDate, untilDate),
-    { refreshInterval: 300_000 },
+    ["home-overview", dateRange.since, dateRange.until, groupId],
+    () => getOverview(groupId || undefined, 7, dateRange.since, dateRange.until),
+    { refreshInterval: 300_000, dedupingInterval: 10_000 },
   );
+
   const realtime = useRealtimeStream(groupId || undefined);
+
+  // Fire in parallel with stats — both requests start on mount so the pie
+  // chart and stat cards load concurrently with no waterfall.
   const { data: apps } = useSWR<AppUsage[]>(
     ["home-apps", groupId],
     () => getHomeAppUsage(groupId || undefined, 1),
-    { refreshInterval: 300_000 },
+    { refreshInterval: 300_000, dedupingInterval: 10_000 },
   );
 
   const debouncedEmpSearch = useDebouncedValue(empSearch, 200);
@@ -272,6 +215,7 @@ function AdminHome() {
     { href: "/agents",   label: "Agents",   icon: DownloadCloud, module: "agents" },
   ];
 
+
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       {/* Quick actions */}
@@ -292,8 +236,8 @@ function AdminHome() {
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide shrink-0">Stats for</p>
         <StatPeriodFilter
-          sinceDate={sinceDate} untilDate={untilDate}
-          onSinceChange={setSinceDate} onUntilChange={setUntilDate}
+          dateRange={dateRange}
+          onRangeChange={setDateRange}
         />
 
         {/* Group filter — includes subgroups when a parent is selected */}
@@ -432,10 +376,12 @@ function AdminHome() {
 // ── Employee home ─────────────────────────────────────────────────────────────
 
 function EmployeeHome() {
-  const { data: stats } = useSWR<MyStats>("my-stats", getMyStats, { refreshInterval: 30_000 });
+  const { data: stats, isLoading } = useSWR<MyStats>("my-stats", getMyStats, { refreshInterval: 30_000 });
 
   const activeHrs  = ((stats?.active_seconds_today ?? 0) / 3600).toFixed(1);
   const topApp     = stats?.top_apps[0]?.app_name ?? "—";
+
+  if (isLoading && !stats) return <PageSkeleton variant="dashboard" cards={3} />;
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">

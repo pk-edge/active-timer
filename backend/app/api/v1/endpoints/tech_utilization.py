@@ -70,26 +70,31 @@ async def _ensure_default_categories(company_id: uuid.UUID, db: AsyncSession) ->
     )
     existing_patterns = {p for (p,) in rules_res.all()}
 
+    # Pre-generate UUIDs in Python so we can build categories + rules in one
+    # batch and commit with a single round-trip — no per-category flush needed.
+    cats_to_add: list[AppCategory] = []
+    rules_to_add: list[AppCategoryRule] = []
     for cat_def in DEFAULT_CATEGORIES:
-        cat = AppCategory(
+        cat_id = uuid.uuid4()
+        cats_to_add.append(AppCategory(
+            id=cat_id,
             company_id=company_id,
             name=cat_def["name"],
             color=cat_def["color"],
             is_system=True,
-        )
-        db.add(cat)
-        await db.flush()
-
+        ))
         for raw in DEFAULT_RULES.get(cat_def["name"], []):
-            pattern = normalize_app_name(raw)   # canonical so it matches normalized events
+            pattern = normalize_app_name(raw)
             if pattern not in existing_patterns:
                 existing_patterns.add(pattern)
-                db.add(AppCategoryRule(
-                    category_id=cat.id,
+                rules_to_add.append(AppCategoryRule(
+                    category_id=cat_id,
                     company_id=company_id,
                     app_pattern=pattern,
                 ))
 
+    db.add_all(cats_to_add)
+    db.add_all(rules_to_add)
     await db.commit()
     _default_cats_ensured.add(company_id)
 
@@ -142,19 +147,21 @@ async def list_categories(
     for r in rules_res.scalars().all():
         rules_by_cat.setdefault(r.category_id, []).append(r)
 
-    out = []
-    for c in cats:
-        rules = rules_by_cat.get(c.id, [])
-        out.append(CategoryOut(
+    return [
+        CategoryOut(
             id=c.id,
             name=c.name,
             color=c.color,
             description=c.description,
             is_system=c.is_system,
-            rule_count=len(rules),
-            rules=[CategoryRuleOut(id=r.id, app_pattern=r.app_pattern, created_at=r.created_at) for r in rules],
-        ))
-    return out
+            rule_count=len(rules_by_cat.get(c.id, [])),
+            rules=[
+                CategoryRuleOut(id=r.id, app_pattern=r.app_pattern, created_at=r.created_at)
+                for r in rules_by_cat.get(c.id, [])
+            ],
+        )
+        for c in cats
+    ]
 
 
 @router.post("/categories", response_model=CategoryOut, status_code=201)

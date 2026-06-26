@@ -1,12 +1,26 @@
 "use client";
 import { use, useState, useMemo } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import useSWR from "swr";
 import { format } from "date-fns";
 import { ArrowLeft, Laptop, User } from "lucide-react";
 import { getTimeline, getDailyStats, getDevices, setDeviceHeadless, fmtSeconds } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
-import DailyChart       from "./_components/DailyChart";
+// Lazy: recharts (~100KB) loads only when this device-detail view renders, not
+// as part of any shared bundle that lighter pages would otherwise pay for.
+const DailyChart = dynamic(() => import("./_components/DailyChart"), {
+  ssr: false,
+  loading: () => (
+    <div className="bg-white border border-gray-200 rounded-xl px-4 pt-3 pb-2 shadow-sm shrink-0">
+      <div className="h-[110px] animate-pulse flex items-end gap-2 pt-4">
+        {[60, 80, 45, 90, 70, 55, 75].map((p, i) => (
+          <div key={i} className="flex-1 bg-gray-100 rounded-t" style={{ height: `${p}%` }} />
+        ))}
+      </div>
+    </div>
+  ),
+});
 import ActivityTimeline from "./_components/ActivityTimeline";
 import InsightsPanel    from "./_components/InsightsPanel";
 import MeetingsCard     from "@/components/MeetingsCard";

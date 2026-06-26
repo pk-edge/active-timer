@@ -14,7 +14,7 @@ import {
   getGroupMembers,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import type { GroupDetail, GroupMember, User, Device } from "@/types";
 
 function EditGroupModal({ group, onClose, onSaved }: {
