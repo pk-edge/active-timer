@@ -1,5 +1,6 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import { useState, useRef, useMemo } from "react";
 import Link from "next/link";
 import useSWR from "swr";
@@ -15,7 +16,7 @@ import {
 } from "@/lib/api";
 import { buildGroupTree, filterGroupTree, groupStats } from "@/lib/groupTree";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import type { Group, User, Device } from "@/types";
 import type { GroupTreeNode } from "@/lib/groupTree";
 
@@ -360,7 +361,7 @@ function TreeRow({
 export default function GroupsPage() {
   const { loading, can } = useUser();
   const [showArchived, setShowArchived] = useState(false);
-  const { data: groups, mutate } = useSWR<Group[]>(
+  const { data: groups, mutate, isLoading } = useSWR<Group[]>(
     ["groups", showArchived],
     () => getGroups(showArchived),
   );
@@ -388,6 +389,7 @@ export default function GroupsPage() {
 
   if (loading) return <PageLoader />;
   if (!can("groups", "view")) return <AccessDenied label="Groups" />;
+  if (isLoading && !groups) return <PageSkeleton variant="table" />;
 
   async function confirmDelete() {
     if (!pendingDelete) return;

@@ -10,7 +10,9 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import orjson
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -206,6 +208,214 @@ async def _scoped_status_payload(ids, company_id) -> str:
     return payload
 
 
+# Excluded app names for active-time calculation — OS lock/login screens that
+# appear as the foreground window while the device is locked. Defined once and
+# passed as a Postgres array so the query is never rebuilt dynamically.
+_SYSTEM_IDLE_APPS = [
+    "loginwindow",
+    "ScreenSaverEngine",
+    "System Idle Process",
+    "LockApp",
+    "LogonUI",
+    "Idle",
+    "screensaver",
+]
+
+# ── Home endpoint response cache (stale-while-revalidate) ─────────────────────
+# overview and app-usage both scan activity_events, which can take 100-500 ms on
+# large datasets.  Cache the result: fresh hits (< FRESH_TTL) return instantly;
+# stale hits (FRESH_TTL … STALE_TTL) return the old data AND fire a background
+# refresh so the NEXT request is also instant.  Beyond STALE_TTL we recompute
+# synchronously and re-populate — the user never sees data older than 5 minutes.
+#
+# Cache key includes company_id + scope fingerprint + query params so different
+# companies, different group filters, and different date windows are isolated.
+_RESP_FRESH = 30.0    # seconds — serve with no background work
+_RESP_STALE = 300.0   # seconds — serve + kick off background refresh
+
+_resp_cache   : dict[tuple, tuple[float, float, Any]] = {}  # key → (fresh_exp, stale_exp, data)
+_resp_bg_keys : set[tuple] = set()                           # keys with an active bg refresh
+
+
+def _rcache_get(key: tuple):
+    """Return (data, is_stale).  Returns (None, False) on miss or full expiry."""
+    entry = _resp_cache.get(key)
+    if entry is None:
+        return None, False
+    fresh_exp, stale_exp, data = entry
+    t = time.monotonic()
+    if t > stale_exp:
+        _resp_cache.pop(key, None)
+        return None, False
+    return data, (t > fresh_exp)
+
+
+def _rcache_put(key: tuple, data: Any) -> None:
+    t = time.monotonic()
+    _resp_cache[key] = (t + _RESP_FRESH, t + _RESP_STALE, data)
+    # Light pruning: drop fully-expired entries so the dict doesn't grow forever.
+    if len(_resp_cache) > 512:
+        now = time.monotonic()
+        for k in [k for k, (_, se, _) in list(_resp_cache.items()) if se <= now]:
+            _resp_cache.pop(k, None)
+
+
+async def _device_ids_for_scope(
+    user: Employee, group_id: str | None, db: AsyncSession
+) -> tuple[list[str], Any]:
+    """Resolve device scope → (device_ids, scope_key).
+
+    For ALL-scope admins we materialise the full company device list so every
+    downstream query can use ``AND ae.device_id = ANY(:hids)`` and hit the
+    partial index ``idx_events_window_device_ts (device_id, timestamp DESC)``
+    instead of a broad JOIN+company filter that forces a full-table scan.
+    The scope_key is a stable value safe to embed in a cache key.
+    """
+    ids = await _resolve_ids(user, group_id, db)
+    if ids is ALL:
+        rows = await db.execute(
+            text("SELECT id::text FROM devices WHERE company_id = :cid AND is_active = TRUE"),
+            {"cid": str(user.company_id)},
+        )
+        device_ids = [r[0] for r in rows.fetchall()]
+        scope_key  = ("ALL", group_id or "")          # same company+group → same scope
+    else:
+        device_ids = [str(i) for i in ids]
+        scope_key  = (frozenset(device_ids), group_id or "")  # exact device set
+    return device_ids, scope_key
+
+
+async def _compute_overview_inner(
+    company_id_str: str,
+    device_ids: list[str],
+    days: int,
+    stat_since,
+    stat_until,
+    today,
+    db: AsyncSession,
+) -> dict:
+    """Core overview computation.  Uses ``device_ids = ANY(:hids)`` so Postgres
+    can use the partial index instead of a full-table JOIN scan."""
+    rows = await _status_rows(device_ids, company_id_str, db)
+    status_counts = {"active": 0, "passive": 0, "inactive": 0}
+    for r in rows:
+        status_counts[r["status"]] += 1
+
+    trend_start   = today - timedelta(days=days - 1)
+    stat_in_trend = stat_since >= trend_start
+
+    combined = await db.execute(text("""
+        SELECT DATE(ae.timestamp) AS day, ae.device_id,
+               SUM(CASE WHEN ae.app_name <> ALL(:excluded_apps) THEN ae.duration ELSE 0 END) AS active
+        FROM activity_events ae
+        WHERE ae.event_type = 'window_change'
+          AND ae.app_name IS NOT NULL
+          AND ae.timestamp >= NOW() - make_interval(days => :days)
+          AND ae.device_id = ANY(:hids)
+        GROUP BY day, ae.device_id
+    """), {"hids": device_ids, "days": days, "excluded_apps": _SYSTEM_IDLE_APPS})
+
+    daily_totals : dict = defaultdict(int)
+    stat_by_device: dict = defaultdict(int)
+
+    for r in combined.fetchall():
+        active = int(r.active or 0)
+        daily_totals[r.day] += active
+        if stat_in_trend and stat_since <= r.day <= stat_until:
+            stat_by_device[r.device_id] += active
+
+    trend_out = [
+        {"date": str(day), "active_seconds": total}
+        for day, total in sorted(daily_totals.items())
+    ]
+
+    if not stat_in_trend:
+        extra = {
+            "hids": device_ids, "excluded_apps": _SYSTEM_IDLE_APPS,
+            "stat_since": str(stat_since), "stat_until": str(stat_until),
+        }
+        stat_res = await db.execute(text("""
+            SELECT ae.device_id,
+                   SUM(CASE WHEN ae.app_name <> ALL(:excluded_apps) THEN ae.duration ELSE 0 END) AS active
+            FROM activity_events ae
+            WHERE ae.event_type = 'window_change'
+              AND ae.app_name IS NOT NULL
+              AND ae.timestamp >= CAST(:stat_since AS date)
+              AND ae.timestamp < (CAST(:stat_until AS date) + INTERVAL '1 day')
+              AND ae.device_id = ANY(:hids)
+            GROUP BY ae.device_id
+        """), extra)
+        for r in stat_res.fetchall():
+            stat_by_device[r.device_id] = int(r.active or 0)
+
+    active_today      = len([v for v in stat_by_device.values() if v > 0])
+    total_active_secs = sum(stat_by_device.values())
+    avg_active        = int(total_active_secs / active_today) if active_today else 0
+
+    return {
+        "total_devices":            len(rows),
+        "active_today":             active_today,
+        "status":                   status_counts,
+        "avg_active_seconds_today": avg_active,
+        "trend":                    trend_out,
+    }
+
+
+async def _bg_refresh_overview(
+    cache_key: tuple,
+    company_id_str: str,
+    device_ids: list[str],
+    days: int,
+    stat_since_str: str,
+    stat_until_str: str,
+) -> None:
+    """Background task: recompute overview and silently update the cache."""
+    from app.db.base import AsyncSessionLocal
+    try:
+        today      = datetime.now(timezone.utc).date()
+        stat_since = datetime.strptime(stat_since_str, "%Y-%m-%d").date()
+        stat_until = datetime.strptime(stat_until_str, "%Y-%m-%d").date()
+        async with AsyncSessionLocal() as db:
+            result = await _compute_overview_inner(
+                company_id_str, device_ids, days, stat_since, stat_until, today, db,
+            )
+        _rcache_put(cache_key, result)
+    except Exception:
+        log.exception("bg overview refresh failed for key %s", cache_key[:3])
+    finally:
+        _resp_bg_keys.discard(cache_key)
+
+
+async def _compute_app_usage_inner(
+    device_ids: list[str], days: int, limit: int, db: AsyncSession,
+) -> list:
+    """Core app-usage computation using device_id = ANY(:hids)."""
+    res = await db.execute(text("""
+        SELECT ae.app_name, SUM(ae.duration) AS seconds
+        FROM activity_events ae
+        WHERE ae.event_type = 'window_change' AND ae.app_name IS NOT NULL
+          AND ae.timestamp >= NOW() - make_interval(days => :days)
+          AND ae.device_id = ANY(:hids)
+        GROUP BY ae.app_name ORDER BY seconds DESC LIMIT :limit
+    """), {"hids": device_ids, "days": days, "limit": limit})
+    return [{"app_name": r.app_name, "seconds": int(r.seconds or 0)} for r in res.fetchall()]
+
+
+async def _bg_refresh_app_usage(
+    cache_key: tuple, device_ids: list[str], days: int, limit: int,
+) -> None:
+    """Background task: recompute app-usage and silently update the cache."""
+    from app.db.base import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await _compute_app_usage_inner(device_ids, days, limit, db)
+        _rcache_put(cache_key, result)
+    except Exception:
+        log.exception("bg app-usage refresh failed for key %s", cache_key[:2])
+    finally:
+        _resp_bg_keys.discard(cache_key)
+
+
 @router.get("/overview")
 async def overview(
     group_id:   str | None = Query(default=None),
@@ -215,96 +425,38 @@ async def overview(
     user: Employee = Depends(require("home", "view")),
     db: AsyncSession = Depends(get_db),
 ):
-    ids = await _resolve_ids(user, group_id, db)
-    if ids is not ALL and not ids:
+    device_ids, scope_key = await _device_ids_for_scope(user, group_id, db)
+    if not device_ids:
         return {"total_devices": 0, "active_today": 0,
                 "status": {"active": 0, "passive": 0, "inactive": 0},
                 "avg_active_seconds_today": 0, "trend": []}
 
-    rows = await _status_rows(ids, user.company_id, db)
-    status_counts = {"active": 0, "passive": 0, "inactive": 0}
-    for r in rows:
-        status_counts[r["status"]] += 1
-
-    frag, params = _clause(ids, "ae.device_id")
-    params["company_id"] = str(user.company_id)
-
-    # ── Date range for stat cards ─────────────────────────────────────────────
-    # When since_date/until_date provided use that range; otherwise "today".
+    today = datetime.now(timezone.utc).date()
     if since_date and until_date:
         try:
             stat_since = datetime.strptime(since_date, "%Y-%m-%d").date()
             stat_until = datetime.strptime(until_date, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="Dates must be YYYY-MM-DD")
-        stat_filter = " AND ae.timestamp >= CAST(:stat_since AS date) AND ae.timestamp < (CAST(:stat_until AS date) + INTERVAL '1 day')"
-        params["stat_since"] = stat_since
-        params["stat_until"] = stat_until
     else:
-        stat_filter = " AND ae.timestamp >= date_trunc('day', NOW())"
+        stat_since = stat_until = today
 
-    # Active working time = window_change events for real user apps ONLY.
-    # Excludes OS lock/login screen apps that appear as the foreground window
-    # while the screen is locked, and any event whose app_name is NULL/blank.
-    SYSTEM_IDLE_APPS = (
-        "loginwindow",          # macOS lock screen
-        "ScreenSaverEngine",    # macOS screen saver
-        "System Idle Process",  # Windows idle placeholder
-        "LockApp",              # Windows 10/11 lock screen
-        "LogonUI",              # Windows login/credential UI
-        "Idle", "screensaver",
+    cache_key = ("overview", str(user.company_id), scope_key, days, str(stat_since), str(stat_until))
+    cached, is_stale = _rcache_get(cache_key)
+    if cached is not None:
+        if is_stale and cache_key not in _resp_bg_keys:
+            _resp_bg_keys.add(cache_key)
+            asyncio.create_task(_bg_refresh_overview(
+                cache_key, str(user.company_id), device_ids,
+                days, str(stat_since), str(stat_until),
+            ))
+        return cached
+
+    result = await _compute_overview_inner(
+        str(user.company_id), device_ids, days, stat_since, stat_until, today, db,
     )
-    placeholders = ", ".join(f":ex{i}" for i in range(len(SYSTEM_IDLE_APPS)))
-    for i, name in enumerate(SYSTEM_IDLE_APPS):
-        params[f"ex{i}"] = name
-
-    stat_sql = f"""
-        SELECT ae.device_id,
-               SUM(CASE
-                   WHEN ae.event_type = 'window_change'
-                    AND ae.app_name IS NOT NULL
-                    AND ae.app_name NOT IN ({placeholders})
-                   THEN ae.duration ELSE 0
-               END) AS active
-        FROM activity_events ae
-        JOIN devices d ON d.id = ae.device_id
-        WHERE d.company_id = :company_id{stat_filter}{frag}
-        GROUP BY ae.device_id
-    """
-    stat_result = await db.execute(text(stat_sql), params)
-    stat_rows = stat_result.fetchall()
-    active_today = len([r for r in stat_rows if (r.active or 0) > 0])
-    total_active_secs = sum(int(r.active or 0) for r in stat_rows)
-    avg_active = int(total_active_secs / active_today) if active_today else 0
-
-    # ── Trend — daily active seconds (always keyed by `days` param) ──────────
-    params["days"] = days
-    trend = await db.execute(
-        text(f"""
-            SELECT DATE(ae.timestamp) AS day,
-                   SUM(CASE
-                       WHEN ae.event_type = 'window_change'
-                        AND ae.app_name IS NOT NULL
-                        AND ae.app_name NOT IN ({placeholders})
-                       THEN ae.duration ELSE 0
-                   END) AS active
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.timestamp >= NOW() - make_interval(days => :days){frag}
-            GROUP BY day ORDER BY day ASC
-        """),
-        params,
-    )
-    trend_out = [{"date": str(r.day), "active_seconds": int(r.active or 0)} for r in trend.fetchall()]
-
-    return {
-        "total_devices": len(rows),
-        "active_today": active_today,
-        "status": status_counts,
-        "avg_active_seconds_today": avg_active,
-        "trend": trend_out,
-    }
+    _rcache_put(cache_key, result)
+    return result
 
 
 @router.get("/realtime")
@@ -333,24 +485,21 @@ async def app_usage(
     user: Employee = Depends(require("home", "view")),
     db: AsyncSession = Depends(get_db),
 ):
-    ids = await _resolve_ids(user, group_id, db)
-    if ids is not ALL and not ids:
+    device_ids, scope_key = await _device_ids_for_scope(user, group_id, db)
+    if not device_ids:
         return []
-    frag, params = _clause(ids, "ae.device_id")
-    params.update({"company_id": str(user.company_id), "days": days, "limit": limit})
-    res = await db.execute(
-        text(f"""
-            SELECT ae.app_name, SUM(ae.duration) AS seconds
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change' AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= NOW() - make_interval(days => :days){frag}
-            GROUP BY ae.app_name ORDER BY seconds DESC LIMIT :limit
-        """),
-        params,
-    )
-    return [{"app_name": r.app_name, "seconds": int(r.seconds or 0)} for r in res.fetchall()]
+
+    cache_key = ("app_usage", str(user.company_id), scope_key, days, limit)
+    cached, is_stale = _rcache_get(cache_key)
+    if cached is not None:
+        if is_stale and cache_key not in _resp_bg_keys:
+            _resp_bg_keys.add(cache_key)
+            asyncio.create_task(_bg_refresh_app_usage(cache_key, device_ids, days, limit))
+        return cached
+
+    result = await _compute_app_usage_inner(device_ids, days, limit, db)
+    _rcache_put(cache_key, result)
+    return result
 
 
 @router.get("/web-usage")
@@ -631,11 +780,20 @@ async def stream(
 
     # Per-subscriber push throttle. The heavy DB work is already coalesced by the
     # shared scope cache; this just bounds how often each tab re-renders.
-    MIN_PUSH_INTERVAL = 2.0
+    MIN_PUSH_INTERVAL = 0.5
 
     async def _event_generator():
         q = broadcaster.subscribe()
         try:
+            # Flush the stream open IMMEDIATELY (before the first status query) so
+            # the browser's EventSource leaves "pending" and fires onopen at once.
+            # On a cold-cache scope the snapshot query below can take a few ms; we
+            # don't want the connection itself to appear slow while it runs. The
+            # client ignores comment frames (it only acts on "data: " lines), so
+            # this changes nothing visible — it just unblocks the connection and
+            # forces any proxy buffer to flush right away.
+            yield ": connected\n\n"
+
             yield await _payload()
             last_push = time.monotonic()
 

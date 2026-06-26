@@ -11,7 +11,7 @@ import { getLogs, getDevices, getUsers, fmtTime, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { smartMatch } from "@/lib/smartSearch";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import type { LogEvent, Device, User } from "@/types";
 
 const EVENT_ICON: Record<string, React.ReactNode> = {

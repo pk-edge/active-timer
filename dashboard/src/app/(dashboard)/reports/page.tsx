@@ -1,14 +1,27 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import { useState, useMemo } from "react";
+import dynamic from "next/dynamic";
 import useSWR from "swr";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import {
   getCompanySummary, getTopApps, getDevices,
   getDeviceSummary, getDeviceTopApps, fmtSeconds,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
+
+// Lazy: the per-day bar chart pulls in recharts only when it actually renders.
+const DailyActiveBarChart = dynamic(() => import("./_components/DailyActiveBarChart"), {
+  ssr: false,
+  loading: () => (
+    <div className="h-32 sm:h-40 animate-pulse flex items-end gap-2">
+      {[55, 80, 40, 90, 65, 50, 75].map((p, i) => (
+        <div key={i} className="flex-1 bg-gray-100 rounded-t" style={{ height: `${p}%` }} />
+      ))}
+    </div>
+  ),
+});
 import { Search, X, ChevronDown } from "lucide-react";
 import type { CompanyDay, AppUsage, Device } from "@/types";
 
@@ -30,7 +43,7 @@ export default function ReportsPage() {
   const summaryKey = deviceId ? ["device-summary", deviceId, days] : ["summary", days];
   const appsKey    = deviceId ? ["device-apps",   deviceId, days]  : ["top-apps", days];
 
-  const { data: summary } = useSWR<CompanyDay[]>(
+  const { data: summary, isLoading: summaryLoading } = useSWR<CompanyDay[]>(
     summaryKey,
     () => deviceId ? getDeviceSummary(deviceId, days) : getCompanySummary(days),
   );
@@ -50,6 +63,7 @@ export default function ReportsPage() {
 
   if (loading) return <PageLoader />;
   if (!can("reports", "view")) return <AccessDenied label="Reports" />;
+  if (summaryLoading && !summary) return <PageSkeleton variant="dashboard" cards={2} />;
 
   return (
     /* Outer: fills the flex-col main, no overflow — all scroll happens inside */
@@ -129,36 +143,7 @@ export default function ReportsPage() {
         <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 pt-4 pb-3 shadow-sm">
           <p className="text-sm font-semibold text-gray-800 mb-2">Active time per day</p>
           {/* h-32 on mobile (128px), h-40 on sm+ (160px) */}
-          <div className="h-32 sm:h-40">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={[...summary].reverse()} barCategoryGap="35%">
-                <XAxis
-                  dataKey="date"
-                  tick={{ fill: "#9ca3af", fontSize: 10 }}
-                  axisLine={false}
-                  tickLine={false}
-                />
-                <YAxis
-                  tickFormatter={v => `${Math.floor(v / 3600)}h`}
-                  tick={{ fill: "#9ca3af", fontSize: 10 }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={26}
-                />
-                <Tooltip
-                  formatter={(v: number) => [fmtSeconds(v), "Active"]}
-                  contentStyle={{
-                    background: "#fff",
-                    border: "1px solid #e5e7eb",
-                    borderRadius: 8,
-                    fontSize: 12,
-                    color: "#111827",
-                  }}
-                />
-                <Bar dataKey="active_seconds" fill="#4a0f70" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          <DailyActiveBarChart data={summary} />
         </div>
       )}
 

@@ -1,16 +1,22 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
-import { format, subDays } from "date-fns";
-import { useState, useMemo } from "react";
+import { format } from "date-fns";
+import { useState, useMemo, useEffect } from "react";
 import useSWR from "swr";
+import dynamic from "next/dynamic";
 import { Globe, Download, MoreHorizontal, ExternalLink, ChevronLeft } from "lucide-react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { getWebsites, getWebsiteDetail } from "@/lib/api";
+
+// Lazy: the per-site visits chart loads recharts only when the "Usage" tab opens.
+const UsageLineChart = dynamic(() => import("./_components/UsageLineChart"), {
+  ssr: false,
+  loading: () => <div className="h-[220px] animate-pulse bg-gray-50 rounded-lg" />,
+});
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
-  DurationRow, ProdIcon, fmtDur, exportCsv,
+  DurationRow, ProdIcon, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
   type DateRange } from "@/components/UsagePageShell";
 import type { WebsiteItem, WebsiteDetailOut } from "@/types";
 
@@ -94,19 +100,7 @@ function DetailPanel({
           <div className="pt-2">
             {(data?.usage ?? []).length === 0
               ? <p className="text-sm text-gray-600 py-8 text-center">No data.</p>
-              : (
-                <ResponsiveContainer width="100%" height={220}>
-                  <LineChart data={data?.usage ?? []}>
-                    <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} width={30} />
-                    <Tooltip
-                      formatter={(v: number) => [v, "Visits"]}
-                      contentStyle={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 11 }}
-                    />
-                    <Line type="monotone" dataKey="visits" stroke={item.color} strokeWidth={2} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              )}
+              : <UsageLineChart data={data?.usage ?? []} color={item.color} />}
           </div>
         )}
       </div>
@@ -119,7 +113,8 @@ function DetailPanel({
 export default function WebsiteUsagePage() {
   const { loading, can } = useUser();
   const [search,       setSearch]       = useState("");
-  const [dateRange, setDateRange] = useState<DateRange>({ since: format(subDays(new Date(), 29), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
+  // Default to TODAY only (cheap single-day query; widen via the filter for history).
+  const [dateRange, setDateRange] = useState<DateRange>({ since: format(new Date(), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
   const [groupId,      setGroupId]      = useState("");
   const [employeeId,   setEmployeeId]   = useState("");
   const [productivity, setProductivity] = useState("");
@@ -139,6 +134,14 @@ export default function WebsiteUsagePage() {
       i.host.toLowerCase().includes(q) || (i.category_name ?? "").toLowerCase().includes(q)
     );
   }, [data, search]);
+
+  // Client-side pagination over the (today-scoped) list — keeps the DOM light.
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [search, dateRange.since, dateRange.until, groupId, employeeId, productivity]);
+  const paged = useMemo(
+    () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
+    [filtered, page],
+  );
 
   function doExport() {
     exportCsv(
@@ -217,7 +220,7 @@ export default function WebsiteUsagePage() {
               <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
             ) : filtered.length === 0 ? (
               <p className="text-sm text-gray-600 py-12 text-center">No websites found.</p>
-            ) : filtered.map(item => (
+            ) : paged.map(item => (
               <button
                 key={item.host}
                 onClick={() => setSelected(prev => prev?.host === item.host ? null : item)}
@@ -238,6 +241,7 @@ export default function WebsiteUsagePage() {
               </button>
             ))}
           </div>
+          <Pager page={page} total={filtered.length} onPage={setPage} />
         </div>
 
         {/* Right — detail panel. Full-width on mobile, side panel on desktop. */}

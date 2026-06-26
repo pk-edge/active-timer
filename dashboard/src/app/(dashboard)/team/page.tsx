@@ -1,12 +1,14 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import { useState, useEffect } from "react";
 import useSWR from "swr";
 import { ChevronDown, RefreshCw, Users2, Wifi, Coffee, WifiOff } from "lucide-react";
 import { getOverview, getHomeAppUsage, getGroups, fmtSeconds } from "@/lib/api";
 import GroupPicker from "@/components/GroupPicker";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied, StatusDonut, ActivityTrend, UsagePie } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
+import { StatusDonut, ActivityTrend, UsagePie } from "@/components/charts";
 import type { Group, OverviewStats, AppUsage } from "@/types";
 
 export default function TeamPage() {
@@ -35,6 +37,8 @@ export default function TeamPage() {
 
   if (loading) return <PageLoader />;
   if (!can("home", "view")) return <AccessDenied label="Team Management" />;
+  // Cold load: wait for groups, then for the selected group's stats.
+  if (!groups || (groupId && !stats)) return <PageSkeleton variant="dashboard" />;
 
   const s = stats?.status ?? { active: 0, passive: 0, inactive: 0 };
   const avgHrs = ((stats?.avg_active_seconds_today ?? 0) / 3600).toFixed(1);

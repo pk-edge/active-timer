@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { getUserActivityDetail, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import MeetingsCard from "@/components/MeetingsCard";
 import type { UserActivityDetail } from "@/types";
 

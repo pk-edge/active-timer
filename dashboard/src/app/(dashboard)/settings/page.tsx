@@ -1,9 +1,10 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import { useState } from "react";
 import useSWR from "swr";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import { getCompanyInfo, updateCompanySettings, type CompanyInfo } from "@/lib/api";
 import {
   Building2, Activity, Bell, Link2,
@@ -74,7 +75,7 @@ export default function SettingsPage() {
   const [tokenVisible, setTokenVisible] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const { data: companyInfo, mutate: mutateCompany } = useSWR<CompanyInfo>("company-info", getCompanyInfo);
+  const { data: companyInfo, mutate: mutateCompany, isLoading } = useSWR<CompanyInfo>("company-info", getCompanyInfo);
   const [savingHeadless, setSavingHeadless] = useState(false);
   async function toggleHeadless(v: boolean) {
     if (savingHeadless) return;
@@ -118,6 +119,7 @@ export default function SettingsPage() {
 
   if (loading) return <PageLoader />;
   if (!can("settings", "view")) return <AccessDenied label="Settings" />;
+  if (isLoading && !companyInfo) return <PageSkeleton variant="list" rows={4} />;
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">

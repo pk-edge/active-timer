@@ -12,7 +12,7 @@ import {
   getUncategorized, fmtSeconds,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { AppCategory, UncategorizedItem } from "@/types";
 
@@ -195,7 +195,11 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
   const [tab,  setTab]            = useState<"apps" | "urls">("apps");
   const [search, setSearch]       = useState("");
   const [assigning, setAssigning] = useState<UncategorizedItem | null>(null);
-  const [expanded, setExpanded]   = useState(true);
+  // Collapsed by default so the page's initial load is a SINGLE request
+  // (just /v1/tech/categories). The heavy uncategorized scan only runs once
+  // the user actually opens this panel — keeping the slow query off the
+  // critical path entirely.
+  const [expanded, setExpanded]   = useState(false);
 
   // Derive since/until from the days preset (relative to today)
   const since = (() => {
@@ -204,8 +208,10 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
   })();
   const until = new Date().toISOString().slice(0, 10);
 
+  // Key is null until the panel is expanded → SWR suspends, no request fires on
+  // mount. Re-expanding within the dedupe window serves the cached result.
   const { data, mutate, isLoading } = useSWR(
-    ["uncategorized", days],
+    expanded ? ["uncategorized", days] : null,
     () => getUncategorized(since, until),
     { revalidateOnFocus: false },
   );

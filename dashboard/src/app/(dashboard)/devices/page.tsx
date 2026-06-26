@@ -1,21 +1,23 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
 import { useState, useMemo, useEffect } from "react";
-import useSWR from "swr";
+import useSWR, { mutate as globalMutate } from "swr";
 import Link from "next/link";
 import { formatDistanceToNow } from "date-fns";
 import {
-  getDevices, getUsers,
+  getDevices, getUsers, getOverview,
   assignDevice, archiveDevice, restoreDevice, deleteDevice,
 } from "@/lib/api";
+import type { OverviewStats } from "@/types";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { smartMatch } from "@/lib/smartSearch";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import { useDevicesPush } from "@/hooks/useDevicesPush";
 import {
   Monitor, Wifi, WifiOff, Search, X, Users2, Archive,
   RotateCcw, Trash2, UserRound, ChevronLeft, ChevronRight,
+  CheckSquare,
 } from "lucide-react";
 import type { Device, User } from "@/types";
 
@@ -181,6 +183,7 @@ function Pagination({
 function DeviceRow({
   device, employees, canAssign, canArchive, canDelete,
   onAssigned, onArchived, onRestored, onDeleted,
+  selected, onToggleSelect,
 }: {
   device: Device;
   employees: { id: string; name: string }[];
@@ -191,6 +194,8 @@ function DeviceRow({
   onArchived: () => void;
   onRestored: () => void;
   onDeleted: () => void;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
 }) {
   const [saving, setSaving] = useState(false);
   const showActions = canArchive || canDelete;
@@ -237,7 +242,19 @@ function DeviceRow({
   }
 
   return (
-    <tr className={`border-b border-gray-100 last:border-0 hover:bg-gray-50/70 transition-colors ${device.is_archived ? "bg-amber-50/20" : ""}`}>
+    <tr className={`border-b border-gray-100 last:border-0 hover:bg-gray-50/70 transition-colors ${selected ? "bg-brand-50/40" : device.is_archived ? "bg-amber-50/20" : ""}`}>
+
+      {/* Checkbox */}
+      {canDelete && onToggleSelect && (
+        <td className="pl-4 pr-1 py-3.5 w-8 shrink-0">
+          <input
+            type="checkbox"
+            checked={selected ?? false}
+            onChange={() => onToggleSelect(device.id)}
+            className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-400 cursor-pointer"
+          />
+        </td>
+      )}
 
       {/* Hostname */}
       <td className="px-4 py-3.5">
@@ -357,17 +374,34 @@ type RowCallbacks = {
   onArchived: () => void;
   onRestored: () => void;
   onDeleted: () => void;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (id: string) => void;
+  onToggleAll?: (ids: string[], checked: boolean) => void;
 };
 
 function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) {
   const showActions = row.canArchive || row.canDelete;
-  const colCount = 5 + (showActions ? 1 : 0);
+  const colCount = 5 + (showActions ? 1 : 0) + (row.canDelete ? 1 : 0);
+
+  const allSelected = devices.length > 0 && devices.every(d => row.selectedIds?.has(d.id));
+  const someSelected = !allSelected && devices.some(d => row.selectedIds?.has(d.id));
 
   return (
     <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
       <table className="w-full min-w-[640px]">
         <thead>
           <tr className="bg-gray-50 border-b border-gray-200">
+            {row.canDelete && (
+              <th className="pl-4 pr-1 py-3 w-8">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  ref={el => { if (el) el.indeterminate = someSelected; }}
+                  onChange={e => row.onToggleAll?.(devices.map(d => d.id), e.target.checked)}
+                  className="w-4 h-4 rounded border-gray-300 text-brand-600 focus:ring-brand-400 cursor-pointer"
+                />
+              </th>
+            )}
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Hostname</th>
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Employee</th>
@@ -380,7 +414,13 @@ function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) 
         </thead>
         <tbody>
           {devices.map(d => (
-            <DeviceRow key={d.id} device={d} {...row} />
+            <DeviceRow
+              key={d.id}
+              device={d}
+              {...row}
+              selected={row.selectedIds?.has(d.id)}
+              onToggleSelect={row.onToggleSelect}
+            />
           ))}
           {devices.length === 0 && (
             <tr>
@@ -404,11 +444,30 @@ export default function DevicesPage() {
   const [view, setView]               = useState<"all" | "byUser">("all");
   const [showArchived, setShowArchived] = useState(false);
   const [page, setPage]               = useState(1);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const canArchive  = can("devices", "archive");
   const canDelete   = can("devices", "delete");
   const canAssign   = can("devices", "assign") && can("users", "view");
   const showActions = canArchive || canDelete;
+
+  function toggleSelect(id: string) {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll(ids: string[], checked: boolean) {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (checked) ids.forEach(id => next.add(id));
+      else ids.forEach(id => next.delete(id));
+      return next;
+    });
+  }
 
   useDevicesPush(showArchived);
 
@@ -416,15 +475,52 @@ export default function DevicesPage() {
   const { data: devices, isLoading, mutate } = useSWR<Device[]>(
     swrKey,
     () => getDevices(showArchived),
-    { refreshInterval: 5_000, revalidateOnFocus: true, revalidateOnReconnect: true },
+    { refreshInterval: 60_000, revalidateOnFocus: true, revalidateOnReconnect: true },
   );
 
   const { data: users } = useSWR<User[]>(canAssign ? "users-for-assign" : null, () => getUsers());
   const employees = useMemo(() => (users ?? []).map(u => ({ id: u.id, name: u.name })), [users]);
 
-  const online   = devices?.filter(d => d.is_online).length ?? 0;
-  const archived = devices?.filter(d => d.is_archived).length ?? 0;
-  const offline  = devices?.filter(d => !d.is_online && !d.is_archived).length ?? 0;
+  // Same source as home page so "Online" stat card stays in sync.
+  const { data: overviewStats } = useSWR<OverviewStats>(
+    "home-overview-base",
+    () => getOverview(undefined, 7),
+    { refreshInterval: 30_000, revalidateOnFocus: false },
+  );
+
+  function invalidateHomeCounts() {
+    // Revalidate both the home page's keyed cache and the devices page's base cache.
+    globalMutate(
+      (key: unknown) => Array.isArray(key) && key[0] === "home-overview",
+      undefined,
+      { revalidate: true },
+    );
+    globalMutate("home-overview-base", undefined, { revalidate: true });
+  }
+
+  async function handleBulkDelete() {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    if (!confirm(`Permanently delete ${ids.length} device${ids.length !== 1 ? "s" : ""}? If agents are still running they can re-register.`)) return;
+    setBulkDeleting(true);
+    try {
+      await Promise.all(ids.map(id => deleteDevice(id)));
+      setSelectedIds(new Set());
+      await mutate();
+      invalidateHomeCounts();
+    } catch (e) {
+      alert(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
+  // Use the home overview endpoint for stat cards — same source as the home page.
+  const ovStatus  = overviewStats?.status;
+  const online    = ovStatus ? (ovStatus.active + ovStatus.passive) : (devices?.filter(d => d.is_online).length ?? 0);
+  const archived  = devices?.filter(d => d.is_archived).length ?? 0;
+  const ovTotal   = overviewStats?.total_devices;
+  const offline   = ovTotal != null ? Math.max(0, ovTotal - online - archived) : (devices?.filter(d => !d.is_online && !d.is_archived).length ?? 0);
 
   const debouncedSearch = useDebouncedValue(search, 200);
 
@@ -468,7 +564,7 @@ export default function DevicesPage() {
   if (!can("devices", "view"))       return <AccessDenied label="Devices" />;
   if (isLoading)                     return <TableSkeleton />;
 
-  const activeCount = (devices?.length ?? 0) - archived;
+  const activeCount = ovTotal ?? ((devices?.length ?? 0) - archived);
 
   const rowProps: RowCallbacks = {
     employees,
@@ -478,7 +574,10 @@ export default function DevicesPage() {
     onAssigned: () => mutate(),
     onArchived: () => mutate(),
     onRestored: () => mutate(),
-    onDeleted:  () => mutate(),
+    onDeleted:  () => { mutate(); invalidateHomeCounts(); },
+    selectedIds,
+    onToggleSelect: toggleSelect,
+    onToggleAll: toggleAll,
   };
 
   return (
@@ -523,7 +622,35 @@ export default function DevicesPage() {
           </div>
         </div>
       </div>
-      <p className="text-gray-500 text-sm mb-6">Live — refreshes every 5 seconds</p>
+      <div className="mb-6" />
+
+      {/* ── Bulk-action bar (appears when ≥1 device selected) ── */}
+      {canDelete && selectedIds.size > 0 && (
+        <div className="flex items-center justify-between gap-3 mb-4 px-4 py-3 bg-brand-50 border border-brand-200 rounded-xl shadow-sm">
+          <div className="flex items-center gap-2">
+            <CheckSquare size={16} className="text-brand-600" />
+            <span className="text-sm font-medium text-brand-800">
+              {selectedIds.size} device{selectedIds.size !== 1 ? "s" : ""} selected
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setSelectedIds(new Set())}
+              className="text-xs text-gray-600 hover:text-gray-800 px-3 py-1.5 rounded-lg border border-gray-200 bg-white transition"
+            >
+              Clear selection
+            </button>
+            <button
+              onClick={handleBulkDelete}
+              disabled={bulkDeleting}
+              className="flex items-center gap-1.5 text-xs font-medium text-white bg-red-500 hover:bg-red-600 px-3 py-1.5 rounded-lg transition disabled:opacity-50"
+            >
+              <Trash2 size={13} />
+              {bulkDeleting ? "Deleting…" : `Delete ${selectedIds.size} device${selectedIds.size !== 1 ? "s" : ""}`}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Stat cards (global — not part of pagination) ── */}
       <div className={`grid gap-4 mb-6 ${showArchived && canArchive ? "grid-cols-4" : "grid-cols-3"}`}>

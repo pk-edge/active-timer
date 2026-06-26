@@ -1,16 +1,16 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
-import { format, subDays } from "date-fns";
-import { useState, useMemo } from "react";
+import { format } from "date-fns";
+import { useState, useMemo, useEffect } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { ArrowUpRight, ChevronLeft } from "lucide-react";
 import { getCategoryUsage, getCategoryUsageDetail } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
-  DurationRow, fmtDur, exportCsv,
+  DurationRow, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
   type DateRange } from "@/components/UsagePageShell";
 import type { CategoryUsageItem, CategoryUsageDetailOut } from "@/types";
 
@@ -102,7 +102,8 @@ function DetailPanel({
 export default function CategoryUsagePage() {
   const { loading, can } = useUser();
   const [search,      setSearch]      = useState("");
-  const [dateRange, setDateRange] = useState<DateRange>({ since: format(subDays(new Date(), 29), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
+  // Default to TODAY only (cheap single-day query; widen via the filter for history).
+  const [dateRange, setDateRange] = useState<DateRange>({ since: format(new Date(), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
   const [groupId,     setGroupId]     = useState("");
   const [employeeId,  setEmployeeId]  = useState("");
   const [summaryMode, setSummaryMode] = useState(true);
@@ -119,6 +120,14 @@ export default function CategoryUsagePage() {
     const q = search.toLowerCase();
     return items.filter(i => i.name.toLowerCase().includes(q));
   }, [data, search]);
+
+  // Client-side pagination over the (today-scoped) list — keeps the DOM light.
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [search, dateRange.since, dateRange.until, groupId, employeeId]);
+  const paged = useMemo(
+    () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
+    [filtered, page],
+  );
 
   function doExport() {
     exportCsv(
@@ -193,7 +202,7 @@ export default function CategoryUsagePage() {
               <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
             ) : filtered.length === 0 ? (
               <p className="text-sm text-gray-600 py-12 text-center">No categories found.</p>
-            ) : filtered.map(item => (
+            ) : paged.map(item => (
               <button
                 key={item.name}
                 onClick={() => setSelected(prev => prev?.name === item.name ? null : item)}
@@ -211,6 +220,7 @@ export default function CategoryUsagePage() {
               </button>
             ))}
           </div>
+          <Pager page={page} total={filtered.length} onPage={setPage} />
         </div>
 
         {/* Right — detail panel. Full-width on mobile, side panel on desktop. */}
