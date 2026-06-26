@@ -1,5 +1,6 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import {
@@ -12,7 +13,7 @@ import {
   getDetectedUrls, getDevices, getUsers,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { BlockedUrl, Device, User } from "@/types";
 
@@ -389,7 +390,7 @@ export default function PoliciesPage() {
   const [search,   setSearch]   = useState("");
   const [filter,   setFilter]   = useState<"all" | "active" | "inactive">("active");
 
-  const { data: rules,   mutate } = useSWR<BlockedUrl[]>("blocked-urls", () => getBlockedUrls());
+  const { data: rules,   mutate, isLoading: rulesLoading } = useSWR<BlockedUrl[]>("blocked-urls", () => getBlockedUrls());
   const { data: devices }         = useSWR<Device[]>("devices", getDevices);
   const { data: users }           = useSWR<User[]>("users-policy", () => getUsers());
 
@@ -422,6 +423,7 @@ export default function PoliciesPage() {
 
   if (loading) return <PageLoader />;
   if (!can("policy", "view")) return <AccessDenied label="URL Policies" />;
+  if (rulesLoading && !rules) return <PageSkeleton variant="table" />;
 
   const totalActive   = (rules ?? []).filter(r => r.is_active).length;
   const totalInactive = (rules ?? []).filter(r => !r.is_active).length;

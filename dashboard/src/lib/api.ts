@@ -24,10 +24,17 @@ function authHeaders(): HeadersInit {
   };
 }
 
+/** Thrown when a read is aborted — kept for any caller that checks for it. */
+export class AbortedError extends Error {
+  readonly aborted = true;
+  constructor() {
+    super("Request aborted");
+    this.name = "AbortedError";
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    // Always hit the network — analytics data must never be served stale from
-    // the browser/HTTP cache when the user (or SWR) explicitly refetches.
     cache: "no-store",
     ...init,
     headers: { ...authHeaders(), ...init?.headers },
@@ -42,7 +49,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
-    // Surface detail message from FastAPI JSON errors so callers can inspect them.
     const body = await res.text();
     let msg = `${res.status}: ${body}`;
     try {

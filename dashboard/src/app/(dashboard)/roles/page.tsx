@@ -5,7 +5,8 @@ import useSWR from "swr";
 import { Shield, Plus, Pencil, Trash2, X } from "lucide-react";
 import { getRoles, getModules, createRole, updateRole, deleteRole } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
+import PageSkeleton from "@/components/PageSkeleton";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { Role, ModuleDef, Permission } from "@/types";
 
@@ -135,7 +136,7 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
 
 export default function RolesPage() {
   const { loading, can } = useUser();
-  const { data: roles, mutate } = useSWR<Role[]>("roles", getRoles);
+  const { data: roles, mutate, isLoading } = useSWR<Role[]>("roles", getRoles);
   const { data: modules } = useSWR<ModuleDef[]>("modules", getModules);
   const [editing,       setEditing]      = useState<Role | null | "new">(null);
   const [pendingDelete, setPendingDelete] = useState<Role | null>(null);
@@ -143,6 +144,7 @@ export default function RolesPage() {
 
   if (loading) return <PageLoader />;
   if (!can("roles", "view")) return <AccessDenied label="Roles" />;
+  if (isLoading && !roles) return <PageSkeleton variant="list" rows={5} />;
 
   async function confirmDelete() {
     if (!pendingDelete) return;

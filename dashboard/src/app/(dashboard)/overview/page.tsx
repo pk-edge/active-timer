@@ -1,11 +1,13 @@
 "use client";
-import PageLoader from "@/components/PageLoader";
 import { useState } from "react";
 import useSWR from "swr";
 import { Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon } from "lucide-react";
-import { getOverview, fmtSeconds } from "@/lib/api";
+import { getOverview } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied, StatusDonut, ActivityTrend } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
+import { StatusDonut, ActivityTrend } from "@/components/charts";
+import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import type { OverviewStats } from "@/types";
 
 const PERIODS = [{ label: "7 days", value: 7 }, { label: "14 days", value: 14 }, { label: "30 days", value: 30 }];
@@ -25,28 +27,46 @@ function StatusRow({ icon, label, value, color }: { icon: React.ReactNode; label
 export default function OverviewPage() {
   const { loading, can } = useUser();
   const [days, setDays] = useState(7);
-  const { data, isLoading } = useSWR<OverviewStats>(
+
+  const { data, isLoading, isValidating } = useSWR<OverviewStats>(
     ["overview", days],
     () => getOverview(undefined, days),
-    { refreshInterval: 15_000 },
+    {
+      // Trend data is daily aggregates — no need to re-scan every 15 s.
+      // 60 s keeps "active right now" counts reasonably fresh without
+      // hammering the backend on every open dashboard tab.
+      refreshInterval: 60_000,
+      // Collapse any same-key requests that arrive within 10 s (e.g. rapid
+      // tab-switches or React StrictMode double-invocations).
+      dedupingInterval: 10_000,
+    },
   );
 
   if (loading) return <PageLoader />;
   if (!can("home", "view")) return <AccessDenied label="the Organization Overview" />;
+  // Cold load: show skeleton instead of a flash of zeros.
+  // keepPreviousData (global SWR config) serves cached data on re-navigation,
+  // so the skeleton only appears on the very first visit.
+  if (isLoading && !data) return <PageSkeleton variant="dashboard" />;
 
   const s = data?.status ?? { active: 0, passive: 0, inactive: 0 };
   const avgHrs = ((data?.avg_active_seconds_today ?? 0) / 3600).toFixed(1);
+  // isValidating is true during background revalidation (data is already shown).
+  const isRefreshing = isValidating && !!data;
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Organization Overview</h1>
+        {isRefreshing && (
+          <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+        )}
       </div>
       <p className="text-gray-600 text-sm mb-6">
         Live activity across all devices · <span className="text-gray-700 font-medium">{avgHrs} avg active hours today</span>
       </p>
 
-      {/* Top stat cards */}
+      {/* Top stat cards — rendered from cached data; no skeleton flash on period switch */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
           <p className="text-2xl font-bold text-gray-900">{data?.total_devices ?? 0}</p>
@@ -83,7 +103,7 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        {/* Active hours trend */}
+        {/* Active hours trend — skeleton shown while new period data loads */}
         <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
@@ -99,7 +119,10 @@ export default function OverviewPage() {
               ))}
             </div>
           </div>
-          {isLoading ? <div className="h-[180px] animate-pulse bg-gray-50 rounded" /> : <ActivityTrend data={data?.trend ?? []} />}
+          {isLoading && !data
+            ? <div className="h-[180px] animate-pulse bg-gray-50 rounded" />
+            : <ActivityTrend data={data?.trend ?? []} />
+          }
         </div>
       </div>
     </div>
