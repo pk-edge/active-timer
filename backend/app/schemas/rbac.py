@@ -65,6 +65,7 @@ class UserOut(BaseModel):
     is_approved: bool = True
     group_ids: list[str] = []
     device_count: int = 0
+    created_at: Optional[str] = None
 
 
 class RegisterRequest(BaseModel):
@@ -94,14 +95,27 @@ class ApproveRequest(BaseModel):
 class GroupIn(BaseModel):
     name: str
     description: Optional[str] = None
+    parent_id: Optional[str] = None
 
 
 class GroupOut(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
+    parent_id: Optional[str] = None
+    path: Optional[str] = None
+    is_archived: bool = False
     member_count: int = 0
+    child_count: int = 0
     created_at: Optional[str] = None
+
+
+class GroupChildOut(BaseModel):
+    id: str
+    name: str
+    member_count: int = 0
+    child_count: int = 0
+    is_archived: bool = False
 
 
 class MemberIn(BaseModel):
@@ -120,6 +134,8 @@ class MemberOut(BaseModel):
 
 class GroupDetailOut(GroupOut):
     members: list[MemberOut] = []
+    children: list[GroupChildOut] = []
+    breadcrumb: list[GroupChildOut] = []
 
 
 class ImportResult(BaseModel):

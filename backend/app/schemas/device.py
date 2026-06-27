@@ -14,12 +14,21 @@ class DeviceOut(BaseModel):
     is_online:      bool
     is_archived:    bool = False
     is_deleted:     bool = False
+    # Agent visibility: raw per-device override (None = inherit company default)
+    # and the effective value the agent actually applies.
+    headless_override: Optional[bool] = None
+    headless:          bool = False
 
     model_config = {"from_attributes": True}
 
 
 class AssignDeviceRequest(BaseModel):
     employee_id: Optional[str] = None   # null/omitted = unassign
+
+
+class HeadlessRequest(BaseModel):
+    # null = inherit the company default; true/false = force this device.
+    override: Optional[bool] = None
 
 
 class TimelineEventOut(BaseModel):

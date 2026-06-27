@@ -26,11 +26,15 @@ BASE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _bundle_resources() -> Optional[Path]:
-    """Return the bundle resources directory when running as a frozen app."""
+    """Return the directory where bundled data files (backends.json, etc.) live."""
     if not getattr(sys, "frozen", False):
         return None
-    if sys.platform == "darwin":
-        return Path(sys.executable).parent.parent / "Resources"
+    # PyInstaller sets sys._MEIPASS to wherever it extracts datas at runtime.
+    # This is the authoritative location on both macOS and Windows.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    # Fallback for older one-file builds that don't expose _MEIPASS.
     return Path(sys.executable).parent / "_internal"
 
 
@@ -115,10 +119,12 @@ class Config:
     UPDATE_CHECK_ENDPOINT:  str = f"{API_BASE}/v1/updates/check"
     POLICY_ENDPOINT:        str = f"{API_BASE}/v1/policy/blocked-urls"
     DEVICE_TODAY_ENDPOINT:  str = f"{API_BASE}/v1/home/device-today-active"
+    AGENT_CONFIG_ENDPOINT:  str = f"{API_BASE}/v1/agent/config"
 
     # ── Auto-update ──────────────────────────────────────────────────────────
     AUTO_UPDATE_ENABLED: bool = os.environ.get("TT_AUTO_UPDATE", "1") != "0"
     UPDATE_CHECK_SECS:   int  = 6 * 3600   # poll for updates every 6 hours
+    AGENT_CONFIG_SECS:   int  = 60         # poll admin agent-config (headless) every 60s
 
     # ── Local storage ────────────────────────────────────────────────────────
     DB_PATH:        Path = BASE_DIR / "queue.db"

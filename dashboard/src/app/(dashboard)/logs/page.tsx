@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import useSWR from "swr";
@@ -8,9 +9,10 @@ import {
   Search, X, ChevronDown } from "lucide-react";
 import { getLogs, getDevices, getUsers, fmtTime, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartMatch } from "@/lib/smartSearch";
+import { AccessDenied } from "@/components/AccessDenied";
 import type { LogEvent, Device, User } from "@/types";
-import RefreshButton from "@/components/RefreshButton";
 
 const EVENT_ICON: Record<string, React.ReactNode> = {
   window_change: <Monitor      size={13} />,
@@ -25,8 +27,8 @@ const EVENT_COLOR: Record<string, string> = {
   url_visit:     "bg-purple-50 text-purple-700 border-purple-200",
   lock:          "bg-red-50 text-red-700 border-red-200",
   unlock:        "bg-green-50 text-green-700 border-green-200",
-  idle_start:    "bg-gray-100 text-gray-500 border-gray-200",
-  idle_end:      "bg-gray-50 text-gray-500 border-gray-200" };
+  idle_start:    "bg-gray-100 text-gray-600 border-gray-200",
+  idle_end:      "bg-gray-50 text-gray-600 border-gray-200" };
 
 const EVENT_ROW_BG: Record<string, string> = {
   window_change: "hover:bg-brand-50/40",
@@ -49,7 +51,7 @@ const EVENT_TYPES = [
 ];
 
 function EventBadge({ type }: { type: string }) {
-  const cls = EVENT_COLOR[type] ?? "bg-gray-100 text-gray-500 border-gray-200";
+  const cls = EVENT_COLOR[type] ?? "bg-gray-100 text-gray-600 border-gray-200";
   return (
     <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full border ${cls}`}>
       {EVENT_ICON[type]}
@@ -62,7 +64,7 @@ function LogRow({ e }: { e: LogEvent }) {
   const rowBg = EVENT_ROW_BG[e.event_type] ?? "hover:bg-gray-50";
   return (
     <tr className={`border-b border-gray-100 transition ${rowBg}`}>
-      <td className="py-3 px-4 text-xs text-gray-500 whitespace-nowrap font-mono">
+      <td className="py-3 px-4 text-xs text-gray-600 whitespace-nowrap font-mono">
         {fmtTime(e.timestamp_unix)}
       </td>
       <td className="py-3 px-4 whitespace-nowrap">
@@ -74,7 +76,7 @@ function LogRow({ e }: { e: LogEvent }) {
             <span className="text-sm font-medium text-gray-800 truncate">{e.app_name}</span>
           )}
           {e.window_title && (
-            <span className="text-xs text-gray-400 truncate" title={e.window_title}>
+            <span className="text-xs text-gray-600 truncate" title={e.window_title}>
               {e.window_title}
             </span>
           )}
@@ -84,24 +86,24 @@ function LogRow({ e }: { e: LogEvent }) {
             </span>
           )}
           {!e.app_name && !e.window_title && !e.url && (
-            <span className="text-xs text-gray-400 italic">{e.event_type}</span>
+            <span className="text-xs text-gray-600 italic">{e.event_type}</span>
           )}
         </div>
       </td>
-      <td className="py-3 px-4 text-xs text-gray-500 whitespace-nowrap">
+      <td className="py-3 px-4 text-xs text-gray-600 whitespace-nowrap">
         {e.duration > 0
           ? <span className="bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full font-medium">{fmtSeconds(e.duration)}</span>
-          : <span className="text-gray-300">—</span>}
+          : <span className="text-gray-500">—</span>}
       </td>
       <td className="py-3 px-4 text-xs whitespace-nowrap">
         {e.employee_name
           ? <span className="font-medium text-gray-700">{e.employee_name}</span>
-          : <span className="text-gray-300">—</span>}
+          : <span className="text-gray-500">—</span>}
       </td>
       <td className="py-3 px-4 text-xs whitespace-nowrap">
         <Link
           href={`/devices/${e.device_id}`}
-          className="text-gray-500 hover:text-brand-600 transition font-medium"
+          className="text-gray-600 hover:text-brand-600 transition font-medium"
         >
           {e.hostname}
         </Link>
@@ -134,32 +136,27 @@ export default function LogsPage() {
     return opts;
   })();
 
-  const { data: logs, isLoading, mutate } = useSWR<LogEvent[]>(
+  const { data: logs, isLoading } = useSWR<LogEvent[]>(
     ["logs", selDate, selDevice, selUser, selType],
     () => getLogs(logsOpts),
     { refreshInterval: 15_000 },
   );
 
+  const debouncedSearch = useDebouncedValue(search, 200);
   const filtered = useMemo(() => {
     if (!logs) return [];
-    if (!search.trim()) return logs;
-    const q = search.toLowerCase();
-    return logs.filter(
-      e =>
-        (e.app_name      ?? "").toLowerCase().includes(q) ||
-        (e.window_title  ?? "").toLowerCase().includes(q) ||
-        (e.url           ?? "").toLowerCase().includes(q) ||
-        (e.employee_name ?? "").toLowerCase().includes(q) ||
-        e.hostname.toLowerCase().includes(q),
+    if (!debouncedSearch.trim()) return logs;
+    return logs.filter(e =>
+      smartMatch(debouncedSearch, e.app_name, e.window_title, e.url, e.employee_name, e.hostname),
     );
-  }, [logs, search]);
+  }, [logs, debouncedSearch]);
 
   const counts = logs?.reduce<Record<string, number>>((acc, e) => {
     acc[e.event_type] = (acc[e.event_type] ?? 0) + 1;
     return acc;
   }, {});
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("logs", "view")) return <AccessDenied label="Activity Logs" />;
 
   return (
@@ -168,9 +165,8 @@ export default function LogsPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6 shrink-0">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Activity Logs</h1>
-          <p className="text-gray-500 text-sm mt-0.5">Live feed — refreshes every 15 s</p>
+          <p className="text-gray-600 text-sm mt-0.5">Live feed — refreshes every 15 s</p>
         </div>
-        <RefreshButton onRefresh={() => mutate()} />
       </div>
 
       {/* Filters row */}
@@ -178,7 +174,7 @@ export default function LogsPage() {
         <div className="flex flex-wrap gap-3 items-center">
           {/* Date */}
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500 font-medium">Date</label>
+            <label className="text-xs text-gray-600 font-medium">Date</label>
             <input
               type="date"
               value={selDate}
@@ -190,7 +186,7 @@ export default function LogsPage() {
 
           {/* Device */}
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500 font-medium">Device</label>
+            <label className="text-xs text-gray-600 font-medium">Device</label>
             <div className="relative">
               <select
                 value={selDevice}
@@ -204,13 +200,13 @@ export default function LogsPage() {
                   </option>
                 ))}
               </select>
-              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
             </div>
           </div>
 
           {/* User */}
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500 font-medium">User</label>
+            <label className="text-xs text-gray-600 font-medium">User</label>
             <div className="relative">
               <select
                 value={selUser}
@@ -222,13 +218,13 @@ export default function LogsPage() {
                   <option key={u.id} value={u.id}>{u.name || u.email}</option>
                 ))}
               </select>
-              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
             </div>
           </div>
 
           {/* Event type */}
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-500 font-medium">Event type</label>
+            <label className="text-xs text-gray-600 font-medium">Event type</label>
             <div className="relative">
               <select
                 value={selType}
@@ -240,15 +236,15 @@ export default function LogsPage() {
                   <option key={t} value={t}>{EVENT_LABEL[t] ?? t}</option>
                 ))}
               </select>
-              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
             </div>
           </div>
 
           {/* Smart search */}
           <div className="flex flex-col gap-1 flex-1 min-w-[200px]">
-            <label className="text-xs text-gray-500 font-medium">Search</label>
+            <label className="text-xs text-gray-600 font-medium">Search</label>
             <div className="relative">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
               <input
                 type="text"
                 placeholder="App, window title, URL, user, hostname…"
@@ -259,7 +255,7 @@ export default function LogsPage() {
               {search && (
                 <button
                   onClick={() => setSearch("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600"
                 >
                   <X size={13} />
                 </button>
@@ -287,7 +283,7 @@ export default function LogsPage() {
                   <span className="font-semibold">{count}</span>
                 </button>
               ))}
-            <span className="text-xs text-gray-400 ml-auto self-center">
+            <span className="text-xs text-gray-600 ml-auto self-center">
               {filtered.length}{search ? ` of ${logs?.length}` : ""} event{filtered.length !== 1 ? "s" : ""}
             </span>
           </div>
@@ -297,9 +293,9 @@ export default function LogsPage() {
       {/* Table — fills remaining height and scrolls internally */}
       <div className="flex-1 min-h-0 bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm flex flex-col">
         {isLoading ? (
-          <div className="py-16 text-center text-gray-400 text-sm animate-pulse">Loading activity…</div>
+          <div className="py-16 text-center text-gray-600 text-sm animate-pulse">Loading activity…</div>
         ) : !filtered.length ? (
-          <div className="py-16 text-center text-gray-400 text-sm">
+          <div className="py-16 text-center text-gray-600 text-sm">
             <Search size={32} className="mx-auto mb-3 text-gray-200" />
             {search ? "No events match your search." : "No activity found for the selected filters."}
           </div>
@@ -310,12 +306,12 @@ export default function LogsPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-gray-50">
-                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Time</th>
-                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Type</th>
-                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Activity</th>
-                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Duration</th>
-                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">User</th>
-                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide whitespace-nowrap">Device</th>
+                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Time</th>
+                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Type</th>
+                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">Activity</th>
+                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Duration</th>
+                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">User</th>
+                    <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Device</th>
                   </tr>
                 </thead>
               </table>

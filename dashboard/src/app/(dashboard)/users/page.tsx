@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState, useMemo, useEffect, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import useSWR from "swr";
@@ -9,8 +10,11 @@ import {
   getDevices, assignDevice, getUserActivity, fmtSeconds,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartMatch } from "@/lib/smartSearch";
+import { AccessDenied } from "@/components/AccessDenied";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { GroupCheckboxTree } from "@/components/GroupPicker";
 import type { User, UserActivity, Role, Group, Device } from "@/types";
 
 // ── Create / Edit modal ───────────────────────────────────────────────────────
@@ -70,21 +74,21 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h2 className="font-semibold text-gray-900">{user ? "Edit user" : "Add user"}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-600"><X size={18} /></button>
         </div>
         <div className="p-5 space-y-3 overflow-y-auto">
           <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Name</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Name</label>
             <input value={name} onChange={e => setName(e.target.value)}
                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Email</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Email</label>
             <input value={email} onChange={e => setEmail(e.target.value)} disabled={!!user} type="email"
                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm disabled:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-brand-300" />
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Role (login access)</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Role (login access)</label>
             <select value={roleId} onChange={e => setRoleId(e.target.value)}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300">
               <option value="">No dashboard login (monitored only)</option>
@@ -92,7 +96,7 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
             </select>
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">
+            <label className="block text-xs font-medium text-gray-600 mb-1">
               {user ? "Reset password (optional)" : "Password (optional)"}
             </label>
             <input value={password} onChange={e => setPass(e.target.value)} type="password" placeholder="••••••••"
@@ -100,45 +104,33 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
           </div>
           {showGroups && (
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Groups this user can view</label>
-              <div className="max-h-36 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-1">
-                {groups.length === 0 && <p className="text-xs text-gray-400 px-1">No groups yet.</p>}
-                {groups.map(g => (
-                  <label key={g.id} className="flex items-center gap-2 text-sm px-1 py-0.5 cursor-pointer">
-                    <input type="checkbox" className="accent-[#4a0f70]" checked={groupIds.has(g.id)}
-                           onChange={() => {
-                             const n = new Set(groupIds);
-                             n.has(g.id) ? n.delete(g.id) : n.add(g.id);
-                             setGroupIds(n);
-                           }} />
-                    {g.name}
-                  </label>
-                ))}
-              </div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Groups this user can view</label>
+              <p className="text-[11px] text-gray-500 mb-1.5">Access includes all subgroups beneath each selected group.</p>
+              <GroupCheckboxTree selected={groupIds} onChange={setGroupIds} />
             </div>
           )}
           {showDevices && (
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">
+              <label className="block text-xs font-medium text-gray-600 mb-1">
                 Devices ({myDevices.length})
               </label>
               <div className="border border-gray-200 rounded-lg divide-y divide-gray-100">
                 {myDevices.length === 0 && (
-                  <p className="text-xs text-gray-400 px-3 py-2.5">No devices linked yet.</p>
+                  <p className="text-xs text-gray-600 px-3 py-2.5">No devices linked yet.</p>
                 )}
                 {myDevices.map(d => (
                   <div key={d.id} className="flex items-center gap-2 px-3 py-2">
-                    <Monitor size={13} className="text-gray-400 shrink-0" />
+                    <Monitor size={13} className="text-gray-600 shrink-0" />
                     <div className="min-w-0 flex-1">
                       <p className="text-sm text-gray-800 truncate">{d.hostname}</p>
-                      <p className="text-[11px] text-gray-400 capitalize">
+                      <p className="text-[11px] text-gray-600 capitalize">
                         {d.platform} · {d.is_online ? "online" : "offline"}
                       </p>
                     </div>
                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${d.is_online ? "bg-green-500" : "bg-gray-300"}`} />
                     {canAssign && (
                       <button onClick={() => setDeviceOwner(d.id, null)} disabled={deviceBusy}
-                              className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-50 shrink-0"
+                              className="text-xs text-gray-600 hover:text-red-600 disabled:opacity-50 shrink-0"
                               title="Unlink device">
                         Unlink
                       </button>
@@ -203,15 +195,15 @@ function ApproveModal({ user: pending, roles, groups, onClose, onSaved }: {
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-md">
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h2 className="font-semibold text-gray-900">Approve registration</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-600"><X size={18} /></button>
         </div>
         <div className="p-5 space-y-3">
           <p className="text-sm text-gray-600">
             Approving <span className="font-medium text-gray-900">{pending.name}</span>{" "}
-            <span className="text-gray-400">({pending.email})</span> — assign a role to grant access.
+            <span className="text-gray-600">({pending.email})</span> — assign a role to grant access.
           </p>
           <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1">Role <span className="text-red-400">*</span></label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Role <span className="text-red-400">*</span></label>
             <select value={roleId} onChange={e => setRoleId(e.target.value)}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300">
               <option value="">Select a role…</option>
@@ -220,21 +212,9 @@ function ApproveModal({ user: pending, roles, groups, onClose, onSaved }: {
           </div>
           {showGroups && (
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Groups this user can view</label>
-              <div className="max-h-36 overflow-y-auto border border-gray-200 rounded-lg p-2 space-y-1">
-                {groups.length === 0 && <p className="text-xs text-gray-400 px-1">No groups yet.</p>}
-                {groups.map(g => (
-                  <label key={g.id} className="flex items-center gap-2 text-sm px-1 py-0.5 cursor-pointer">
-                    <input type="checkbox" className="accent-[#4a0f70]" checked={groupIds.has(g.id)}
-                           onChange={() => {
-                             const n = new Set(groupIds);
-                             n.has(g.id) ? n.delete(g.id) : n.add(g.id);
-                             setGroupIds(n);
-                           }} />
-                    {g.name}
-                  </label>
-                ))}
-              </div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Groups this user can view</label>
+              <p className="text-[11px] text-gray-500 mb-1.5">Access includes all subgroups beneath each selected group.</p>
+              <GroupCheckboxTree selected={groupIds} onChange={setGroupIds} />
             </div>
           )}
           {err && <p className="text-red-500 text-sm">{err}</p>}
@@ -270,8 +250,8 @@ function UsersPageInner() {
   const [editing, setEditing] = useState<User | null | "new">(null);
   const [approving, setApproving] = useState<User | null>(null);
 
-  const { data: users,   mutate: mutateUsers }   = useSWR<User[]>("users",         () => getUsers());
-  const { data: pending, mutate: mutatePending }  = useSWR<User[]>("users-pending", getPendingUsers);
+  const { data: users,   mutate: mutateUsers,  isLoading: usersLoading }   = useSWR<User[]>("users",         () => getUsers());
+  const { data: pending, mutate: mutatePending, isLoading: pendingLoading } = useSWR<User[]>("users-pending", getPendingUsers);
   const { data: roles }  = useSWR<Role[]>("roles-for-users",  getRoles);
   const { data: groups } = useSWR<Group[]>("groups-for-users", getGroups);
 
@@ -285,12 +265,12 @@ function UsersPageInner() {
     [activity],
   );
 
+  const debouncedSearch = useDebouncedValue(search, 200);
   const filteredActive = useMemo(() => {
     if (!users) return [];
-    if (!search.trim()) return users;
-    const q = search.toLowerCase();
-    return users.filter(u => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
-  }, [users, search]);
+    if (!debouncedSearch.trim()) return users;
+    return users.filter(u => smartMatch(debouncedSearch, u.name, u.email, u.role_name));
+  }, [users, debouncedSearch]);
 
   function refresh() { mutateUsers(); mutatePending(); }
 
@@ -320,7 +300,7 @@ function UsersPageInner() {
     finally { setActionLoading(false); }
   }
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("users", "view")) return <AccessDenied label="Users" />;
 
   const pendingCount = pending?.length ?? 0;
@@ -330,7 +310,7 @@ function UsersPageInner() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Users</h1>
-          <p className="text-gray-500 text-sm mt-0.5">{users?.length ?? 0} active</p>
+          <p className="text-gray-600 text-sm mt-0.5">{users?.length ?? 0} active</p>
         </div>
         {tab === "active" && can("users", "create") && (
           <button onClick={() => setEditing("new")}
@@ -344,11 +324,11 @@ function UsersPageInner() {
       <div className="flex items-center gap-4 mb-4">
         <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
           <button onClick={() => setTab("active")}
-                  className={`px-3 py-1.5 text-sm font-medium transition ${tab === "active" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
+                  className={`px-3 py-1.5 text-sm font-medium transition ${tab === "active" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"}`}>
             Active
           </button>
           <button onClick={() => setTab("pending")}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition ${tab === "pending" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"}`}>
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition ${tab === "pending" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"}`}>
             Pending
             {pendingCount > 0 && (
               <span className="bg-amber-100 text-amber-700 text-xs font-semibold px-1.5 py-0.5 rounded-full">{pendingCount}</span>
@@ -358,10 +338,10 @@ function UsersPageInner() {
 
         {tab === "active" && (
           <div className="relative max-w-xs flex-1">
-            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name or email…"
                    className="w-full pl-9 pr-9 py-2 bg-white border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
-            {search && <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"><X size={14} /></button>}
+            {search && <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600"><X size={14} /></button>}
           </div>
         )}
       </div>
@@ -372,7 +352,7 @@ function UsersPageInner() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[920px]">
             <thead>
-              <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+              <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
                 <th className="text-left px-4 py-3 font-semibold">Name</th>
                 <th className="text-left px-4 py-3 font-semibold">Role</th>
                 <th className="text-left px-4 py-3 font-semibold">Online</th>
@@ -384,7 +364,19 @@ function UsersPageInner() {
               </tr>
             </thead>
             <tbody>
-              {filteredActive.map(u => {
+              {usersLoading && [...Array(5)].map((_, i) => (
+                <tr key={i} className="border-t border-gray-100 animate-pulse">
+                  <td className="px-4 py-3"><div className="h-4 w-32 bg-gray-200 rounded mb-1" /><div className="h-3 w-24 bg-gray-100 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-5 w-20 bg-gray-200 rounded-full" /></td>
+                  <td className="px-4 py-3"><div className="h-4 w-16 bg-gray-200 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-4 w-12 bg-gray-200 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-4 w-12 bg-gray-200 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-4 w-6 bg-gray-200 rounded" /></td>
+                  <td className="px-4 py-3"><div className="h-5 w-14 bg-gray-200 rounded-full" /></td>
+                  <td className="px-4 py-3" />
+                </tr>
+              ))}
+              {!usersLoading && filteredActive.map(u => {
                 const act = actById.get(u.id);
                 return (
                 <tr
@@ -395,22 +387,22 @@ function UsersPageInner() {
                 >
                   <td className="px-4 py-3">
                     <p className="font-medium text-gray-800">{u.name}</p>
-                    <p className="text-xs text-gray-400">{u.email}</p>
+                    <p className="text-xs text-gray-600">{u.email}</p>
                   </td>
                   <td className="px-4 py-3">
                     {u.role_name
                       ? <span className="text-xs bg-brand-50 text-brand-700 px-2 py-0.5 rounded-full">{u.role_name}</span>
-                      : <span className="text-xs text-gray-400">monitored only</span>}
+                      : <span className="text-xs text-gray-600">monitored only</span>}
                   </td>
                   <td className="px-4 py-3">
                     <span className="flex items-center gap-1.5 text-xs">
                       <span className={`w-2 h-2 rounded-full shrink-0 ${act?.is_online ? "bg-green-500" : "bg-gray-300"}`} />
-                      <span className={act?.is_online ? "text-green-600 font-medium" : "text-gray-400"}>
+                      <span className={act?.is_online ? "text-green-600 font-medium" : "text-gray-600"}>
                         {act?.is_online ? "Online" : "Offline"}
                       </span>
                     </span>
                     {act?.is_online && act.current_app && (
-                      <p className="text-[11px] text-gray-400 mt-0.5 truncate max-w-[140px]" title={act.current_app}>
+                      <p className="text-[11px] text-gray-600 mt-0.5 truncate max-w-[140px]" title={act.current_app}>
                         {act.current_app}
                       </p>
                     )}
@@ -418,33 +410,33 @@ function UsersPageInner() {
                   <td className="px-4 py-3 text-gray-700 font-medium tabular-nums">
                     {act ? fmtSeconds(act.today_seconds) : "—"}
                   </td>
-                  <td className="px-4 py-3 text-gray-500 tabular-nums">
+                  <td className="px-4 py-3 text-gray-600 tabular-nums">
                     {act ? fmtSeconds(act.week_seconds) : "—"}
                   </td>
-                  <td className="px-4 py-3 text-gray-500">{u.device_count}</td>
+                  <td className="px-4 py-3 text-gray-600">{u.device_count}</td>
                   <td className="px-4 py-3">
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${u.is_active ? "bg-green-50 text-green-600" : "bg-gray-100 text-gray-500"}`}>
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${u.is_active ? "bg-green-50 text-green-600" : "bg-gray-100 text-gray-600"}`}>
                       {u.is_active ? "Active" : "Inactive"}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right whitespace-nowrap" onClick={e => e.stopPropagation()}>
                     {can("users", "edit") && (
-                      <button onClick={() => setEditing(u)} className="text-gray-400 hover:text-brand-600 p-1" title="Edit">
+                      <button onClick={() => setEditing(u)} className="text-gray-600 hover:text-brand-600 p-1" title="Edit">
                         <Pencil size={15} />
                       </button>
                     )}
                     {can("users", "edit") && u.is_active && (
-                      <button onClick={() => setPendingAction({ user: u, kind: 'deactivate' })} className="text-gray-400 hover:text-amber-600 p-1" title="Deactivate (temporary)">
+                      <button onClick={() => setPendingAction({ user: u, kind: 'deactivate' })} className="text-gray-600 hover:text-amber-600 p-1" title="Deactivate (temporary)">
                         <UserX size={15} />
                       </button>
                     )}
                     {can("users", "edit") && !u.is_active && (
-                      <button onClick={() => setPendingAction({ user: u, kind: 'activate' })} className="text-gray-400 hover:text-green-600 p-1" title="Re-activate">
+                      <button onClick={() => setPendingAction({ user: u, kind: 'activate' })} className="text-gray-600 hover:text-green-600 p-1" title="Re-activate">
                         <UserCheck2 size={15} />
                       </button>
                     )}
                     {can("users", "delete") && (
-                      <button onClick={() => setPendingAction({ user: u, kind: 'delete' })} className="text-gray-400 hover:text-red-600 p-1" title="Delete permanently">
+                      <button onClick={() => setPendingAction({ user: u, kind: 'delete' })} className="text-gray-600 hover:text-red-600 p-1" title="Delete permanently">
                         <Trash2 size={15} />
                       </button>
                     )}
@@ -452,7 +444,7 @@ function UsersPageInner() {
                 </tr>
                 );
               })}
-              {filteredActive.length === 0 && <tr><td colSpan={8} className="px-4 py-10 text-center text-gray-400 text-sm">No users found.</td></tr>}
+              {!usersLoading && filteredActive.length === 0 && <tr><td colSpan={8} className="px-4 py-10 text-center text-gray-600 text-sm">No users found.</td></tr>}
             </tbody>
           </table>
           </div>
@@ -462,16 +454,39 @@ function UsersPageInner() {
       {/* Pending registrations table */}
       {tab === "pending" && (
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-          {pendingCount === 0 ? (
+          {pendingLoading ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[720px]">
+                <thead>
+                  <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
+                    <th className="text-left px-4 py-3 font-semibold">Name</th>
+                    <th className="text-left px-4 py-3 font-semibold">Email</th>
+                    <th className="text-left px-4 py-3 font-semibold">Requested</th>
+                    <th className="px-4 py-3" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...Array(3)].map((_, i) => (
+                    <tr key={i} className="border-t border-gray-100 animate-pulse">
+                      <td className="px-4 py-3"><div className="h-4 w-32 bg-gray-200 rounded" /></td>
+                      <td className="px-4 py-3"><div className="h-4 w-48 bg-gray-200 rounded" /></td>
+                      <td className="px-4 py-3"><div className="h-4 w-24 bg-gray-200 rounded" /></td>
+                      <td className="px-4 py-3" />
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : pendingCount === 0 ? (
             <div className="px-4 py-12 text-center">
               <UserCheck size={28} className="mx-auto mb-2 text-gray-200" />
-              <p className="text-sm text-gray-400">No pending registrations.</p>
+              <p className="text-sm text-gray-600">No pending registrations.</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm min-w-[720px]">
               <thead>
-                <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+                <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
                   <th className="text-left px-4 py-3 font-semibold">Name</th>
                   <th className="text-left px-4 py-3 font-semibold">Email</th>
                   <th className="text-left px-4 py-3 font-semibold">Requested</th>
@@ -482,9 +497,9 @@ function UsersPageInner() {
                 {pending?.map(u => (
                   <tr key={u.id} className="border-t border-gray-100 hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-800">{u.name}</td>
-                    <td className="px-4 py-3 text-gray-500">{u.email}</td>
-                    <td className="px-4 py-3 text-gray-400 text-xs">
-                      {u.device_count === 0 ? "—" : u.device_count}
+                    <td className="px-4 py-3 text-gray-600">{u.email}</td>
+                    <td className="px-4 py-3 text-gray-600 text-xs">
+                      {u.created_at ? new Date(u.created_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—"}
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap">
                       {can("users", "edit") && (
@@ -494,7 +509,7 @@ function UsersPageInner() {
                         </button>
                       )}
                       {can("users", "delete") && (
-                        <button onClick={() => setPendingAction({ user: u, kind: 'reject' })} className="text-gray-400 hover:text-red-600 p-1"><UserX size={15} /></button>
+                        <button onClick={() => setPendingAction({ user: u, kind: 'reject' })} className="text-gray-600 hover:text-red-600 p-1"><UserX size={15} /></button>
                       )}
                     </td>
                   </tr>

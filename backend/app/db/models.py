@@ -14,6 +14,9 @@ class Company(Base):
     id:               Mapped[uuid.UUID] = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
     name:             Mapped[str]       = mapped_column(String, nullable=False)
     enrollment_token: Mapped[str]       = mapped_column(String, unique=True, nullable=False)
+    # Company-wide default agent visibility. TRUE = all agents run headless
+    # (no floating widget, no tray icon). Per-device override lives on Device.
+    agent_headless:   Mapped[bool]      = mapped_column(Boolean, default=True)
     created_at:       Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     devices:   Mapped[list["Device"]]   = relationship(back_populates="company")
@@ -56,6 +59,9 @@ class Device(Base):
     is_active:     Mapped[bool]             = mapped_column(Boolean, default=True)
     is_archived:   Mapped[bool]             = mapped_column(Boolean, default=False)
     is_deleted:    Mapped[bool]             = mapped_column(Boolean, default=False)
+    # Per-device visibility override: NULL = inherit company.agent_headless,
+    # TRUE/FALSE = force this device headless or visible.
+    headless_override: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     company:     Mapped["Company"]                   = relationship(back_populates="devices")
     employee:    Mapped["Employee | None"]            = relationship(back_populates="devices", lazy="joined")
@@ -145,9 +151,14 @@ class Group(Base):
     created_by:  Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
     created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     is_deleted:  Mapped[bool]             = mapped_column(Boolean, default=False)
+    is_archived: Mapped[bool]             = mapped_column(Boolean, default=False)
+    parent_id:   Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("groups.id"), nullable=True)
 
     members:     Mapped[list["GroupMember"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
+    )
+    parent:      Mapped["Group | None"] = relationship(
+        remote_side="Group.id", foreign_keys=[parent_id]
     )
 
 

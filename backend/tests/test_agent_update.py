@@ -328,3 +328,209 @@ async def test_category_rule_stored_canonical(client, db_session):
     assert r.status_code == 200, r.text
 
     await _cleanup_company(db_session, cid)
+
+
+# ── +1h-on-restart fix: device-today-active honors the device's local midnight ─
+
+@pytest.mark.asyncio
+async def test_device_today_active_respects_local_midnight_since(client, db_session):
+    cid = uuid.uuid4(); did = uuid.uuid4(); tag = uuid.uuid4().hex[:8]
+    token = create_device_token(str(did), str(cid))
+    await db_session.execute(sa_text(
+        "INSERT INTO companies (id, name, enrollment_token) VALUES (:i,:n,:t)"),
+        {"i": str(cid), "n": f"TZ-{tag}", "t": tag})
+    await db_session.execute(sa_text(
+        "INSERT INTO devices (id, company_id, hostname, platform, jwt_token, is_active) "
+        "VALUES (:i,:c,:h,'darwin',:tok,TRUE)"),
+        {"i": str(did), "c": str(cid), "h": f"h-{tag}", "tok": token})
+
+    since = 1_700_000_000  # device's local midnight (absolute unix)
+    # 600s of activity 1h BEFORE local midnight (yesterday — must be EXCLUDED),
+    # 900s 1min after (today — must be INCLUDED). Excluding the pre-midnight
+    # block is exactly what stops the '+1h on restart' inflation.
+    for off, dur in ((-3600, 600), (60, 900)):
+        await db_session.execute(sa_text(
+            "INSERT INTO activity_events (id, device_id, event_type, app_name, duration, timestamp) "
+            "VALUES (:i,:d,'window_change','Code',:dur, to_timestamp(:ts))"),
+            {"i": str(uuid.uuid4()), "d": str(did), "dur": dur, "ts": since + off})
+    await db_session.flush()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    r = await client.get(f"/v1/home/device-today-active?since={since}", headers=headers)
+    assert r.status_code == 200
+    assert r.json()["active_seconds_today"] == 900   # only the post-midnight block
+
+    # No `since` (older agent) still works (UTC-day fallback, no error).
+    r2 = await client.get("/v1/home/device-today-active", headers=headers)
+    assert r2.status_code == 200
+
+
+# ── Meeting logs: session aggregation (active time + apps-used) ───────────────
+
+@pytest.mark.asyncio
+async def test_meetings_endpoint_aggregates_sessions(client, db_session):
+    cid = uuid.uuid4(); did = uuid.uuid4(); eid = uuid.uuid4(); tag = uuid.uuid4().hex[:8]
+    await db_session.execute(sa_text(
+        "INSERT INTO companies (id, name, enrollment_token) VALUES (:i,:n,:t)"),
+        {"i": str(cid), "n": f"MTG-{tag}", "t": tag})
+    admin_h = await _seed_admin(db_session, cid)
+    await db_session.execute(sa_text(
+        "INSERT INTO employees (id, company_id, email, name, role, is_active) "
+        "VALUES (:i,:c,:e,:n,'member',TRUE)"),
+        {"i": str(eid), "c": str(cid), "e": f"u-{tag}@x.com", "n": "Worker"})
+    await db_session.execute(sa_text(
+        "INSERT INTO devices (id, company_id, employee_id, hostname, platform, is_active) "
+        "VALUES (:i,:c,:emp,:h,'darwin',TRUE)"),
+        {"i": str(did), "c": str(cid), "emp": str(eid), "h": f"h-{tag}"})
+
+    def ev(etype, app, mins_ago, dur=0, title=""):
+        return {"i": str(uuid.uuid4()), "d": str(did), "t": etype, "a": app,
+                "ti": title, "dur": dur, "m": mins_ago}
+
+    rows = [
+        # Real Zoom meeting [120m ago, 100m ago]: 600s Zoom + 300s Chrome inside;
+        # 999s Slack BEFORE the meeting must be excluded.
+        ev("meeting_start", "Zoom", 120, 0, "Standup"),
+        ev("window_change", "Zoom", 119, 600),
+        ev("window_change", "Google Chrome", 110, 300),
+        ev("meeting_end", "Zoom", 100, 1200),
+        ev("window_change", "Slack", 150, 999),
+        # Trivial meeting (10s active) → dropped as noise.
+        ev("meeting_start", "Webex", 80, 0),
+        ev("window_change", "Webex", 79, 10),
+        ev("meeting_end", "Webex", 75, 300),
+    ]
+    for r in rows:
+        await db_session.execute(sa_text(
+            "INSERT INTO activity_events "
+            "(id, device_id, event_type, app_name, window_title, duration, timestamp) "
+            "VALUES (:i,:d,:t,:a,:ti,:dur, NOW() - make_interval(mins => :m))"), r)
+    await db_session.flush()
+
+    body = (await client.get(f"/v1/home/meetings?device_id={did}&days=2", headers=admin_h)).json()
+    assert body["count"] == 1                    # trivial Webex meeting filtered out
+    assert body["total_active_secs"] == 900      # 600 Zoom + 300 Chrome (Slack excluded)
+    s = body["sessions"][0]
+    assert s["platform"] == "Zoom"
+    assert {a["app_name"]: a["seconds"] for a in s["apps"]} == {"Zoom": 600, "Google Chrome": 300}
+
+    # Same result via the per-user filter (the dashboard user view).
+    by_emp = (await client.get(f"/v1/home/meetings?employee_id={eid}&days=2", headers=admin_h)).json()
+    assert by_emp["count"] == 1 and by_emp["total_active_secs"] == 900
+
+
+# ── Headless agents: effective config + admin controls ───────────────────────
+
+@pytest.mark.asyncio
+async def test_agent_config_effective_headless(client, db_session):
+    """The agent's /v1/agent/config returns the per-device override when set, else
+    the company default. Read-only — no cleanup needed."""
+    cid = uuid.uuid4(); d1 = uuid.uuid4(); d2 = uuid.uuid4(); tag = uuid.uuid4().hex[:8]
+    await db_session.execute(sa_text(
+        "INSERT INTO companies (id, name, enrollment_token, agent_headless) VALUES (:i,:n,:t,TRUE)"),
+        {"i": str(cid), "n": f"HL-{tag}", "t": tag})
+    t1 = create_device_token(str(d1), str(cid))
+    t2 = create_device_token(str(d2), str(cid))
+    await db_session.execute(sa_text(
+        "INSERT INTO devices (id, company_id, hostname, platform, jwt_token, is_active, headless_override) "
+        "VALUES (:i,:c,:h,'darwin',:tok,TRUE,NULL)"),
+        {"i": str(d1), "c": str(cid), "h": f"h1-{tag}", "tok": t1})
+    await db_session.execute(sa_text(
+        "INSERT INTO devices (id, company_id, hostname, platform, jwt_token, is_active, headless_override) "
+        "VALUES (:i,:c,:h,'darwin',:tok,TRUE,FALSE)"),
+        {"i": str(d2), "c": str(cid), "h": f"h2-{tag}", "tok": t2})
+    await db_session.flush()
+
+    r1 = await client.get("/v1/agent/config", headers={"Authorization": f"Bearer {t1}"})
+    assert r1.status_code == 200 and r1.json()["headless"] is True   # inherits company True
+    r2 = await client.get("/v1/agent/config", headers={"Authorization": f"Bearer {t2}"})
+    assert r2.status_code == 200 and r2.json()["headless"] is False  # device override wins
+
+
+@pytest.mark.asyncio
+async def test_company_headless_toggle_and_device_override(client, db_session):
+    cid = uuid.uuid4(); did = uuid.uuid4(); tag = uuid.uuid4().hex[:8]
+    await db_session.execute(sa_text(   # agent_headless defaults FALSE
+        "INSERT INTO companies (id, name, enrollment_token) VALUES (:i,:n,:t)"),
+        {"i": str(cid), "n": f"CS-{tag}", "t": tag})
+    admin_h = await _seed_admin(db_session, cid)
+    await db_session.execute(sa_text(
+        "INSERT INTO devices (id, company_id, hostname, platform, is_active) "
+        "VALUES (:i,:c,:h,'darwin',TRUE)"),
+        {"i": str(did), "c": str(cid), "h": f"h-{tag}"})
+    await db_session.flush()
+
+    try:
+        # Company toggle ON → device inherits (effective headless True).
+        r = await client.patch("/v1/company/settings", headers=admin_h, json={"agent_headless": True})
+        assert r.status_code == 200 and r.json()["agent_headless"] is True
+        dev = next(d for d in (await client.get("/v1/devices", headers=admin_h)).json()
+                   if d["id"] == str(did))
+        assert dev["headless"] is True and dev["headless_override"] is None
+
+        # Per-device override to visible wins over the company default.
+        r2 = await client.patch(f"/v1/devices/{did}/headless", headers=admin_h, json={"override": False})
+        assert r2.status_code == 200
+        assert r2.json()["headless"] is False and r2.json()["headless_override"] is False
+    finally:
+        await _cleanup_company(db_session, cid)
+
+
+# ── Google first-time approval ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_google_first_time_pending_then_existing_logs_in(client, db_session, monkeypatch):
+    from app.api.v1.endpoints import googleAuth
+    from app.core.config import get_settings
+
+    cid = uuid.uuid4(); tag = uuid.uuid4().hex[:8]
+    await db_session.execute(sa_text(
+        "INSERT INTO companies (id, name, enrollment_token) VALUES (:i,:n,:t)"),
+        {"i": str(cid), "n": f"GO-{tag}", "t": tag})
+    await db_session.flush()
+
+    email = f"newg-{tag}@{get_settings().ALLOWED_EMAIL_DOMAIN}"
+
+    class _Resp:
+        def __init__(self, data): self.status_code = 200; self._d = data; self.text = ""
+        def json(self): return self._d
+
+    class _FakeAC:                       # stand-in for httpx.AsyncClient
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, data=None): return _Resp({"access_token": "tok"})
+        async def get(self, url, headers=None):
+            return _Resp({"sub": f"sub-{tag}", "email": email,
+                          "email_verified": True, "name": "New G"})
+
+    monkeypatch.setattr(googleAuth, "_verify_state", lambda s: "")
+    monkeypatch.setattr(googleAuth, "load_google_credentials",
+                        lambda: {"client_id": "c", "client_secret": "s"})
+    monkeypatch.setattr(googleAuth.httpx, "AsyncClient", _FakeAC)
+
+    try:
+        # FIRST sign-in (brand-new) → pending approval, no session, employee created unapproved.
+        r = await client.get("/v1/auth/google/callback?code=x&state=y", follow_redirects=False)
+        assert r.status_code in (302, 307)
+        assert "pending_approval" in r.headers["location"]
+        assert "token=" not in r.headers["location"]
+        row = (await db_session.execute(
+            sa_text("SELECT is_approved FROM employees WHERE email = :e"), {"e": email})).first()
+        assert row is not None and row[0] is False
+
+        # Admin approves (assigns a portal role); now the SAME user logs in via Google.
+        await db_session.execute(sa_text(
+            "UPDATE employees SET is_approved = TRUE, role = 'viewer' WHERE email = :e"), {"e": email})
+        await db_session.flush()
+        r2 = await client.get("/v1/auth/google/callback?code=x&state=y", follow_redirects=False)
+        assert r2.status_code in (302, 307)
+        assert "token=" in r2.headers["location"]          # logged in
+        assert "pending_approval" not in r2.headers["location"]
+    finally:
+        try:
+            await db_session.execute(sa_text("DELETE FROM employees WHERE email = :e"), {"e": email})
+            await db_session.execute(sa_text("DELETE FROM companies WHERE id = :c"), {"c": str(cid)})
+            await db_session.commit()
+        except Exception:
+            await db_session.rollback()

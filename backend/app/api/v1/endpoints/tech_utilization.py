@@ -7,10 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 
 from app.api.deps import get_db, require
+from app.core.group_tree import descendant_group_ids, devices_for_groups
 from app.core import audit
 from app.core.app_normalizer import normalize_app_name
 from app.core.scoping import visible_device_ids, ALL
-from app.db.models import AppCategory, AppCategoryRule, Employee
+from app.db.models import AppCategory, AppCategoryRule, Employee, Group
 from app.schemas.tech import (
     CategoryOut, CategoryRuleOut, CategoryCreate, CategoryUpdate, RuleCreate,
     CategoryAllocationItem, AppTrendsOut, AppTrendItem, TechSummaryOut,
@@ -69,26 +70,31 @@ async def _ensure_default_categories(company_id: uuid.UUID, db: AsyncSession) ->
     )
     existing_patterns = {p for (p,) in rules_res.all()}
 
+    # Pre-generate UUIDs in Python so we can build categories + rules in one
+    # batch and commit with a single round-trip — no per-category flush needed.
+    cats_to_add: list[AppCategory] = []
+    rules_to_add: list[AppCategoryRule] = []
     for cat_def in DEFAULT_CATEGORIES:
-        cat = AppCategory(
+        cat_id = uuid.uuid4()
+        cats_to_add.append(AppCategory(
+            id=cat_id,
             company_id=company_id,
             name=cat_def["name"],
             color=cat_def["color"],
             is_system=True,
-        )
-        db.add(cat)
-        await db.flush()
-
+        ))
         for raw in DEFAULT_RULES.get(cat_def["name"], []):
-            pattern = normalize_app_name(raw)   # canonical so it matches normalized events
+            pattern = normalize_app_name(raw)
             if pattern not in existing_patterns:
                 existing_patterns.add(pattern)
-                db.add(AppCategoryRule(
-                    category_id=cat.id,
+                rules_to_add.append(AppCategoryRule(
+                    category_id=cat_id,
                     company_id=company_id,
                     app_pattern=pattern,
                 ))
 
+    db.add_all(cats_to_add)
+    db.add_all(rules_to_add)
     await db.commit()
     _default_cats_ensured.add(company_id)
 
@@ -141,19 +147,21 @@ async def list_categories(
     for r in rules_res.scalars().all():
         rules_by_cat.setdefault(r.category_id, []).append(r)
 
-    out = []
-    for c in cats:
-        rules = rules_by_cat.get(c.id, [])
-        out.append(CategoryOut(
+    return [
+        CategoryOut(
             id=c.id,
             name=c.name,
             color=c.color,
             description=c.description,
             is_system=c.is_system,
-            rule_count=len(rules),
-            rules=[CategoryRuleOut(id=r.id, app_pattern=r.app_pattern, created_at=r.created_at) for r in rules],
-        ))
-    return out
+            rule_count=len(rules_by_cat.get(c.id, [])),
+            rules=[
+                CategoryRuleOut(id=r.id, app_pattern=r.app_pattern, created_at=r.created_at)
+                for r in rules_by_cat.get(c.id, [])
+            ],
+        )
+        for c in cats
+    ]
 
 
 @router.post("/categories", response_model=CategoryOut, status_code=201)
@@ -856,14 +864,18 @@ def _employee_clause(employee_id: Optional[str]) -> tuple[str, dict]:
 async def _group_clause(group_id: Optional[str], db: AsyncSession) -> tuple[str, dict]:
     if not group_id:
         return "", {}
-    res = await db.execute(text("""
-        SELECT DISTINCT COALESCE(gm.device_id, d2.id) AS did
-        FROM group_members gm
-        LEFT JOIN devices d2 ON d2.employee_id = gm.employee_id
-            AND gm.member_type = 'employee'
-        WHERE gm.group_id = :gid AND COALESCE(gm.device_id, d2.id) IS NOT NULL
-    """), {"gid": group_id})
-    ids = [str(r.did) for r in res.fetchall()]
+    try:
+        gid = uuid.UUID(group_id)
+    except ValueError:
+        return " AND 1=0", {}
+    row = await db.execute(
+        select(Group.company_id).where(Group.id == gid, Group.is_deleted == False)  # noqa: E712
+    )
+    company_id = row.scalar_one_or_none()
+    if not company_id:
+        return " AND 1=0", {}
+    expanded = await descendant_group_ids([gid], company_id, db)
+    ids = [str(d) for d in await devices_for_groups(expanded, db)]
     if not ids:
         return " AND 1=0", {}
     return " AND ae.device_id = ANY(:gids)", {"gids": ids}

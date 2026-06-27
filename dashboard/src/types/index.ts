@@ -9,6 +9,8 @@ export interface Device {
   is_online:      boolean;
   is_archived:    boolean;
   is_deleted:     boolean;
+  headless?:          boolean;        // effective: what the agent applies
+  headless_override?: boolean | null; // raw per-device override (null = inherit)
 }
 
 export interface TimelineEvent {
@@ -29,14 +31,6 @@ export interface DailyStat {
   total_seconds:  number;
 }
 
-export interface Screenshot {
-  id:               string;
-  s3_url:           string;
-  captured_at:      string;
-  captured_at_unix: number;
-  file_size:        number;
-}
-
 export interface CompanyDay {
   date:           string;
   active_seconds: number;
@@ -47,6 +41,24 @@ export interface CompanyDay {
 export interface AppUsage {
   app_name: string;
   seconds:  number;
+}
+
+export interface MeetingSession {
+  device_id:     string;
+  platform:      string;   // "Zoom" | "Microsoft Teams" | "Google Meet" | "Slack huddle" | ...
+  title:         string;
+  start_ts:      number;   // unix seconds
+  end_ts:        number;   // unix seconds
+  ongoing:       boolean;
+  active_secs:   number;   // live activity during the meeting (other apps included)
+  duration_secs: number;   // wall-clock span
+  apps:          AppUsage[];
+}
+
+export interface MeetingsResponse {
+  total_active_secs: number;
+  count:             number;
+  sessions:          MeetingSession[];
 }
 
 export interface LogEvent {
@@ -99,6 +111,7 @@ export interface User {
   is_approved:  boolean;
   group_ids:    string[];
   device_count: number;
+  created_at:   string | null;
 }
 
 export interface UserActivity {
@@ -148,8 +161,20 @@ export interface Group {
   id:           string;
   name:         string;
   description:  string | null;
+  parent_id:    string | null;
+  path:         string | null;
+  is_archived:  boolean;
   member_count: number;
+  child_count:  number;
   created_at:   string | null;
+}
+
+export interface GroupChild {
+  id:           string;
+  name:         string;
+  member_count: number;
+  child_count:  number;
+  is_archived:  boolean;
 }
 
 export interface GroupMember {
@@ -162,6 +187,8 @@ export interface GroupMember {
 
 export interface GroupDetail extends Group {
   members: GroupMember[];
+  children: GroupChild[];
+  breadcrumb: GroupChild[];
 }
 
 export interface Installer {

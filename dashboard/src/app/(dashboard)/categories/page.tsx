@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import {
@@ -11,7 +12,7 @@ import {
   getUncategorized, fmtSeconds,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { AppCategory, UncategorizedItem } from "@/types";
 
@@ -62,7 +63,7 @@ function CategoryForm({ initial, onClose, onSave }: CategoryFormProps) {
           <h2 className="text-base font-semibold text-gray-900">
             {initial ? "Edit Category" : "New Category"}
           </h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-600"><X size={18} /></button>
         </div>
         <form onSubmit={submit} className="space-y-4">
           <div>
@@ -83,7 +84,7 @@ function CategoryForm({ initial, onClose, onSave }: CategoryFormProps) {
             <div className="flex items-center gap-2 mt-2">
               <input type="color" value={color} onChange={e => setColor(e.target.value)}
                      className="w-8 h-8 rounded cursor-pointer border border-gray-200" />
-              <span className="text-xs text-gray-400">Custom</span>
+              <span className="text-xs text-gray-600">Custom</span>
             </div>
           </div>
           <div>
@@ -141,15 +142,15 @@ function AssignModal({ item, categories, onClose, onAssigned }: AssignModalProps
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm mx-4 p-6">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
           <h2 className="text-base font-semibold text-gray-900">Assign to Category</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-600"><X size={18} /></button>
         </div>
 
         <div className="flex items-center gap-2 mb-4 bg-gray-50 rounded-lg px-3 py-2">
           {item.kind === "app"
-            ? <Monitor size={14} className="text-gray-400 shrink-0" />
-            : <Globe size={14} className="text-gray-400 shrink-0" />}
+            ? <Monitor size={14} className="text-gray-600 shrink-0" />
+            : <Globe size={14} className="text-gray-600 shrink-0" />}
           <span className="text-sm font-medium text-gray-800 truncate">{item.pattern}</span>
-          <span className="ml-auto text-xs text-gray-400 shrink-0">
+          <span className="ml-auto text-xs text-gray-600 shrink-0">
             {item.kind === "app" ? fmtSeconds(item.seconds) : `${item.seconds} visits`}
           </span>
         </div>
@@ -162,7 +163,7 @@ function AssignModal({ item, categories, onClose, onAssigned }: AssignModalProps
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
-          <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
         </div>
 
         {err && <p className="text-xs text-red-500 mb-3">{err}</p>}
@@ -194,7 +195,11 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
   const [tab,  setTab]            = useState<"apps" | "urls">("apps");
   const [search, setSearch]       = useState("");
   const [assigning, setAssigning] = useState<UncategorizedItem | null>(null);
-  const [expanded, setExpanded]   = useState(true);
+  // Collapsed by default so the page's initial load is a SINGLE request
+  // (just /v1/tech/categories). The heavy uncategorized scan only runs once
+  // the user actually opens this panel — keeping the slow query off the
+  // critical path entirely.
+  const [expanded, setExpanded]   = useState(false);
 
   // Derive since/until from the days preset (relative to today)
   const since = (() => {
@@ -203,8 +208,10 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
   })();
   const until = new Date().toISOString().slice(0, 10);
 
+  // Key is null until the panel is expanded → SWR suspends, no request fires on
+  // mount. Re-expanding within the dedupe window serves the cached result.
   const { data, mutate, isLoading } = useSWR(
-    ["uncategorized", days],
+    expanded ? ["uncategorized", days] : null,
     () => getUncategorized(since, until),
     { revalidateOnFocus: false },
   );
@@ -239,18 +246,18 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                 </span>
               )}
             </p>
-            <p className="text-xs text-gray-400">
+            <p className="text-xs text-gray-600">
               Apps and websites detected on your devices that aren&apos;t categorized yet
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={e => { e.stopPropagation(); mutate(); }}
-              className="p-1.5 text-gray-400 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition"
+              className="p-1.5 text-gray-600 hover:text-gray-700 rounded-lg hover:bg-gray-100 transition"
             >
               <RefreshCw size={13} />
             </button>
-            <ChevronDown size={15} className={`text-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`} />
+            <ChevronDown size={15} className={`text-gray-600 transition-transform ${expanded ? "rotate-180" : ""}`} />
           </div>
         </button>
 
@@ -263,7 +270,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                 <button
                   onClick={() => setTab("apps")}
                   className={`px-3 py-1 text-xs font-medium flex items-center gap-1.5 transition ${
-                    tab === "apps" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"
+                    tab === "apps" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"
                   }`}
                 >
                   <Monitor size={11} />
@@ -275,7 +282,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                 <button
                   onClick={() => setTab("urls")}
                   className={`px-3 py-1 text-xs font-medium flex items-center gap-1.5 transition ${
-                    tab === "urls" ? "bg-white text-gray-900 shadow-sm" : "text-gray-500"
+                    tab === "urls" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"
                   }`}
                 >
                   <Globe size={11} />
@@ -288,7 +295,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
 
               {/* Search */}
               <div className="relative flex-1 min-w-[160px]">
-                <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+                <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600" />
                 <input
                   value={search}
                   onChange={e => setSearch(e.target.value)}
@@ -309,13 +316,13 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                   <option value={60}>Last 60 days</option>
                   <option value={90}>Last 90 days</option>
                 </select>
-                <ChevronDown size={11} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+                <ChevronDown size={11} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
               </div>
             </div>
 
             {/* Item list */}
             {isLoading ? (
-              <div className="px-5 py-8 text-center text-sm text-gray-400">Loading…</div>
+              <div className="px-5 py-8 text-center text-sm text-gray-600">Loading…</div>
             ) : items.length === 0 ? (
               <div className="px-5 py-10 text-center">
                 <div className="w-10 h-10 rounded-full bg-green-50 flex items-center justify-center mx-auto mb-3">
@@ -326,7 +333,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                     ? "All detected items are categorized!"
                     : `No ${tab === "apps" ? "apps" : "websites"} to categorize`}
                 </p>
-                <p className="text-xs text-gray-400 mt-1">Check back after agents report new activity.</p>
+                <p className="text-xs text-gray-600 mt-1">Check back after agents report new activity.</p>
               </div>
             ) : (
               <div className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
@@ -337,13 +344,13 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                   >
                     <div className="w-7 h-7 rounded-lg bg-gray-100 flex items-center justify-center shrink-0">
                       {item.kind === "app"
-                        ? <Monitor size={13} className="text-gray-500" />
-                        : <Globe size={13} className="text-gray-500" />}
+                        ? <Monitor size={13} className="text-gray-600" />
+                        : <Globe size={13} className="text-gray-600" />}
                     </div>
 
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-800 truncate">{item.pattern}</p>
-                      <p className="text-xs text-gray-400">
+                      <p className="text-xs text-gray-600">
                         {item.kind === "app"
                           ? fmtSeconds(item.seconds)
                           : `${item.seconds.toLocaleString()} visits`}
@@ -364,7 +371,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
             )}
 
             {items.length > 0 && (
-              <div className="px-5 py-2 border-t border-gray-100 text-xs text-gray-400 flex items-center gap-1">
+              <div className="px-5 py-2 border-t border-gray-100 text-xs text-gray-600 flex items-center gap-1">
                 <Zap size={11} className="text-amber-400" />
                 Hover a row and click <strong className="text-gray-600 mx-0.5">Assign</strong> to add it to a category instantly
               </div>
@@ -440,29 +447,29 @@ function CategoryCard({
           <div className="flex items-center gap-2">
             <p className="font-semibold text-gray-900 text-sm">{cat.name}</p>
             {cat.is_system && (
-              <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-medium">system</span>
+              <span className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full font-medium">system</span>
             )}
           </div>
           {cat.description && (
-            <p className="text-xs text-gray-400 truncate mt-0.5">{cat.description}</p>
+            <p className="text-xs text-gray-600 truncate mt-0.5">{cat.description}</p>
           )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          <span className="text-xs text-gray-400 mr-1">{cat.rule_count} rules</span>
+          <span className="text-xs text-gray-600 mr-1">{cat.rule_count} rules</span>
           {canEdit && (
             <button onClick={onEdit}
-                    className="p-1.5 text-gray-400 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition">
+                    className="p-1.5 text-gray-600 hover:text-brand-600 hover:bg-brand-50 rounded-lg transition">
               <Edit2 size={14} />
             </button>
           )}
           {canEdit && !cat.is_system && (
             <button onClick={handleDelete} disabled={deleting}
-                    className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition disabled:opacity-50">
+                    className="p-1.5 text-gray-600 hover:text-red-500 hover:bg-red-50 rounded-lg transition disabled:opacity-50">
               <Trash2 size={14} />
             </button>
           )}
           <button onClick={() => setExpanded(x => !x)}
-                  className="p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition ml-1">
+                  className="p-1.5 text-gray-600 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition ml-1">
             <ChevronDown size={14} className={`transition-transform ${expanded ? "rotate-180" : ""}`} />
           </button>
         </div>
@@ -472,7 +479,7 @@ function CategoryCard({
         <div className="border-t border-gray-100 px-5 py-4">
           {cat.rule_count > 4 && (
             <div className="relative mb-3">
-              <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+              <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600" />
               <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Filter apps / URLs…"
                      className="w-full pl-7 pr-3 py-1.5 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-brand-300" />
             </div>
@@ -490,10 +497,10 @@ function CategoryCard({
               </span>
             ))}
             {rules.length === 0 && cat.rule_count > 0 && (
-              <p className="text-xs text-gray-400">No results for &quot;{search}&quot;</p>
+              <p className="text-xs text-gray-600">No results for &quot;{search}&quot;</p>
             )}
             {cat.rule_count === 0 && (
-              <p className="text-xs text-gray-400 py-1">No apps assigned yet.</p>
+              <p className="text-xs text-gray-600 py-1">No apps assigned yet.</p>
             )}
           </div>
 
@@ -536,7 +543,7 @@ export default function CategoriesPage() {
 
   const canEdit = can("categories", "edit");
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("categories", "view")) return <AccessDenied label="App Categories" />;
 
   const filtered = (categories ?? []).filter(c =>
@@ -552,7 +559,7 @@ export default function CategoriesPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">App Categories</h1>
-          <p className="text-sm text-gray-500 mt-0.5">
+          <p className="text-sm text-gray-600 mt-0.5">
             Classify apps and websites into categories to power Technology Utilization insights
           </p>
         </div>
@@ -580,7 +587,7 @@ export default function CategoriesPage() {
             </div>
             <div>
               <p className="text-xl font-bold text-gray-900 leading-none">{s.value}</p>
-              <p className="text-xs text-gray-500 mt-0.5">{s.label}</p>
+              <p className="text-xs text-gray-600 mt-0.5">{s.label}</p>
             </div>
           </div>
         ))}
@@ -594,7 +601,7 @@ export default function CategoriesPage() {
 
       {/* Search */}
       <div className="relative mb-4 max-w-sm">
-        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" />
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search categories…"
                className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-300 bg-white shadow-sm" />
       </div>
@@ -602,7 +609,7 @@ export default function CategoriesPage() {
       {/* System categories */}
       {systemCats.length > 0 && (
         <div className="mb-5">
-          <p className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-3">System Categories</p>
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-600 mb-3">System Categories</p>
           <div className="space-y-3">
             {systemCats.map(cat => (
               <CategoryCard
@@ -621,7 +628,7 @@ export default function CategoriesPage() {
       {/* Custom categories */}
       {customCats.length > 0 && (
         <div className="mb-5">
-          <p className="text-xs font-semibold uppercase tracking-wider text-gray-400 mb-3">Custom Categories</p>
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-600 mb-3">Custom Categories</p>
           <div className="space-y-3">
             {customCats.map(cat => (
               <CategoryCard
@@ -640,10 +647,10 @@ export default function CategoriesPage() {
       {(categories ?? []).length === 0 && (
         <div className="bg-white border border-gray-200 rounded-xl p-10 text-center shadow-sm">
           <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-3">
-            <Tag size={20} className="text-gray-400" />
+            <Tag size={20} className="text-gray-600" />
           </div>
           <p className="text-gray-700 font-medium">No categories yet</p>
-          <p className="text-gray-400 text-sm mt-1">Create a category to start classifying applications.</p>
+          <p className="text-gray-600 text-sm mt-1">Create a category to start classifying applications.</p>
         </div>
       )}
 

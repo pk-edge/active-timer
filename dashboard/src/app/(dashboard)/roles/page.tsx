@@ -1,10 +1,12 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState } from "react";
 import useSWR from "swr";
 import { Shield, Plus, Pencil, Trash2, X } from "lucide-react";
 import { getRoles, getModules, createRole, updateRole, deleteRole } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
+import PageSkeleton from "@/components/PageSkeleton";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type { Role, ModuleDef, Permission } from "@/types";
 
@@ -13,6 +15,13 @@ const SCOPES = [
   { value: "groups", label: "Assigned groups", hint: "Sees only groups assigned to the user" },
   { value: "own",    label: "Own devices",  hint: "Sees only their own devices" },
 ];
+
+const TALENT_ROLE = "Talent";
+
+/** System roles are locked except Talent, whose permissions admins may customize. */
+function canEditRole(role: Role): boolean {
+  return !role.is_system || role.name === TALENT_ROLE;
+}
 
 function RoleEditor({ role, modules, onClose, onSaved }: {
   role: Role | null; modules: ModuleDef[]; onClose: () => void; onSaved: () => void;
@@ -51,42 +60,42 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
           <h2 className="font-semibold text-gray-900">{role ? "Edit role" : "New role"}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+          <button onClick={onClose} className="text-gray-600 hover:text-gray-600"><X size={18} /></button>
         </div>
         <div className="p-5 space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Role name</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Role name</label>
               <input value={name} onChange={e => setName(e.target.value)} disabled={role?.is_system}
                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-500 mb-1">Description</label>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
               <input value={desc ?? ""} onChange={e => setDesc(e.target.value)}
                      className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1.5">Data scope</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1.5">Data scope</label>
             <div className="grid grid-cols-3 gap-2">
               {SCOPES.map(s => (
-                <button key={s.value} onClick={() => setScope(s.value)}
-                        className={`text-left border rounded-lg px-3 py-2 transition ${scope === s.value ? "border-brand-400 ring-2 ring-blue-100" : "border-gray-200 hover:border-gray-300"}`}>
+                <button key={s.value} onClick={() => setScope(s.value)} disabled={role?.is_system}
+                        className={`text-left border rounded-lg px-3 py-2 transition disabled:opacity-60 disabled:cursor-not-allowed ${scope === s.value ? "border-brand-400 ring-2 ring-blue-100" : "border-gray-200 hover:border-gray-300"}`}>
                   <p className="text-sm font-medium text-gray-800">{s.label}</p>
-                  <p className="text-[11px] text-gray-400">{s.hint}</p>
+                  <p className="text-[11px] text-gray-600">{s.hint}</p>
                 </button>
               ))}
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-gray-500 mb-1.5">Permissions</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1.5">Permissions</label>
             <div className="border border-gray-200 rounded-lg overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm min-w-[560px]">
                 <thead>
-                  <tr className="bg-gray-50 text-gray-500 text-xs">
+                  <tr className="bg-gray-50 text-gray-600 text-xs">
                     <th className="text-left px-3 py-2 font-medium">Module</th>
                     {["view", "create", "edit", "delete"].map(a => <th key={a} className="px-2 py-2 font-medium capitalize w-16">{a}</th>)}
                   </tr>
@@ -127,14 +136,15 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
 
 export default function RolesPage() {
   const { loading, can } = useUser();
-  const { data: roles, mutate } = useSWR<Role[]>("roles", getRoles);
+  const { data: roles, mutate, isLoading } = useSWR<Role[]>("roles", getRoles);
   const { data: modules } = useSWR<ModuleDef[]>("modules", getModules);
   const [editing,       setEditing]      = useState<Role | null | "new">(null);
   const [pendingDelete, setPendingDelete] = useState<Role | null>(null);
   const [deleting,      setDeleting]      = useState(false);
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("roles", "view")) return <AccessDenied label="Roles" />;
+  if (isLoading && !roles) return <PageSkeleton variant="list" rows={5} />;
 
   async function confirmDelete() {
     if (!pendingDelete) return;
@@ -149,7 +159,7 @@ export default function RolesPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Roles</h1>
-          <p className="text-gray-500 text-sm mt-0.5">Define what each role can do and see</p>
+          <p className="text-gray-600 text-sm mt-0.5">Define what each role can do and see</p>
         </div>
         {can("roles", "create") && (
           <button onClick={() => setEditing("new")} className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-700">
@@ -162,7 +172,7 @@ export default function RolesPage() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[560px]">
           <thead>
-            <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
+            <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
               <th className="text-left px-4 py-3 font-semibold">Role</th>
               <th className="text-left px-4 py-3 font-semibold">Scope</th>
               <th className="text-left px-4 py-3 font-semibold">Permissions</th>
@@ -174,25 +184,25 @@ export default function RolesPage() {
               <tr key={r.id} className="border-t border-gray-100 hover:bg-gray-50">
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
-                    <Shield size={14} className="text-gray-400" />
+                    <Shield size={14} className="text-gray-600" />
                     <span className="font-medium text-gray-800">{r.name}</span>
-                    {r.is_system && <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full">system</span>}
+                    {r.is_system && <span className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full">system</span>}
                   </div>
-                  {r.description && <p className="text-xs text-gray-400 mt-0.5 ml-6">{r.description}</p>}
+                  {r.description && <p className="text-xs text-gray-600 mt-0.5 ml-6">{r.description}</p>}
                 </td>
                 <td className="px-4 py-3 text-gray-600 capitalize">{r.scope_type}</td>
-                <td className="px-4 py-3 text-gray-500">{r.permissions.length} permissions</td>
+                <td className="px-4 py-3 text-gray-600">{r.permissions.length} permissions</td>
                 <td className="px-4 py-3 text-right whitespace-nowrap">
-                  {can("roles", "edit") && !r.is_system && (
-                    <button onClick={() => setEditing(r)} className="text-gray-400 hover:text-brand-600 p-1"><Pencil size={15} /></button>
+                  {can("roles", "edit") && canEditRole(r) && (
+                    <button onClick={() => setEditing(r)} className="text-gray-600 hover:text-brand-600 p-1"><Pencil size={15} /></button>
                   )}
                   {can("roles", "delete") && !r.is_system && (
-                    <button onClick={() => setPendingDelete(r)} className="text-gray-400 hover:text-red-600 p-1"><Trash2 size={15} /></button>
+                    <button onClick={() => setPendingDelete(r)} className="text-gray-600 hover:text-red-600 p-1"><Trash2 size={15} /></button>
                   )}
                 </td>
               </tr>
             ))}
-            {roles?.length === 0 && <tr><td colSpan={4} className="px-4 py-10 text-center text-gray-400 text-sm">No roles yet.</td></tr>}
+            {roles?.length === 0 && <tr><td colSpan={4} className="px-4 py-10 text-center text-gray-600 text-sm">No roles yet.</td></tr>}
           </tbody>
         </table>
         </div>

@@ -46,14 +46,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.core.config import get_settings
 from app.core.secrets import load_google_credentials
 from app.core.security import create_admin_token, hash_password_async
-from app.db.models import Company, Employee, Role
+from app.db.models import Company, Employee, EmployeeGroupAccess, Role
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -282,10 +282,34 @@ async def google_oauth_callback(
     employee = emp_row.scalar_one_or_none()
     new_user = False
 
+    if employee and employee.is_deleted:
+        # A DELETED account signing in again is treated as a brand-new user: the
+        # person is gone from the UI and intends to re-join. The email and
+        # google_sub UNIQUE constraints forbid a fresh INSERT, so resurrect the
+        # soft-deleted row in place and drop it back into the pending-approval
+        # queue with no role/groups — mirrors self-registration. This is distinct
+        # from a DEACTIVATED account (is_active=False, not deleted), which an
+        # admin disabled on purpose and must NOT silently come back below.
+        employee.name          = name
+        employee.google_sub    = google_sub
+        employee.role          = "employee"
+        employee.role_id       = None
+        employee.password_hash = None
+        employee.is_active     = True
+        employee.is_approved   = False
+        employee.is_deleted    = False
+        await db.execute(
+            delete(EmployeeGroupAccess).where(EmployeeGroupAccess.employee_id == employee.id)
+        )
+        await db.commit()
+        log.info("Deleted Google user re-registered, queued for admin approval: %s", email)
+        return RedirectResponse(f"{dash}/login?error=pending_approval")
+
     if employee:
-        # Reject disabled accounts BEFORE persisting anything — never mutate a
-        # deactivated/deleted record's identity (it could later be reactivated).
-        if not employee.is_active or employee.is_deleted:
+        # Reject DEACTIVATED accounts BEFORE persisting anything — never mutate a
+        # deactivated record's identity (an admin turned it off and it may later be
+        # reactivated). Deleted accounts were already handled above.
+        if not employee.is_active:
             return RedirectResponse(f"{dash}/login?error=account_inactive")
 
         # Block talent (device-only) accounts — auto-provisioned by enrollment with the
@@ -308,30 +332,28 @@ async def google_oauth_callback(
             await db.commit()
     else:
         new_user = True
-        # New SSO users default to VIEWER (read-only, group-scoped). They are
-        # NEVER auto-provisioned as admin and get no edit access — an existing
-        # admin must explicitly elevate the role before they can change anything.
-        viewer_role = (await db.execute(
-            select(Role).where(
-                Role.company_id == company.id,
-                Role.name == "Viewer",
-                Role.is_deleted == False,  # noqa: E712
-            )
-        )).scalar_one_or_none()
+        # First-time Google user → admin approval queue (Users → Pending). No role
+        # and no usable session yet; an admin must approve and assign a role before
+        # they can reach the dashboard. Mirrors the self-registration flow.
         employee = Employee(
             company_id=company.id,
             email=email,
             name=name,
             google_sub=google_sub,
-            role="viewer",
-            role_id=viewer_role.id if viewer_role else None,
+            role="employee",
+            role_id=None,
             is_active=True,
-            is_approved=True,
+            is_approved=False,
         )
         db.add(employee)
         await db.commit()
-        await db.refresh(employee)
-        log.info("Auto-provisioned Google user as Viewer (read-only): %s", email)
+        log.info("New Google user queued for admin approval: %s", email)
+        return RedirectResponse(f"{dash}/login?error=pending_approval")
+
+    # Existing account: enforce the same approval gate the password login uses, so
+    # a not-yet-approved user can't slip in via Google.
+    if not employee.is_approved:
+        return RedirectResponse(f"{dash}/login?error=pending_approval")
 
     jwt_token = create_admin_token(str(employee.id), employee.role, str(employee.company_id))
     return RedirectResponse(

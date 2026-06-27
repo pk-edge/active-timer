@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -13,13 +14,15 @@ from sqlalchemy.orm import joinedload
 from app.api.deps import get_db, get_current_admin, require
 from app.core import audit, broadcaster
 from app.core.config import get_settings
+from app.core.device_auth_cache import device_auth_cache
 from app.core.security import decode_token
 from app.core.scoping import visible_device_ids, ALL
-from app.db.models import Device, ActivityEvent, Employee
-from app.schemas.device import DeviceOut, TimelineEventOut, DailyStatOut, AssignDeviceRequest
+from app.db.models import Device, ActivityEvent, Employee, Company
+from app.schemas.device import DeviceOut, TimelineEventOut, DailyStatOut, AssignDeviceRequest, HeadlessRequest
 
 router   = APIRouter()
 settings = get_settings()
+log      = logging.getLogger(__name__)
 
 
 async def _get_device_for_admin(device_id: str, admin: Employee, db: AsyncSession) -> Device:
@@ -80,6 +83,9 @@ async def list_devices(
     result  = await db.execute(q)
     devices = result.scalars().all()
     cutoff  = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+    company_headless = bool((await db.execute(
+        select(Company.agent_headless).where(Company.id == admin.company_id)
+    )).scalar_one_or_none())
     return [
         DeviceOut(
             id=str(d.id),
@@ -92,6 +98,8 @@ async def list_devices(
             is_online=bool(d.last_seen and d.last_seen > cutoff),
             is_archived=d.is_archived,
             is_deleted=d.is_deleted,
+            headless_override=d.headless_override,
+            headless=(d.headless_override if d.headless_override is not None else company_headless),
         )
         for d in devices
     ]
@@ -148,6 +156,47 @@ async def assign_device(
     )
 
 
+@router.patch("/{device_id}/headless", response_model=DeviceOut)
+async def set_device_headless(
+    device_id: str,
+    body: HeadlessRequest,
+    admin: Employee = Depends(require("settings", "edit")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a device's visibility override: null = inherit the company default,
+    true = force headless, false = force visible. The agent applies it within ~60s."""
+    device = await _get_device_for_admin(device_id, admin, db)
+    device.headless_override = body.override
+    await audit.record(db, admin, "device.headless", "device", str(device.id),
+                       {"override": body.override})
+    await db.commit()
+
+    company_headless = bool((await db.execute(
+        select(Company.agent_headless).where(Company.id == admin.company_id)
+    )).scalar_one_or_none())
+    emp_name = None
+    if device.employee_id:
+        emp_name = (await db.execute(
+            select(Employee.name).where(Employee.id == device.employee_id)
+        )).scalar_one_or_none()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
+    eff = device.headless_override if device.headless_override is not None else company_headless
+    return DeviceOut(
+        id=str(device.id),
+        hostname=device.hostname,
+        platform=device.platform,
+        employee_id=str(device.employee_id) if device.employee_id else None,
+        employee_name=emp_name,
+        last_seen=device.last_seen,
+        last_seen_unix=int(device.last_seen.timestamp()) if device.last_seen else None,
+        is_online=bool(device.last_seen and device.last_seen > cutoff),
+        is_archived=device.is_archived,
+        is_deleted=device.is_deleted,
+        headless_override=device.headless_override,
+        headless=eff,
+    )
+
+
 @router.patch("/{device_id}/archive", response_model=DeviceOut)
 async def archive_device(
     device_id: str,
@@ -163,6 +212,9 @@ async def archive_device(
     device.is_archived = True
     await audit.record(db, admin, "device.archived", "device", str(device.id), {"source": "portal"})
     await db.commit()
+    # Drop any cached ingest-auth entry so the archived device stops ingesting now,
+    # not after the cache TTL.
+    device_auth_cache.invalidate_device(str(device.id))
 
     return DeviceOut(
         id=str(device.id),
@@ -223,6 +275,8 @@ async def delete_device(
     device.is_archived = False
     await audit.record(db, admin, "device.deleted", "device", str(device.id), {"source": "portal"})
     await db.commit()
+    # Drop any cached ingest-auth entry so the deleted device stops ingesting now.
+    device_auth_cache.invalidate_device(str(device.id))
 
 
 @router.get("/stream")
@@ -252,12 +306,27 @@ async def stream_device_status(
     # stream it would hold a pooled connection per open tab → pool exhaustion.
     from app.db.base import AsyncSessionLocal
 
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(Employee).where(Employee.id == user_uuid, Employee.is_active == True)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Employee).where(Employee.id == user_uuid, Employee.is_active == True)
+            )
+            if not result.scalar_one_or_none():
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # The only non-HTTP failure here is a DB/pool problem (e.g. pool checkout
+        # timeout under load). Return a clean 503 with Retry-After so the browser's
+        # EventSource reconnects on its own instead of surfacing a raw 500 (which,
+        # for a connection that never produced a response, the browser misreports
+        # as a CORS error).
+        log.warning("device stream auth unavailable (DB/pool): %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Realtime temporarily unavailable — retry shortly",
+            headers={"Retry-After": "5"},
         )
-        if not result.scalar_one_or_none():
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     # The auth session above is already released (its `async with` block exited),
     # so the long-lived stream below holds NO pooled connection — no per-tab leak.
@@ -281,6 +350,14 @@ async def stream_device_status(
                     yield f"event: {msg}\ndata: 1\n\n"
                     last_push = time.monotonic()
                 except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                except asyncio.CancelledError:
+                    raise  # client disconnected — propagate to the outer handler
+                except Exception:
+                    # A transient error inside the loop must NOT kill the stream
+                    # (the response has already started, so it can't 500 cleanly).
+                    # Log, emit a heartbeat to keep the pipe alive, and continue.
+                    log.exception("device stream loop error — continuing")
                     yield ": ping\n\n"
         except asyncio.CancelledError:
             pass  # client disconnected — finally block handles cleanup

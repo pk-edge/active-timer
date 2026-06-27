@@ -17,7 +17,6 @@ MODULES: list[ModuleDef] = [
     {"key": "devices",     "label": "Devices",       "actions": ["view", "assign", "archive", "delete"]},
     {"key": "logs",        "label": "Activity Logs", "actions": ["view"]},
     {"key": "reports",     "label": "Reports",       "actions": ["view"]},
-    {"key": "screenshots", "label": "Screenshots",   "actions": ["view"]},
     {"key": "users",       "label": "Users",         "actions": ["view", "create", "edit", "delete"]},
     {"key": "groups",      "label": "Groups",        "actions": ["view", "create", "edit", "delete"]},
     {"key": "roles",       "label": "Roles",         "actions": ["view", "create", "edit", "delete"]},

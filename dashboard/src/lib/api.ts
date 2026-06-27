@@ -1,8 +1,8 @@
 import type {
-  Device, TimelineEvent, DailyStat, Screenshot, CompanyDay, AppUsage, LogEvent,
+  Device, TimelineEvent, DailyStat, CompanyDay, AppUsage, LogEvent,
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
-  OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification,
+  OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
   AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
   WebsiteListOut, WebsiteDetailOut,
@@ -24,10 +24,17 @@ function authHeaders(): HeadersInit {
   };
 }
 
+/** Thrown when a read is aborted — kept for any caller that checks for it. */
+export class AbortedError extends Error {
+  readonly aborted = true;
+  constructor() {
+    super("Request aborted");
+    this.name = "AbortedError";
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    // Always hit the network — analytics data must never be served stale from
-    // the browser/HTTP cache when the user (or SWR) explicitly refetches.
     cache: "no-store",
     ...init,
     headers: { ...authHeaders(), ...init?.headers },
@@ -42,7 +49,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!res.ok) {
-    // Surface detail message from FastAPI JSON errors so callers can inspect them.
     const body = await res.text();
     let msg = `${res.status}: ${body}`;
     try {
@@ -120,10 +126,6 @@ export const getTimeline = (deviceId: string, since?: number, until?: number) =>
 export const getDailyStats = (deviceId: string, days = 7) =>
   request<DailyStat[]>(`/v1/devices/${deviceId}/stats?days=${days}`);
 
-// ── Screenshots ───────────────────────────────────────────────────────────────
-
-export const getScreenshots = (deviceId: string) =>
-  request<Screenshot[]>(`/v1/screenshots/${deviceId}`);
 
 // ── Reports ───────────────────────────────────────────────────────────────────
 
@@ -203,11 +205,12 @@ export async function registerUser(body: { name: string; email: string; password
 
 // ── Groups ──────────────────────────────────────────────────────────────────
 
-export const getGroups  = () => request<Group[]>("/v1/groups");
+export const getGroups  = (includeArchived = false) =>
+  request<Group[]>(`/v1/groups${includeArchived ? "?include_archived=true" : ""}`);
 export const getGroup   = (id: string) => request<GroupDetail>(`/v1/groups/${id}`);
-export const createGroup = (body: { name: string; description?: string }) =>
+export const createGroup = (body: { name: string; description?: string; parent_id?: string | null }) =>
   request<Group>("/v1/groups", { method: "POST", body: JSON.stringify(body) });
-export const updateGroup = (id: string, body: { name: string; description?: string }) =>
+export const updateGroup = (id: string, body: { name: string; description?: string; parent_id?: string | null }) =>
   request<Group>(`/v1/groups/${id}`, { method: "PATCH", body: JSON.stringify(body) });
 export const deleteGroup = (id: string) =>
   request<void>(`/v1/groups/${id}`, { method: "DELETE" });
@@ -215,6 +218,11 @@ export const addGroupMember = (id: string, body: { member_type: string; employee
   request<GroupMember>(`/v1/groups/${id}/members`, { method: "POST", body: JSON.stringify(body) });
 export const removeGroupMember = (id: string, memberId: string) =>
   request<void>(`/v1/groups/${id}/members/${memberId}`, { method: "DELETE" });
+export const getGroupMembers = (id: string) => request<GroupMember[]>(`/v1/groups/${id}/members`);
+export const archiveGroup = (id: string) =>
+  request<void>(`/v1/groups/${id}/archive`, { method: "POST" });
+export const unarchiveGroup = (id: string) =>
+  request<void>(`/v1/groups/${id}/unarchive`, { method: "POST" });
 
 export async function importGroupsCsv(file: File) {
   const fd = new FormData();
@@ -334,6 +342,13 @@ export const getHomeAppUsage = (group_id?: string, days = 1) =>
 export const getHomeWebUsage = (group_id?: string, days = 1) =>
   request<WebUsage[]>(`/v1/home/web-usage${gq(group_id, { days })}`);
 export const getMyStats = () => request<MyStats>("/v1/home/my-stats");
+export const getMeetings = (opts: { deviceId?: string; employeeId?: string; days?: number }) => {
+  const p = new URLSearchParams();
+  if (opts.deviceId)   p.set("device_id", opts.deviceId);
+  if (opts.employeeId) p.set("employee_id", opts.employeeId);
+  p.set("days", String(opts.days ?? 7));
+  return request<MeetingsResponse>(`/v1/home/meetings?${p.toString()}`);
+};
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 
@@ -472,9 +487,21 @@ export const getCategoryUsageDetail = (cat_id: string | null, tab: string, since
 export interface CompanyInfo {
   name: string;
   enrollment_token: string;
+  agent_headless: boolean;
 }
 
 export const getCompanyInfo = () => request<CompanyInfo>("/v1/company/info");
+export const updateCompanySettings = (agent_headless: boolean) =>
+  request<CompanyInfo>("/v1/company/settings", {
+    method: "PATCH",
+    body: JSON.stringify({ agent_headless }),
+  });
+// Per-device visibility override: null = inherit company default, true/false = force.
+export const setDeviceHeadless = (deviceId: string, override: boolean | null) =>
+  request<Device>(`/v1/devices/${deviceId}/headless`, {
+    method: "PATCH",
+    body: JSON.stringify({ override }),
+  });
 
 // ── URL Policies ─────────────────────────────────────────────────────────────
 

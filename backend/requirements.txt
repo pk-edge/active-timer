@@ -14,6 +14,13 @@ bcrypt==4.1.3
 cryptography>=42.0.0
 boto3==1.34.0
 httpx==0.27.0
+# orjson serializes the large list payloads (/v1/logs up to 2000 rows, /v1/users,
+# /v1/home/realtime) in fast C instead of stdlib json. On a single-worker async
+# process, stdlib json serialization is synchronous CPU work that BLOCKS the event
+# loop for every other in-flight request — the root cause of requests failing under
+# load (the browser then reports the dead connection as a CORS error). Pure-binary
+# wheel, no compiler needed for the Docker build.
+orjson==3.10.7
 # Redis pub/sub backs the SSE broadcaster (app/core/broadcaster.py) so device
 # update events fan out across every uvicorn worker AND every backend replica —
 # the in-process Set could only reach one process and capped at 200 subscribers.

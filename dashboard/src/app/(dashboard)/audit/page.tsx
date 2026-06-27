@@ -1,10 +1,11 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState, useCallback } from "react";
 import useSWR from "swr";
 import { ClipboardList, Search, ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from "lucide-react";
 import { getAudit, getAuditFilterOptions, type AuditEntry, type AuditFilters } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 
 const ACTION_COLOR: Record<string, string> = {
   create:  "bg-green-50 text-green-700 ring-1 ring-green-200",
@@ -34,7 +35,7 @@ const PAGE_SIZE = 50;
 
 function MetadataCell({ entry }: { entry: AuditEntry }) {
   const [expanded, setExpanded] = useState(false);
-  if (!entry.metadata) return <span className="text-gray-300">—</span>;
+  if (!entry.metadata) return <span className="text-gray-500">—</span>;
   const text = JSON.stringify(entry.metadata, null, 2);
   const preview = JSON.stringify(entry.metadata);
 
@@ -49,7 +50,7 @@ function MetadataCell({ entry }: { entry: AuditEntry }) {
         </div>
       ) : (
         <div className="flex items-center gap-1">
-          <span className="text-xs text-gray-400 truncate max-w-[180px]">{preview}</span>
+          <span className="text-xs text-gray-600 truncate max-w-[180px]">{preview}</span>
           <button onClick={() => setExpanded(true)} className="text-xs text-brand-600 hover:underline flex items-center gap-0.5 shrink-0">
             <ChevronDown size={12} /> More
           </button>
@@ -92,7 +93,7 @@ export default function AuditPage() {
   const currentPage = data ? Math.floor((data.offset ?? 0) / PAGE_SIZE) + 1 : 1;
   const hasFilters = !!(filters.action || filters.target_type || filters.actor_id || filters.since || filters.until || filters.search);
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("audit", "view")) return <AccessDenied label="the Audit Log" />;
 
   return (
@@ -101,7 +102,7 @@ export default function AuditPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Audit Log</h1>
-          <p className="text-gray-500 text-sm mt-0.5">
+          <p className="text-gray-600 text-sm mt-0.5">
             Every administrative action across the organization
             {data && <span className="ml-2 font-medium text-gray-700">{data.total.toLocaleString()} total entries</span>}
           </p>
@@ -113,7 +114,7 @@ export default function AuditPage() {
         {/* Search row */}
         <div className="flex gap-2">
           <div className="relative flex-1">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" />
             <input
               type="text"
               placeholder="Search actions, actors, targets, metadata…"
@@ -130,7 +131,7 @@ export default function AuditPage() {
             Search
           </button>
           {hasFilters && (
-            <button onClick={clearAll} className="px-3 py-2 text-sm text-gray-500 hover:text-gray-700 border border-gray-200 rounded-lg">
+            <button onClick={clearAll} className="px-3 py-2 text-sm text-gray-600 hover:text-gray-700 border border-gray-200 rounded-lg">
               Clear
             </button>
           )}
@@ -176,7 +177,7 @@ export default function AuditPage() {
 
           {/* Date range */}
           <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-400 shrink-0">From</span>
+            <span className="text-xs text-gray-600 shrink-0">From</span>
             <input
               type="date"
               value={filters.since ?? ""}
@@ -185,7 +186,7 @@ export default function AuditPage() {
             />
           </div>
           <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-400 shrink-0">To</span>
+            <span className="text-xs text-gray-600 shrink-0">To</span>
             <input
               type="date"
               value={filters.until ?? ""}
@@ -243,7 +244,7 @@ export default function AuditPage() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[780px]">
             <thead>
-              <tr className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide border-b border-gray-100">
+              <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide border-b border-gray-100">
                 <th className="text-left px-4 py-3 font-semibold w-36">When</th>
                 <th className="text-left px-4 py-3 font-semibold w-44">Actor</th>
                 <th className="text-left px-4 py-3 font-semibold w-48">Action</th>
@@ -254,36 +255,36 @@ export default function AuditPage() {
             <tbody>
               {isLoading && !data && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-12 text-center text-gray-400 text-sm">
+                  <td colSpan={5} className="px-4 py-12 text-center text-gray-600 text-sm">
                     Loading…
                   </td>
                 </tr>
               )}
               {data?.entries.map(e => (
                 <tr key={e.id} className="border-t border-gray-50 hover:bg-gray-50/80 transition-colors">
-                  <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap align-top">
+                  <td className="px-4 py-3 text-xs text-gray-600 whitespace-nowrap align-top">
                     {e.created_at ? (
                       <div>
                         <div>{new Date(e.created_at).toLocaleDateString()}</div>
-                        <div className="text-gray-400">{new Date(e.created_at).toLocaleTimeString()}</div>
+                        <div className="text-gray-600">{new Date(e.created_at).toLocaleTimeString()}</div>
                       </div>
                     ) : "—"}
                   </td>
                   <td className="px-4 py-3 align-top">
-                    <div className="font-medium text-gray-800 text-xs">{e.actor_name ?? <span className="text-gray-400">—</span>}</div>
-                    {e.actor_email && <div className="text-gray-400 text-xs">{e.actor_email}</div>}
-                    {e.actor_role && <div className="text-xs text-gray-400 mt-0.5 italic">{e.actor_role}</div>}
+                    <div className="font-medium text-gray-800 text-xs">{e.actor_name ?? <span className="text-gray-600">—</span>}</div>
+                    {e.actor_email && <div className="text-gray-600 text-xs">{e.actor_email}</div>}
+                    {e.actor_role && <div className="text-xs text-gray-600 mt-0.5 italic">{e.actor_role}</div>}
                   </td>
                   <td className="px-4 py-3 align-top">
                     <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${actionStyle(e.action)}`}>
                       {formatAction(e.action)}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-xs text-gray-500 align-top">
+                  <td className="px-4 py-3 text-xs text-gray-600 align-top">
                     {e.target_type ? (
                       <div>
                         <div className="font-medium">{e.target_type}</div>
-                        {e.target_id && <div className="text-gray-400 font-mono text-[10px] truncate max-w-[80px]" title={e.target_id}>{e.target_id.slice(0, 8)}…</div>}
+                        {e.target_id && <div className="text-gray-600 font-mono text-[10px] truncate max-w-[80px]" title={e.target_id}>{e.target_id.slice(0, 8)}…</div>}
                       </div>
                     ) : "—"}
                   </td>
@@ -294,7 +295,7 @@ export default function AuditPage() {
               ))}
               {data?.entries.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-12 text-center text-gray-400 text-sm">
+                  <td colSpan={5} className="px-4 py-12 text-center text-gray-600 text-sm">
                     <ClipboardList size={28} className="mx-auto mb-2 text-gray-200" />
                     {hasFilters ? "No entries match the current filters." : "No audit entries yet."}
                   </td>
@@ -307,14 +308,14 @@ export default function AuditPage() {
         {/* Pagination */}
         {data && data.total > PAGE_SIZE && (
           <div className="border-t border-gray-100 px-4 py-3 flex items-center justify-between">
-            <span className="text-xs text-gray-500">
+            <span className="text-xs text-gray-600">
               Showing {(data.offset ?? 0) + 1}–{Math.min((data.offset ?? 0) + PAGE_SIZE, data.total)} of {data.total.toLocaleString()}
             </span>
             <div className="flex items-center gap-1">
               <button
                 disabled={currentPage <= 1}
                 onClick={() => setFilters(p => ({ ...p, offset: Math.max(0, (p.offset ?? 0) - PAGE_SIZE) }))}
-                className="p-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <ChevronLeft size={14} />
               </button>
@@ -322,7 +323,7 @@ export default function AuditPage() {
               <button
                 disabled={currentPage >= totalPages}
                 onClick={() => setFilters(p => ({ ...p, offset: (p.offset ?? 0) + PAGE_SIZE }))}
-                className="p-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <ChevronRight size={14} />
               </button>

@@ -1,4 +1,6 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import { useState, useRef } from "react";
 import useSWR from "swr";
 import { format, parseISO } from "date-fns";
@@ -6,7 +8,7 @@ import { DownloadCloud, Upload, CheckCircle2, Download, Apple, Monitor, History,
 import { getInstallers, uploadInstaller, activateInstaller, deleteInstaller, getInstallerDownload, getInstallerDownloads, getCompanyInfo, patchInstaller, getUpdateRuns, fmtBytes, BASE } from "@/lib/api";
 import type { CompanyInfo } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
 import type { Installer, InstallerDownload, UpdateRun, UpdateRunsResponse } from "@/types";
 
 function UploadForm({ onUploaded }: { onUploaded: () => void }) {
@@ -37,25 +39,25 @@ function UploadForm({ onUploaded }: { onUploaded: () => void }) {
       <p className="text-sm font-semibold text-gray-800 mb-3">Upload new agent build</p>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div>
-          <label className="block text-xs text-gray-500 mb-1">Platform</label>
+          <label className="block text-xs text-gray-600 mb-1">Platform</label>
           <select value={platform} onChange={e => { setPlatform(e.target.value); setItype(e.target.value === "macos" ? "dmg" : "msi"); }}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <option value="macos">macOS</option><option value="windows">Windows</option>
           </select>
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">Type</label>
+          <label className="block text-xs text-gray-600 mb-1">Type</label>
           <select value={itype} onChange={e => setItype(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             {types.map(t => <option key={t} value={t}>{t.toUpperCase()}</option>)}
           </select>
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">Version</label>
+          <label className="block text-xs text-gray-600 mb-1">Version</label>
           <input value={version} onChange={e => setVersion(e.target.value)} placeholder="1.1.0"
                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">Notes</label>
+          <label className="block text-xs text-gray-600 mb-1">Notes</label>
           <input value={notes} onChange={e => setNotes(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
         </div>
       </div>
@@ -86,7 +88,7 @@ function CopyableLink({ label, icon, url }: { label: string; icon: React.ReactNo
         {icon}
         <span className="text-sm font-medium">{label}</span>
       </div>
-      <code className="flex-1 text-xs text-gray-500 truncate min-w-0 bg-white border border-gray-200 rounded px-2 py-1.5 font-mono">
+      <code className="flex-1 text-xs text-gray-600 truncate min-w-0 bg-white border border-gray-200 rounded px-2 py-1.5 font-mono">
         {url}
       </code>
       <button
@@ -133,24 +135,24 @@ function DistributionEditor({ inst, onSaved }: { inst: Installer; onSaved: () =>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <div className="sm:col-span-2">
-          <label className="block text-xs text-gray-500 mb-1">Rollout — {rollout}% of devices</label>
+          <label className="block text-xs text-gray-600 mb-1">Rollout — {rollout}% of devices</label>
           <div className="flex items-center gap-3">
             <input type="range" min={0} max={100} value={rollout} onChange={e => setRollout(Number(e.target.value))} className="flex-1 accent-brand-600" />
             <input type="number" min={0} max={100} value={rollout} onChange={e => setRollout(Math.max(0, Math.min(100, Number(e.target.value))))} className="w-16 border border-gray-300 rounded-lg px-2 py-1 text-sm" />
           </div>
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">Channel</label>
+          <label className="block text-xs text-gray-600 mb-1">Channel</label>
           <select value={channel} onChange={e => setChannel(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
             <option value="stable">stable</option><option value="beta">beta</option>
           </select>
         </div>
         <div>
-          <label className="block text-xs text-gray-500 mb-1">Min supported version</label>
+          <label className="block text-xs text-gray-600 mb-1">Min supported version</label>
           <input value={minVer} onChange={e => setMinVer(e.target.value)} placeholder="e.g. 1.0.0" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
         </div>
         <div className="sm:col-span-2">
-          <label className="block text-xs text-gray-500 mb-1">Manifest expiry (optional) — agents reject the update after this time</label>
+          <label className="block text-xs text-gray-600 mb-1">Manifest expiry (optional) — agents reject the update after this time</label>
           <input type="datetime-local" value={expires} onChange={e => setExpires(e.target.value)} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" />
         </div>
         <label className="flex items-center gap-2 text-sm text-gray-700 sm:col-span-2">
@@ -171,7 +173,7 @@ function DistributionEditor({ inst, onSaved }: { inst: Installer; onSaved: () =>
 const _STATUS_STYLE = (s: string): string => {
   if (s.endsWith("SUCCESS")) return "bg-green-50 text-green-600 border-green-200";
   if (s.includes("FAILED") || s.startsWith("ROLLBACK")) return "bg-red-50 text-red-600 border-red-200";
-  return "bg-gray-50 text-gray-500 border-gray-200";
+  return "bg-gray-50 text-gray-600 border-gray-200";
 };
 
 function FleetStatus() {
@@ -182,20 +184,20 @@ function FleetStatus() {
   return (
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
       <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
-        <Activity size={15} className="text-gray-400" />
+        <Activity size={15} className="text-gray-600" />
         <p className="text-sm font-semibold text-gray-700">Fleet version adoption &amp; update status</p>
       </div>
       <div className="p-4 space-y-4">
         {/* Adoption bars */}
         <div className="space-y-2">
-          {adoption.length === 0 && <p className="text-sm text-gray-400">No devices reporting yet.</p>}
+          {adoption.length === 0 && <p className="text-sm text-gray-600">No devices reporting yet.</p>}
           {adoption.map(([ver, count]) => (
             <div key={ver} className="flex items-center gap-3">
               <span className="text-xs font-medium text-gray-700 w-24 shrink-0 truncate">{ver === "unknown" ? "unknown" : `v${ver}`}</span>
               <div className="flex-1 bg-gray-100 rounded-full h-3 overflow-hidden">
                 <div className="bg-brand-500 h-3" style={{ width: total ? `${(count / total) * 100}%` : "0%" }} />
               </div>
-              <span className="text-xs text-gray-500 w-12 text-right shrink-0">{count}</span>
+              <span className="text-xs text-gray-600 w-12 text-right shrink-0">{count}</span>
             </div>
           ))}
         </div>
@@ -204,7 +206,7 @@ function FleetStatus() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[640px]">
             <thead>
-              <tr className="text-gray-500 text-xs uppercase tracking-wide border-b border-gray-100">
+              <tr className="text-gray-600 text-xs uppercase tracking-wide border-b border-gray-100">
                 <th className="text-left px-3 py-2 font-semibold">Device</th>
                 <th className="text-left px-3 py-2 font-semibold">Update</th>
                 <th className="text-left px-3 py-2 font-semibold">Status</th>
@@ -215,7 +217,7 @@ function FleetStatus() {
             <tbody>
               {data?.runs.slice(0, 100).map((r: UpdateRun) => (
                 <tr key={r.id} className="border-t border-gray-100 hover:bg-gray-50">
-                  <td className="px-3 py-2 font-mono text-xs text-gray-500">{r.device_id.slice(0, 8)}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-gray-600">{r.device_id.slice(0, 8)}</td>
                   <td className="px-3 py-2 text-gray-700">{r.from_version ? `v${r.from_version} → ` : ""}v{r.target_version}</td>
                   <td className="px-3 py-2">
                     <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border ${_STATUS_STYLE(r.status)}`}>
@@ -224,14 +226,14 @@ function FleetStatus() {
                     </span>
                     {r.error_code && <span className="block text-[11px] text-red-400 mt-0.5 truncate max-w-[200px]">{r.error_code}</span>}
                   </td>
-                  <td className="px-3 py-2 text-gray-500">{r.progress}%</td>
-                  <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">{r.updated_at ? format(parseISO(r.updated_at), "MMM d · h:mm a") : "—"}</td>
+                  <td className="px-3 py-2 text-gray-600">{r.progress}%</td>
+                  <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">{r.updated_at ? format(parseISO(r.updated_at), "MMM d · h:mm a") : "—"}</td>
                 </tr>
               ))}
               {data && data.runs.length === 0 && (
-                <tr><td colSpan={5} className="px-3 py-8 text-center text-gray-400 text-sm">No update activity reported yet.</td></tr>
+                <tr><td colSpan={5} className="px-3 py-8 text-center text-gray-600 text-sm">No update activity reported yet.</td></tr>
               )}
-              {!data && <tr><td colSpan={5} className="px-3 py-6 text-center text-gray-300 text-sm animate-pulse">Loading…</td></tr>}
+              {!data && <tr><td colSpan={5} className="px-3 py-6 text-center text-gray-500 text-sm animate-pulse">Loading…</td></tr>}
             </tbody>
           </table>
         </div>
@@ -242,12 +244,13 @@ function FleetStatus() {
 
 export default function AgentsPage() {
   const { loading, can } = useUser();
-  const { data: installers, mutate } = useSWR<Installer[]>("installers", getInstallers);
+  const { data: installers, mutate, isLoading } = useSWR<Installer[]>("installers", getInstallers);
   const { data: downloads }          = useSWR<InstallerDownload[]>("installer-downloads", getInstallerDownloads);
   const { data: companyInfo }        = useSWR<CompanyInfo>("company-info", getCompanyInfo);
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("agents", "view")) return <AccessDenied label="Agents" />;
+  if (isLoading && !installers) return <PageSkeleton variant="list" rows={4} />;
 
   async function activate(id: string) {
     try { await activateInstaller(id); mutate(); } catch (e) { alert(String(e instanceof Error ? e.message : e)); }
@@ -268,7 +271,7 @@ export default function AgentsPage() {
     <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-6">
       <div>
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Agents</h1>
-        <p className="text-gray-500 text-sm mt-0.5">Distribute and update the desktop agent. The active version is what devices auto-update to.</p>
+        <p className="text-gray-600 text-sm mt-0.5">Distribute and update the desktop agent. The active version is what devices auto-update to.</p>
       </div>
 
       {/* Active per OS */}
@@ -280,7 +283,7 @@ export default function AgentsPage() {
               {p === "macos" ? <Apple size={22} className="text-gray-700" /> : <Monitor size={22} className="text-gray-700" />}
               <div className="flex-1">
                 <p className="text-sm font-medium text-gray-800">{p === "macos" ? "macOS" : "Windows"}</p>
-                <p className="text-xs text-gray-400">{a ? `Active: v${a.version} (${a.installer_type.toUpperCase()})` : "No active build"}</p>
+                <p className="text-xs text-gray-600">{a ? `Active: v${a.version} (${a.installer_type.toUpperCase()})` : "No active build"}</p>
               </div>
               {a && can("agents", "view") && (
                 <button onClick={() => download(a.id)} className="flex items-center gap-1.5 text-sm text-brand-600 hover:text-brand-700">
@@ -296,10 +299,10 @@ export default function AgentsPage() {
       {companyInfo && (
         <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-1">
-            <Link2 size={15} className="text-gray-400" />
+            <Link2 size={15} className="text-gray-600" />
             <p className="text-sm font-semibold text-gray-800">Public Download Links</p>
           </div>
-          <p className="text-xs text-gray-400 mb-4">
+          <p className="text-xs text-gray-600 mb-4">
             Share these links with employees. Each visit generates a fresh 15-minute signed download — no credentials exposed.
           </p>
           <div className="space-y-2.5">
@@ -321,10 +324,10 @@ export default function AgentsPage() {
       {can("agents", "edit") && (active.macos || active.windows) && (
         <div>
           <div className="flex items-center gap-2 mb-2">
-            <Rocket size={15} className="text-gray-400" />
+            <Rocket size={15} className="text-gray-600" />
             <p className="text-sm font-semibold text-gray-800">Distribution &amp; rollout</p>
           </div>
-          <p className="text-xs text-gray-400 mb-3">
+          <p className="text-xs text-gray-600 mb-3">
             Control how the active build reaches this company&apos;s devices — staged rollout %, mandatory updates,
             release channel, and minimum supported version. Changes apply on the next device update check.
           </p>
@@ -340,13 +343,13 @@ export default function AgentsPage() {
       {/* Version history */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
         <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
-          <DownloadCloud size={15} className="text-gray-400" />
+          <DownloadCloud size={15} className="text-gray-600" />
           <p className="text-sm font-semibold text-gray-700">Version history</p>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[720px]">
           <thead>
-            <tr className="text-gray-500 text-xs uppercase tracking-wide border-b border-gray-100">
+            <tr className="text-gray-600 text-xs uppercase tracking-wide border-b border-gray-100">
               <th className="text-left px-4 py-2.5 font-semibold">Platform</th>
               <th className="text-left px-4 py-2.5 font-semibold">Version</th>
               <th className="text-left px-4 py-2.5 font-semibold">Type</th>
@@ -361,12 +364,12 @@ export default function AgentsPage() {
               <tr key={i.id} className="border-t border-gray-100 hover:bg-gray-50">
                 <td className="px-4 py-3 capitalize text-gray-700">{i.platform}</td>
                 <td className="px-4 py-3 font-medium text-gray-800">v{i.version}</td>
-                <td className="px-4 py-3 text-gray-500 uppercase">{i.installer_type}</td>
-                <td className="px-4 py-3 text-gray-500">{fmtBytes(i.file_size)}</td>
+                <td className="px-4 py-3 text-gray-600 uppercase">{i.installer_type}</td>
+                <td className="px-4 py-3 text-gray-600">{fmtBytes(i.file_size)}</td>
                 <td className="px-4 py-3">
                   {i.is_active
                     ? <span className="inline-flex items-center gap-1 text-xs text-green-600"><CheckCircle2 size={13} /> Active</span>
-                    : <span className="text-xs text-gray-400">inactive</span>}
+                    : <span className="text-xs text-gray-600">inactive</span>}
                 </td>
                 <td className="px-4 py-3">
                   {i.is_active ? (
@@ -374,22 +377,22 @@ export default function AgentsPage() {
                       {i.rollout_percent ?? 100}% · {i.channel ?? "stable"}
                       {i.mandatory && <span className="ml-1.5 inline-flex items-center gap-0.5 text-amber-600"><AlertTriangle size={11} /> mandatory</span>}
                     </span>
-                  ) : <span className="text-xs text-gray-300">—</span>}
+                  ) : <span className="text-xs text-gray-500">—</span>}
                 </td>
                 <td className="px-4 py-3 text-right whitespace-nowrap">
-                  <button onClick={() => download(i.id)} className="text-gray-400 hover:text-brand-600 p-1"><Download size={15} /></button>
+                  <button onClick={() => download(i.id)} className="text-gray-600 hover:text-brand-600 p-1"><Download size={15} /></button>
                   {can("agents", "edit") && !i.is_active && (
                     <button onClick={() => activate(i.id)} className="text-xs text-brand-600 hover:text-brand-700 ml-2">Activate</button>
                   )}
                   {can("agents", "delete") && (
-                    <button onClick={() => remove(i.id, i.version)} title="Delete" className="text-gray-300 hover:text-red-500 p-1 ml-1 inline-flex">
+                    <button onClick={() => remove(i.id, i.version)} title="Delete" className="text-gray-500 hover:text-red-500 p-1 ml-1 inline-flex">
                       <Trash2 size={14} />
                     </button>
                   )}
                 </td>
               </tr>
             ))}
-            {installers?.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-gray-400 text-sm">No agent builds uploaded yet.</td></tr>}
+            {installers?.length === 0 && <tr><td colSpan={7} className="px-4 py-10 text-center text-gray-600 text-sm">No agent builds uploaded yet.</td></tr>}
           </tbody>
         </table>
         </div>
@@ -401,16 +404,16 @@ export default function AgentsPage() {
       {/* Download history */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
         <div className="px-4 py-3 border-b border-gray-100 bg-gray-50 flex items-center gap-2">
-          <History size={15} className="text-gray-400" />
+          <History size={15} className="text-gray-600" />
           <p className="text-sm font-semibold text-gray-700">Download history</p>
           {downloads && downloads.length > 0 && (
-            <span className="ml-auto text-xs text-gray-400">{downloads.length} record{downloads.length !== 1 ? "s" : ""}</span>
+            <span className="ml-auto text-xs text-gray-600">{downloads.length} record{downloads.length !== 1 ? "s" : ""}</span>
           )}
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[640px]">
             <thead>
-              <tr className="text-gray-500 text-xs uppercase tracking-wide border-b border-gray-100">
+              <tr className="text-gray-600 text-xs uppercase tracking-wide border-b border-gray-100">
                 <th className="text-left px-4 py-2.5 font-semibold">User</th>
                 <th className="text-left px-4 py-2.5 font-semibold">Platform</th>
                 <th className="text-left px-4 py-2.5 font-semibold">Version</th>
@@ -427,7 +430,7 @@ export default function AgentsPage() {
                       </span>
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-gray-800 truncate">{dl.downloaded_by_name}</p>
-                        <p className="text-xs text-gray-400 truncate">{dl.downloaded_by_email}</p>
+                        <p className="text-xs text-gray-600 truncate">{dl.downloaded_by_email}</p>
                       </div>
                     </div>
                   </td>
@@ -439,23 +442,23 @@ export default function AgentsPage() {
                   </td>
                   <td className="px-4 py-3">
                     <span className="text-sm font-medium text-gray-800">v{dl.version}</span>
-                    <span className="ml-1.5 text-xs text-gray-400 uppercase">{dl.installer_type}</span>
+                    <span className="ml-1.5 text-xs text-gray-600 uppercase">{dl.installer_type}</span>
                   </td>
-                  <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
+                  <td className="px-4 py-3 text-xs text-gray-600 whitespace-nowrap">
                     {format(parseISO(dl.downloaded_at), "MMM d, yyyy · h:mm a")}
                   </td>
                 </tr>
               ))}
               {downloads?.length === 0 && (
                 <tr>
-                  <td colSpan={4} className="px-4 py-10 text-center text-gray-400 text-sm">
+                  <td colSpan={4} className="px-4 py-10 text-center text-gray-600 text-sm">
                     No downloads recorded yet.
                   </td>
                 </tr>
               )}
               {!downloads && (
                 <tr>
-                  <td colSpan={4} className="px-4 py-6 text-center text-gray-300 text-sm animate-pulse">
+                  <td colSpan={4} className="px-4 py-6 text-center text-gray-500 text-sm animate-pulse">
                     Loading…
                   </td>
                 </tr>

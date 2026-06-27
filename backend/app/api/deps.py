@@ -4,6 +4,7 @@ Shared FastAPI dependencies.
 Import from here everywhere — never import from individual endpoint files.
 """
 
+import asyncio
 import uuid
 from typing import AsyncGenerator
 
@@ -15,10 +16,19 @@ from sqlalchemy.orm import joinedload
 
 from app.core.security import decode_token
 from app.core.permissions import all_permissions
+from app.core.config import get_settings
+from app.core.device_auth_cache import device_auth_cache
 from app.db.base import AsyncSessionLocal
 from app.db.models import Device, Employee, Role
 
 bearer = HTTPBearer()
+_settings = get_settings()
+
+# Bounds how many COLD ingest-auth lookups (cache misses) may hit the DB at once.
+# A cold-start stampede (e.g. 1500 agents reconnecting after a deploy) is funnelled
+# through this semaphore so miss traffic can never exhaust the 10-slot HTTP pool —
+# it is kept well below pool_size+overflow. Warm tokens never reach here.
+_ingest_auth_miss_sem = asyncio.Semaphore(_settings.INGEST_AUTH_MISS_CONCURRENCY)
 
 
 # ── Database session ──────────────────────────────────────────────────────────
@@ -53,6 +63,61 @@ async def get_current_device(
     if not device:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
     return device
+
+
+async def get_ingest_device_id(
+    creds: HTTPAuthorizationCredentials = Depends(bearer),
+) -> str:
+    """Auth for the HOT ingest path — returns the device_id, NOT a DB-bound ORM row.
+
+    Steady state touches the DB ZERO times: the (token → device_id) mapping is
+    served from the in-process device_auth_cache. Only a cold/expired token does a
+    single short DB lookup, and that lookup is:
+      • concurrency-bounded (_ingest_auth_miss_sem) so a reconnect stampede can
+        never exhaust the HTTP pool, and
+      • opened/closed in its own `async with` block so it can never leak a
+        connection.
+    This is what lets /v1/ingest scale to 1000s of devices without the per-post
+    auth SELECT overflowing the shared HTTP pool.
+    """
+    token = creds.credentials
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != "device":
+            raise ValueError
+        device_uuid = uuid.UUID(payload["sub"])
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid device token")
+
+    cached = device_auth_cache.get(token)
+    if cached is not None:
+        return cached
+
+    # Cold miss → one short, bounded DB validation, then cache it.
+    async with _ingest_auth_miss_sem:
+        # Re-check under the semaphore: a sibling miss for the same token may have
+        # warmed the cache while we waited for a slot.
+        cached = device_auth_cache.get(token)
+        if cached is not None:
+            return cached
+        # Capture the invalidation epoch BEFORE the DB read so that an admin
+        # revoke racing this lookup cannot be re-warmed by the set() below.
+        seen_epoch = device_auth_cache.epoch()
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Device.id).where(
+                    Device.id        == device_uuid,
+                    Device.jwt_token == token,
+                    Device.is_active == True,
+                )
+            )
+            row = result.first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
+
+    device_id = str(row[0])
+    device_auth_cache.set(token, device_id, seen_epoch=seen_epoch)
+    return device_id
 
 
 # ── Admin / user auth + RBAC ────────────────────────────────────────────────

@@ -1,44 +1,62 @@
 """
-Ingest Queue — async work queue for high-throughput agent event writes.
+Ingest Queue — 30-second bulk COPY accumulator for agent event writes.
 
 Architecture
 ────────────
-                ┌─ agent A ──► POST /v1/ingest
-                ├─ agent B ──► POST /v1/ingest    → 202 Accepted immediately
-                └─ agent N ──► POST /v1/ingest
-                                    │
-                                    ▼
-                           ┌─────────────────┐
-                           │  IngestQueue    │  bounded asyncio.Queue
-                           │  (max 100 000)  │  – drops nothing while space exists
-                           └────────┬────────┘  – back-pressure: sync write if full
-                                    │
-                      ┌─────────────┼──────────────┐
-                      ▼             ▼              ▼
-                  worker-0      worker-1  …   worker-N   (adaptive pool)
-                      │
-                      ▼
-              bulk INSERT … ON CONFLICT DO NOTHING
-              + UPDATE devices SET last_seen = NOW()
-              + broadcaster.publish("devices_updated")
+               ┌─ agent A ──► POST /v1/ingest
+               ├─ agent B ──► POST /v1/ingest    → 202 Accepted immediately
+               └─ agent N ──► POST /v1/ingest
+                                   │
+                    enqueue() updates device_cache instantly (zero latency to UI)
+                                   │
+                                   ▼
+                          ┌─────────────────┐
+                          │  asyncio.Queue  │  bounded 100 000 events
+                          │  (in-memory)    │  503 back-pressure if full
+                          └────────┬────────┘
+                                   │
+                              every 30 s
+                                   │
+                                   ▼
+                          ┌─────────────────────────────────┐
+                          │  PostgreSQL COPY bulk flush      │
+                          │                                 │
+                          │  COPY rows → temp _ae_stage     │  fastest bulk write path
+                          │  INSERT … SELECT … ON CONFLICT  │  dedup by event id
+                          │  UPDATE devices SET last_seen   │  one query for all devices
+                          └─────────────────────────────────┘
 
-Pool sizing
-───────────
-• Starts with MIN_WORKERS (INGEST_MIN_WORKERS, default 2).
-• Every SCALE_INTERVAL seconds a monitor coroutine checks queue depth.
-  – depth >  SCALE_UP_AT   → spin up one worker  (up to MAX_WORKERS)
-  – depth <  SCALE_DOWN_AT → shut down one worker (down to MIN_WORKERS)
-• MAX_WORKERS is hard-clamped to the ingest pool's connection count
-  (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW) so workers can never
-  outnumber connections and block on checkout.
-• Workers drain in BATCH_SIZE chunks (default 200) so each DB round-trip
-  is as cheap as possible.
+Why COPY + 30s window
+─────────────────────
+At 2 000 agents × 1 event/5 s = 400 events/second, a 0.4-second batch window
+produces ~160 events per flush → ~1 000 DB round-trips/minute.  A 30-second
+window accumulates ~12 000 events and yields 2 round-trips/minute — 500× fewer
+commits, 500× less lock contention, and PostgreSQL COPY is 3-5× faster than
+bulk INSERT for large payloads (no parse/plan overhead per row, minimal WAL).
 
-Device-state cache
-──────────────────
-Workers also update an in-memory dict keyed by device_id with the latest
-last_seen, current_app, event_type.  The realtime endpoint reads from this
-dict instead of running the LATERAL-join SQL query on every poll.
+Because COPY has no ON CONFLICT clause, we stage into a temp table first:
+  • CREATE TEMP TABLE IF NOT EXISTS _ae_stage … ON COMMIT DELETE ROWS
+    (created once per connection; ON COMMIT DELETE ROWS self-clears after each
+    transaction, so the same table can be reused across flushes on the same
+    connection without a TRUNCATE)
+  • COPY records → _ae_stage
+  • INSERT INTO activity_events SELECT … FROM _ae_stage ON CONFLICT (id) DO NOTHING
+  • UPDATE devices SET last_seen = NOW() WHERE id = ANY(…)
+
+The device-state cache (used by the realtime dashboard) is updated at enqueue
+time — never delayed by the 30-second window.  The UI stays instant.
+
+Durability
+──────────
+• Agents get 202 immediately.  The backend owns events from that point.
+• On transient DB failure (network hiccup, failover): the whole batch is
+  re-queued without incrementing a retry counter, so a multi-minute outage
+  never exhausts the budget.
+• On non-transient failure (poison row): row-by-row rescue so one bad event
+  cannot sink 12 000 good ones.
+• On server crash mid-flush: any items already dequeued but not yet written are
+  re-queued by the CancelledError handler in _flush_now, then written by the
+  final flush in stop() — no silent loss.
 """
 
 from __future__ import annotations
@@ -46,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -53,20 +72,50 @@ from app.core.config import get_settings
 
 log = logging.getLogger("ingest_queue")
 
-# ── Tuning constants ──────────────────────────────────────────────────────────
-QUEUE_MAXSIZE   = 100_000   # drop back-pressure threshold
-BATCH_SIZE      = 200       # events per DB write cycle
-BATCH_WAIT      = 0.4       # seconds to wait for a full batch before flushing
-_settings        = get_settings()
-MIN_WORKERS     = _settings.INGEST_MIN_WORKERS   # always-on workers
-# Hard ceiling: never run more workers than the ingest pool has connections, or
-# the surplus workers block on checkout and time out (the pool "overflow" jam).
-# Keep MAX >= MIN so the pool is always at least its floor size.
-_INGEST_CONN_CAP = _settings.INGEST_DB_POOL_SIZE + _settings.INGEST_DB_MAX_OVERFLOW
-MAX_WORKERS     = max(MIN_WORKERS, min(_settings.INGEST_MAX_WORKERS, _INGEST_CONN_CAP))
-SCALE_INTERVAL  = 5.0       # how often to check queue depth
-SCALE_UP_AT     = 500       # grow pool when queue exceeds this
-SCALE_DOWN_AT   = 50        # shrink pool when queue drops below this
+# ── Tuning ────────────────────────────────────────────────────────────────────
+
+FLUSH_INTERVAL      = 30.0      # seconds between bulk COPY flushes
+QUEUE_MAXSIZE       = 100_000   # 503 back-pressure above this
+MAX_WRITE_RETRIES   = 3         # poison-pill guard (non-transient errors only)
+TRANSIENT_RETRY_BACKOFF = 1.0   # seconds before re-flushing after a transient error
+
+_settings = get_settings()
+
+# ── Staging table (created once per DB connection, self-clearing on commit) ───
+
+_STAGE_DDL = """\
+CREATE TEMP TABLE IF NOT EXISTS _ae_stage (
+    id            UUID         NOT NULL,
+    device_id     UUID         NOT NULL,
+    event_type    TEXT         NOT NULL,
+    app_name      TEXT,
+    window_title  TEXT,
+    url           TEXT,
+    duration      INTEGER      NOT NULL DEFAULT 0,
+    timestamp     TIMESTAMPTZ  NOT NULL,
+    received_at   TIMESTAMPTZ  NOT NULL
+) ON COMMIT DELETE ROWS\
+"""
+
+_STAGE_COLS = [
+    "id", "device_id", "event_type",
+    "app_name", "window_title", "url",
+    "duration", "timestamp", "received_at",
+]
+
+_MERGE_SQL = """\
+INSERT INTO activity_events
+    (id, device_id, event_type, app_name, window_title, url,
+     duration, timestamp, received_at)
+SELECT id, device_id, event_type, app_name, window_title, url,
+       duration, timestamp, received_at
+FROM _ae_stage
+ON CONFLICT (id) DO NOTHING\
+"""
+
+_LAST_SEEN_SQL = (
+    "UPDATE devices SET last_seen = NOW() WHERE id = ANY($1::uuid[])"
+)
 
 
 class IngestQueue:
@@ -74,14 +123,12 @@ class IngestQueue:
 
     def __init__(self) -> None:
         self._q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=QUEUE_MAXSIZE)
-        self._workers: list[asyncio.Task] = []
-        self._monitor_task: asyncio.Task | None = None
+        self._flusher_task: asyncio.Task | None = None
         self._running = False
-        # Graceful scale-down: workers exit between batches when this is > 0,
-        # instead of being cancelled mid-DB-write (which would drop the batch).
-        self._shrink_pending = 0
 
-        # In-memory device state cache: {device_id: {...}} used by realtime endpoint
+        # In-memory device state cache: {device_id: {...}}
+        # Read by the realtime SSE endpoint — updated at enqueue time, never
+        # delayed by the flush interval.
         self.device_cache: dict[str, dict] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -90,38 +137,38 @@ class IngestQueue:
         if self._running:
             return
         self._running = True
-        for _ in range(MIN_WORKERS):
-            self._spawn_worker()
-        self._monitor_task = asyncio.create_task(
-            self._monitor_loop(), name="ingest-monitor"
+        self._flusher_task = asyncio.create_task(
+            self._flusher_loop(), name="ingest-flusher"
         )
-        log.info("IngestQueue started (min=%d max=%d batch=%d)",
-                 MIN_WORKERS, MAX_WORKERS, BATCH_SIZE)
+        log.info(
+            "IngestQueue started  flush_interval=%.0fs  queue_max=%d",
+            FLUSH_INTERVAL, QUEUE_MAXSIZE,
+        )
 
     async def stop(self) -> None:
         self._running = False
-        if self._monitor_task:
-            self._monitor_task.cancel()
-        # Drain remaining items with a final flush
-        await self._flush_remaining()
-        for t in self._workers:
-            t.cancel()
-        self._workers.clear()
+        if self._flusher_task and not self._flusher_task.done():
+            self._flusher_task.cancel()
+            try:
+                await self._flusher_task
+            except asyncio.CancelledError:
+                pass
+        # Final flush: picks up any events re-queued by CancelledError handler
+        # inside _flush_now, plus anything that arrived between the last timer
+        # flush and shutdown.
+        await self._flush_now(label="shutdown")
         log.info("IngestQueue stopped")
 
-    # ── Enqueue ───────────────────────────────────────────────────────────────
+    # ── Public: enqueue ───────────────────────────────────────────────────────
 
     def enqueue(self, item: dict[str, Any]) -> bool:
         """Non-blocking enqueue.
 
-        The device state cache is updated HERE, before the DB write, so the
-        realtime endpoint always reflects the latest agent status with zero
-        latency regardless of how busy the worker pool is.
+        Updates the in-memory device cache IMMEDIATELY — zero latency to the
+        realtime dashboard regardless of the 30-second DB flush interval.
 
-        Returns False (but still updates cache) if the queue is full — the
-        caller can fall back to a synchronous write for that batch.
+        Returns False if the queue is full (caller should return 503).
         """
-        # Cache update is instant; never skip it.
         self._update_cache(item)
         try:
             self._q.put_nowait(item)
@@ -129,167 +176,240 @@ class IngestQueue:
         except asyncio.QueueFull:
             return False
 
-    # ── Worker pool management ────────────────────────────────────────────────
+    # ── Timer loop ────────────────────────────────────────────────────────────
 
-    def _spawn_worker(self) -> None:
-        n = len(self._workers)
-        t = asyncio.create_task(self._worker(n), name=f"ingest-worker-{n}")
-        t.add_done_callback(lambda _t: self._workers.remove(_t)
-                            if _t in self._workers else None)
-        self._workers.append(t)
-        log.debug("Spawned ingest worker %d (pool size=%d)", n, len(self._workers))
-
-    async def _monitor_loop(self) -> None:
-        while self._running:
-            await asyncio.sleep(SCALE_INTERVAL)
-            depth = self._q.qsize()
-            alive = len([t for t in self._workers if not t.done()])
-
-            if depth > SCALE_UP_AT and alive < MAX_WORKERS:
-                self._spawn_worker()
-                log.info("IngestQueue scaled UP → %d workers (queue depth %d)",
-                         alive + 1, depth)
-
-            elif depth < SCALE_DOWN_AT and alive > MIN_WORKERS and self._shrink_pending == 0:
-                # Ask one worker to exit after its current batch — never cancel
-                # mid-write, or the batch it already popped would be lost.
-                self._shrink_pending = 1
-                log.info("IngestQueue scaling DOWN → %d workers (queue depth %d)",
-                         alive - 1, depth)
-
-    # ── Worker coroutine ──────────────────────────────────────────────────────
-
-    async def _worker(self, worker_id: int) -> None:
-        # Dedicated writer pool — never competes with HTTP requests for connections.
-        from app.db.base import IngestSessionLocal
-        from app.core import broadcaster
-        from app.db.models import ActivityEvent
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
-        from sqlalchemy import text
-
-        log.debug("Worker %d starting", worker_id)
+    async def _flusher_loop(self) -> None:
+        """Sleep FLUSH_INTERVAL, flush, repeat.  Exits cleanly on cancellation."""
         try:
-            while True:
-                # Honour a pending scale-down between batches (safe exit point).
-                if self._shrink_pending > 0:
-                    alive = len([t for t in self._workers if not t.done()])
-                    if alive > MIN_WORKERS:
-                        self._shrink_pending -= 1
-                        break
-
-                batch: list[dict] = []
-
-                # Block until at least one item arrives
-                try:
-                    item = await asyncio.wait_for(self._q.get(), timeout=1.0)
-                    batch.append(item)
-                    self._q.task_done()
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    if not self._running:
-                        break
-                    continue
-
-                # Greedily collect up to BATCH_SIZE without extra waiting
-                deadline = time.monotonic() + BATCH_WAIT
-                while len(batch) < BATCH_SIZE and time.monotonic() < deadline:
-                    try:
-                        extra = self._q.get_nowait()
-                        batch.append(extra)
-                        self._q.task_done()
-                    except asyncio.QueueEmpty:
-                        await asyncio.sleep(0.02)
-
-                # --- DB write ---
-                rows = [b["row"] for b in batch]
-                device_ids = list({b["device_id"] for b in batch})
-
-                try:
-                    async with IngestSessionLocal() as db:
-                        # Bulk insert events
-                        stmt = (
-                            pg_insert(ActivityEvent)
-                            .values(rows)
-                            .on_conflict_do_nothing(index_elements=["id"])
-                        )
-                        await db.execute(stmt)
-
-                        # Touch last_seen for each device that appeared in this batch
-                        await db.execute(
-                            text("UPDATE devices SET last_seen = NOW() "
-                                 "WHERE id = ANY(:ids)"),
-                            {"ids": device_ids},
-                        )
-                        await db.commit()
-
-                    await broadcaster.publish("devices_updated")
-
-                    log.debug("Worker %d: flushed %d events, %d devices",
-                              worker_id, len(rows), len(device_ids))
-
-                except Exception as exc:
-                    log.error("Worker %d DB write failed: %s", worker_id, exc)
-
+            while self._running:
+                await asyncio.sleep(FLUSH_INTERVAL)
+                if not self._running:
+                    break
+                await self._flush_now()
         except asyncio.CancelledError:
             pass
-        log.debug("Worker %d stopped", worker_id)
+
+    # ── Flush ─────────────────────────────────────────────────────────────────
+
+    async def _flush_now(self, label: str = "timer") -> None:
+        """Drain the queue and bulk-write everything via PostgreSQL COPY."""
+        batch: list[dict] = []
+        while True:
+            try:
+                item = self._q.get_nowait()
+                batch.append(item)
+                self._q.task_done()
+            except asyncio.QueueEmpty:
+                break
+
+        if not batch:
+            return
+
+        rows       = [b["row"]       for b in batch]
+        device_ids = list({b["device_id"] for b in batch})
+
+        log.debug("[%s] flushing %d events, %d devices", label, len(rows), len(device_ids))
+
+        try:
+            await self._copy_to_db(rows, device_ids)
+            from app.core import broadcaster
+            await broadcaster.publish("devices_updated")
+            log.info("[%s] COPY flush done: %d events, %d devices", label, len(rows), len(device_ids))
+
+        except asyncio.CancelledError:
+            # The DB write was interrupted (shutdown during flush).
+            # Put everything back so the final stop() flush can write it.
+            for item in reversed(batch):
+                try:
+                    self._q.put_nowait(item)
+                except asyncio.QueueFull:
+                    self._dead_letter(item, "queue full during cancellation recovery")
+            raise
+
+        except Exception as exc:
+            await self._handle_write_failure(batch, exc)
+
+    # ── PostgreSQL COPY write ─────────────────────────────────────────────────
+
+    async def _copy_to_db(self, rows: list[dict], device_ids: list[str]) -> None:
+        """
+        Bulk-write via COPY into temp staging table, then merge into activity_events.
+
+        Uses raw asyncpg (via the SQLAlchemy ingest engine) so copy_records_to_table
+        is available — SQLAlchemy's execute() layer doesn't expose COPY natively.
+
+        Transaction: all three statements (COPY + INSERT + UPDATE) are atomic.
+        If anything fails, PostgreSQL rolls back; the caller re-queues the batch.
+        """
+        from app.db.base import ingest_engine
+
+        now = datetime.now(timezone.utc)
+
+        def _uuid(v: Any) -> uuid.UUID:
+            return uuid.UUID(v) if isinstance(v, str) else v
+
+        records = [
+            (
+                _uuid(r["id"]),
+                _uuid(r["device_id"]),
+                r["event_type"],
+                r["app_name"],
+                r["window_title"] or "",
+                r["url"] or "",
+                r["duration"],
+                r["timestamp"],
+                now,
+            )
+            for r in rows
+        ]
+        did_uuids = [_uuid(d) for d in device_ids]
+
+        async with ingest_engine.connect() as conn:
+            raw = await conn.get_raw_connection()
+            pg = raw.driver_connection  # asyncpg.Connection
+
+            async with pg.transaction():
+                # Temp table: created once per connection, rows cleared on commit.
+                await pg.execute(_STAGE_DDL)
+                await pg.copy_records_to_table(
+                    "_ae_stage",
+                    records=records,
+                    columns=_STAGE_COLS,
+                )
+                await pg.execute(_MERGE_SQL)
+                await pg.execute(_LAST_SEEN_SQL, did_uuids)
+
+    # ── Write failure handling ────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_transient(exc: Exception) -> bool:
+        from sqlalchemy.exc import OperationalError, InterfaceError, DBAPIError
+        if isinstance(exc, (OperationalError, InterfaceError)):
+            return True
+        if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+            return True
+        try:
+            import asyncpg
+            if isinstance(exc, (
+                asyncpg.ConnectionFailureError,
+                asyncpg.ConnectionDoesNotExistError,
+                asyncpg.TooManyConnectionsError,
+                asyncpg.PostgresConnectionError,
+            )):
+                return True
+        except ImportError:
+            pass
+        return False
+
+    async def _handle_write_failure(self, batch: list[dict], exc: Exception) -> None:
+        """Recover a failed batch WITHOUT losing events.
+
+        • Transient (DB failover / outage): re-enqueue the whole batch without
+          incrementing the retry counter — a multi-minute outage must not burn
+          through the budget and dead-letter valid events.
+        • Non-transient (constraint / data error): fall back to row-by-row rescue
+          so one poison event cannot sink thousands of valid ones.
+        """
+        if self._is_transient(exc):
+            await asyncio.sleep(TRANSIENT_RETRY_BACKOFF)
+            n = self._requeue(batch, count_attempt=False)
+            log.warning("Transient write error (%s) — requeued %d events for retry", exc, n)
+            return
+        await self._rescue_per_row(batch, exc)
+
+    def _requeue(self, items: list[dict], count_attempt: bool) -> int:
+        n = 0
+        for item in items:
+            if count_attempt:
+                item["attempts"] = item.get("attempts", 0) + 1
+                if item["attempts"] > MAX_WRITE_RETRIES:
+                    self._dead_letter(item, "exceeded max write retries")
+                    continue
+            try:
+                self._q.put_nowait(item)
+                n += 1
+            except asyncio.QueueFull:
+                self._dead_letter(item, "queue full on requeue")
+        return n
+
+    async def _rescue_per_row(self, batch: list[dict], exc: Exception) -> None:
+        """Write each event individually so one bad row can't sink the rest.
+
+        Uses SQLAlchemy INSERT (not COPY) — one row at a time, each in its own
+        transaction.  Slow, but only triggered by non-transient data errors.
+        """
+        from app.db.base import IngestSessionLocal
+        from app.db.models import ActivityEvent
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        log.warning(
+            "Non-transient write error (%s) — isolating %d events row-by-row",
+            exc, len(batch),
+        )
+        ok_devices: set[str] = set()
+        poison = 0
+        for item in batch:
+            try:
+                async with IngestSessionLocal() as db:
+                    await db.execute(
+                        pg_insert(ActivityEvent)
+                        .values([item["row"]])
+                        .on_conflict_do_nothing(index_elements=["id"])
+                    )
+                    await db.commit()
+                ok_devices.add(item["device_id"])
+            except Exception as row_exc:
+                if self._is_transient(row_exc):
+                    self._requeue([item], count_attempt=False)
+                else:
+                    self._dead_letter(item, str(row_exc))
+                    poison += 1
+
+        if ok_devices:
+            try:
+                from sqlalchemy import text
+                async with IngestSessionLocal() as db:
+                    await db.execute(
+                        text("UPDATE devices SET last_seen = NOW() WHERE id = ANY(:ids)"),
+                        {"ids": list(ok_devices)},
+                    )
+                    await db.commit()
+                from app.core import broadcaster
+                await broadcaster.publish("devices_updated")
+            except Exception as e:
+                log.warning("Row-by-row rescue: last_seen update failed: %s", e)
+
+        if poison:
+            log.error("Dead-lettered %d poison event(s) after row-by-row rescue", poison)
+
+    def _dead_letter(self, item: dict, reason: str) -> None:
+        """Last resort: log full payload at ERROR so it's recoverable from logs."""
+        log.error(
+            "INGEST_DEAD_LETTER reason=%s device=%s row=%r",
+            reason, item.get("device_id"), item.get("row"),
+        )
 
     # ── Device state cache ────────────────────────────────────────────────────
 
     def _update_cache(self, item: dict) -> None:
         did = item["device_id"]
         row = item["row"]
-        existing = self.device_cache.get(did, {})
-        ts = row.get("timestamp")
-        cached_ts = existing.get("last_seen")
+        existing   = self.device_cache.get(did, {})
+        ts         = row.get("timestamp")
+        cached_ts  = existing.get("last_seen")
 
-        # Only update if this event is newer than what we have
         if ts and (cached_ts is None or ts > cached_ts):
             self.device_cache[did] = {
-                "last_seen":    ts,
-                "latest_type":  row.get("event_type"),
-                "current_app":  row.get("app_name") if row.get("event_type") == "window_change" else existing.get("current_app"),
-                "updated_at":   time.time(),
+                "last_seen":   ts,
+                "latest_type": row.get("event_type"),
+                "current_app": (
+                    row.get("app_name")
+                    if row.get("event_type") == "window_change"
+                    else existing.get("current_app")
+                ),
+                "updated_at":  time.time(),
             }
 
-    # ── Drain on shutdown ─────────────────────────────────────────────────────
 
-    async def _flush_remaining(self) -> None:
-        remaining = self._q.qsize()
-        if remaining == 0:
-            return
-        log.info("Flushing %d remaining items on shutdown", remaining)
-        try:
-            from app.db.base import IngestSessionLocal
-            from app.db.models import ActivityEvent
-            from sqlalchemy.dialects.postgresql import insert as pg_insert
-            from sqlalchemy import text
-
-            rows, device_ids = [], set()
-            while not self._q.empty():
-                try:
-                    b = self._q.get_nowait()
-                    rows.append(b["row"])
-                    device_ids.add(b["device_id"])
-                    self._q.task_done()
-                except asyncio.QueueEmpty:
-                    break
-
-            if rows:
-                async with IngestSessionLocal() as db:
-                    stmt = (
-                        pg_insert(ActivityEvent)
-                        .values(rows)
-                        .on_conflict_do_nothing(index_elements=["id"])
-                    )
-                    await db.execute(stmt)
-                    await db.execute(
-                        text("UPDATE devices SET last_seen = NOW() WHERE id = ANY(:ids)"),
-                        {"ids": list(device_ids)},
-                    )
-                    await db.commit()
-        except Exception as e:
-            log.error("Flush-on-shutdown failed: %s", e)
-
-
-# Singleton — imported by ingest endpoint and wired into app lifespan
+# Singleton — imported by ingest endpoint and wired into the FastAPI lifespan
 ingest_queue = IngestQueue()

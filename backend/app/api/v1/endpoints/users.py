@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, require
 from app.core import audit
 from app.core.config import get_settings
+from app.core.group_tree import descendant_group_ids
 from app.core.ingest_queue import ingest_queue
 from app.core.security import hash_password_async
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
@@ -101,7 +102,10 @@ async def list_users(
         q = q.where(func.lower(Employee.name).like(like) | func.lower(Employee.email).like(like))
 
     # Groups-scoped users only see employees who belong to their assigned groups.
-    if getattr(user, "_scope_type", "own") == "groups":
+    # Pending users have no group memberships yet (they just registered), so skip
+    # this filter for the pending queue — any admin who can view users may see and
+    # approve/reject them regardless of group scope.
+    if not pending and getattr(user, "_scope_type", "own") == "groups":
         gid_rows = await db.execute(
             select(EmployeeGroupAccess.group_id)
             .where(EmployeeGroupAccess.employee_id == user.id)
@@ -109,12 +113,13 @@ async def list_users(
         my_gids = [g[0] for g in gid_rows.all()]
         if not my_gids:
             return []
-        # Employees who are direct group members
+        expanded = await descendant_group_ids(my_gids, user.company_id, db)
+        # Employees who are direct group members in assigned groups + subgroups.
         q = q.where(
             Employee.id.in_(
                 select(GroupMember.employee_id)
                 .where(
-                    GroupMember.group_id.in_(my_gids),
+                    GroupMember.group_id.in_(expanded),
                     GroupMember.member_type == "employee",
                     GroupMember.employee_id.isnot(None),
                 )
@@ -154,6 +159,7 @@ async def list_users(
             is_approved=getattr(e, "is_approved", True),
             group_ids=groups_by_emp.get(e.id, []),
             device_count=device_counts.get(e.id, 0),
+            created_at=e.created_at.isoformat() if e.created_at else None,
         )
         for e in employees
     ]
@@ -225,10 +231,11 @@ async def _visible_employees(user: Employee, db: AsyncSession) -> list[Employee]
         my_gids = [g[0] for g in gid_rows.all()]
         if not my_gids:
             return []
+        expanded = await descendant_group_ids(my_gids, user.company_id, db)
         q = q.where(
             Employee.id.in_(
                 select(GroupMember.employee_id).where(
-                    GroupMember.group_id.in_(my_gids),
+                    GroupMember.group_id.in_(expanded),
                     GroupMember.member_type == "employee",
                     GroupMember.employee_id.isnot(None),
                 )
@@ -277,24 +284,32 @@ async def list_user_activity(
     for did, eid, seen in dev_rows:
         devs_by_emp.setdefault(eid, []).append((str(did), seen))
 
-    # Active seconds (today + trailing 7 days) for ALL users in one aggregate.
-    sums = (await db.execute(
-        text("""
-            SELECT d.employee_id AS eid,
-                   COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
-                                      AND ae.timestamp >= date_trunc('day', NOW())
-                                     THEN ae.duration ELSE 0 END), 0) AS today,
-                   COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
-                                     THEN ae.duration ELSE 0 END), 0) AS week
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.employee_id = ANY(:ids)
-              AND ae.timestamp >= NOW() - INTERVAL '7 days'
-            GROUP BY d.employee_id
-        """),
-        {"ids": emp_ids},
-    )).all()
-    time_by_emp = {r.eid: (int(r.today), int(r.week)) for r in sums}
+    # Active seconds (today + trailing 7 days). Query by device_id directly so
+    # the planner can use the (device_id, timestamp) index without a JOIN through
+    # devices — the employee→device mapping is already in devs_by_emp.
+    all_dev_ids = [did for devs in devs_by_emp.values() for did, _ in devs]
+    time_by_emp: dict = {}
+    if all_dev_ids:
+        sums = (await db.execute(
+            text("""
+                SELECT ae.device_id,
+                       COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
+                                          AND ae.timestamp >= date_trunc('day', NOW())
+                                         THEN ae.duration ELSE 0 END), 0) AS today,
+                       COALESCE(SUM(CASE WHEN ae.event_type = 'window_change'
+                                         THEN ae.duration ELSE 0 END), 0) AS week
+                FROM activity_events ae
+                WHERE ae.device_id = ANY(:ids)
+                  AND ae.timestamp >= NOW() - INTERVAL '7 days'
+                GROUP BY ae.device_id
+            """),
+            {"ids": all_dev_ids},
+        )).all()
+        time_by_device = {str(r.device_id): (int(r.today), int(r.week)) for r in sums}
+        for eid, devs in devs_by_emp.items():
+            today = sum(time_by_device.get(did, (0, 0))[0] for did, _ in devs)
+            week  = sum(time_by_device.get(did, (0, 0))[1] for did, _ in devs)
+            time_by_emp[eid] = (today, week)
 
     out = []
     for e in employees:
@@ -430,22 +445,51 @@ async def create_user(
     user: Employee = Depends(require("users", "create")),
     db: AsyncSession = Depends(get_db),
 ):
-    dup = await db.execute(select(Employee).where(Employee.email == body.email.lower()))
+    # Only block on active (non-deleted) duplicates.
+    dup = await db.execute(
+        select(Employee).where(
+            Employee.email == body.email.lower(),
+            Employee.is_deleted == False,  # noqa: E712
+        )
+    )
     if dup.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already exists")
 
     role = await _resolve_role(body.role_id, user.company_id, db)
-    emp = Employee(
-        company_id=user.company_id,
-        email=body.email.lower(),
-        name=body.name,
-        role="employee",
-        role_id=role.id if role else None,
-        password_hash=await hash_password_async(body.password) if body.password else None,
-        is_active=True,
+
+    # If a soft-deleted row exists for this email, resurrect it in place.
+    # The DB unique constraint on email prevents inserting a second row.
+    deleted = await db.execute(
+        select(Employee).where(
+            Employee.email == body.email.lower(),
+            Employee.is_deleted == True,  # noqa: E712
+        )
     )
-    db.add(emp)
-    await db.flush()
+    emp = deleted.scalar_one_or_none()
+    if emp:
+        emp.name = body.name
+        emp.role = "employee"
+        emp.role_id = role.id if role else None
+        emp.password_hash = await hash_password_async(body.password) if body.password else None
+        emp.is_active = True
+        emp.is_approved = True
+        emp.is_deleted = False
+        emp.google_sub = None
+        await db.execute(delete(EmployeeGroupAccess).where(EmployeeGroupAccess.employee_id == emp.id))
+        await db.flush()
+    else:
+        emp = Employee(
+            company_id=user.company_id,
+            email=body.email.lower(),
+            name=body.name,
+            role="employee",
+            role_id=role.id if role else None,
+            password_hash=await hash_password_async(body.password) if body.password else None,
+            is_active=True,
+        )
+        db.add(emp)
+        await db.flush()
+
     await _set_group_access(emp.id, user.company_id, body.group_ids, db)
     await audit.record(db, user, "user.create", "user", str(emp.id), {"email": emp.email})
     await db.commit()
@@ -463,7 +507,8 @@ async def _get_user(user_id: str, company_id, db: AsyncSession) -> Employee:
         raise HTTPException(status_code=400, detail="Invalid user id")
     r = await db.execute(
         select(Employee).options(selectinload(Employee.role_obj))
-        .where(Employee.id == uid, Employee.company_id == company_id)
+        .where(Employee.id == uid, Employee.company_id == company_id,
+               Employee.is_deleted == False)  # noqa: E712
     )
     emp = r.scalar_one_or_none()
     if not emp:

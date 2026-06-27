@@ -64,7 +64,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
               <p className="text-sm font-semibold text-gray-900 truncate">
                 Welcome back, {me.name}!
               </p>
-              <p className="text-xs text-gray-500 truncate mt-0.5">
+              <p className="text-xs text-gray-600 truncate mt-0.5">
                 <span className="font-medium text-brand-600">{me.role_name}</span>
                 {" · "}
                 {todayLabel}
@@ -81,7 +81,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
               onClick={handleRefresh}
               disabled={spinning}
               aria-label="Refresh"
-              className="p-2.5 rounded-xl text-gray-500 hover:text-gray-900 hover:bg-gray-100 transition-colors disabled:opacity-50"
+              className="p-2.5 rounded-xl text-gray-600 hover:text-gray-900 hover:bg-gray-100 transition-colors disabled:opacity-50"
             >
               <RefreshCw size={18} className={spinning ? "animate-spin" : ""} />
             </button>

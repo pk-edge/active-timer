@@ -2,11 +2,13 @@
 import { useState } from "react";
 import useSWR from "swr";
 import { Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon } from "lucide-react";
-import { getOverview, fmtSeconds } from "@/lib/api";
+import { getOverview } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied, StatusDonut, ActivityTrend } from "@/components/charts";
+import { AccessDenied } from "@/components/AccessDenied";
+import { StatusDonut, ActivityTrend } from "@/components/charts";
+import PageLoader from "@/components/PageLoader";
+import PageSkeleton from "@/components/PageSkeleton";
 import type { OverviewStats } from "@/types";
-import RefreshButton from "@/components/RefreshButton";
 
 const PERIODS = [{ label: "7 days", value: 7 }, { label: "14 days", value: 14 }, { label: "30 days", value: 30 }];
 
@@ -16,7 +18,7 @@ function StatusRow({ icon, label, value, color }: { icon: React.ReactNode; label
       <span className={color}>{icon}</span>
       <div>
         <p className="text-xl font-bold text-gray-900 leading-none">{value}</p>
-        <p className="text-xs text-gray-500 mt-0.5">{label}</p>
+        <p className="text-xs text-gray-600 mt-0.5">{label}</p>
       </div>
     </div>
   );
@@ -25,45 +27,62 @@ function StatusRow({ icon, label, value, color }: { icon: React.ReactNode; label
 export default function OverviewPage() {
   const { loading, can } = useUser();
   const [days, setDays] = useState(7);
-  const { data, isLoading, mutate } = useSWR<OverviewStats>(
+
+  const { data, isLoading, isValidating } = useSWR<OverviewStats>(
     ["overview", days],
     () => getOverview(undefined, days),
-    { refreshInterval: 15_000 },
+    {
+      // Trend data is daily aggregates — no need to re-scan every 15 s.
+      // 60 s keeps "active right now" counts reasonably fresh without
+      // hammering the backend on every open dashboard tab.
+      refreshInterval: 60_000,
+      // Collapse any same-key requests that arrive within 10 s (e.g. rapid
+      // tab-switches or React StrictMode double-invocations).
+      dedupingInterval: 10_000,
+    },
   );
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("home", "view")) return <AccessDenied label="the Organization Overview" />;
+  // Cold load: show skeleton instead of a flash of zeros.
+  // keepPreviousData (global SWR config) serves cached data on re-navigation,
+  // so the skeleton only appears on the very first visit.
+  if (isLoading && !data) return <PageSkeleton variant="dashboard" />;
 
   const s = data?.status ?? { active: 0, passive: 0, inactive: 0 };
   const avgHrs = ((data?.avg_active_seconds_today ?? 0) / 3600).toFixed(1);
+  // isValidating is true during background revalidation (data is already shown).
+  const isRefreshing = isValidating && !!data;
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Organization Overview</h1>
-        <RefreshButton onRefresh={() => mutate()} />
+        {isRefreshing && (
+          <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+        )}
       </div>
-      <p className="text-gray-500 text-sm mb-6">
+      <p className="text-gray-600 text-sm mb-6">
         Live activity across all devices · <span className="text-gray-700 font-medium">{avgHrs} avg active hours today</span>
       </p>
 
-      {/* Top stat cards */}
+      {/* Top stat cards — rendered from cached data; no skeleton flash on period switch */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
           <p className="text-2xl font-bold text-gray-900">{data?.total_devices ?? 0}</p>
-          <p className="text-xs text-gray-500 mt-0.5">Total devices</p>
+          <p className="text-xs text-gray-600 mt-0.5">Total devices</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
           <p className="text-2xl font-bold text-green-600">{data?.active_today ?? 0}</p>
-          <p className="text-xs text-gray-500 mt-0.5">Active today</p>
+          <p className="text-xs text-gray-600 mt-0.5">Active today</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
           <p className="text-2xl font-bold text-brand-600">{avgHrs}h</p>
-          <p className="text-xs text-gray-500 mt-0.5">Avg active / device</p>
+          <p className="text-xs text-gray-600 mt-0.5">Avg active / device</p>
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
           <p className="text-2xl font-bold text-gray-900">{s.active}</p>
-          <p className="text-xs text-gray-500 mt-0.5">Active right now</p>
+          <p className="text-xs text-gray-600 mt-0.5">Active right now</p>
         </div>
       </div>
 
@@ -71,7 +90,7 @@ export default function OverviewPage() {
         {/* Activity donut + live status */}
         <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-2 mb-3">
-            <ActivityIcon size={15} className="text-gray-400" />
+            <ActivityIcon size={15} className="text-gray-600" />
             <p className="text-sm font-semibold text-gray-800">Live Activity Status</p>
           </div>
           <div className="grid grid-cols-2 gap-4 items-center">
@@ -79,16 +98,16 @@ export default function OverviewPage() {
             <div className="space-y-4">
               <StatusRow icon={<Wifi size={18} />}    label="Active now"   value={s.active}   color="text-green-500" />
               <StatusRow icon={<Coffee size={18} />}  label="Passive now"  value={s.passive}  color="text-amber-500" />
-              <StatusRow icon={<WifiOff size={18} />} label="Inactive now" value={s.inactive} color="text-gray-400" />
+              <StatusRow icon={<WifiOff size={18} />} label="Inactive now" value={s.inactive} color="text-gray-600" />
             </div>
           </div>
         </div>
 
-        {/* Active hours trend */}
+        {/* Active hours trend — skeleton shown while new period data loads */}
         <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
-              <Clock size={15} className="text-gray-400" />
+              <Clock size={15} className="text-gray-600" />
               <p className="text-sm font-semibold text-gray-800">Active Hours Trend</p>
             </div>
             <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
@@ -100,7 +119,10 @@ export default function OverviewPage() {
               ))}
             </div>
           </div>
-          {isLoading ? <div className="h-[180px] animate-pulse bg-gray-50 rounded" /> : <ActivityTrend data={data?.trend ?? []} />}
+          {isLoading && !data
+            ? <div className="h-[180px] animate-pulse bg-gray-50 rounded" />
+            : <ActivityTrend data={data?.trend ?? []} />
+          }
         </div>
       </div>
     </div>

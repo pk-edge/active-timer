@@ -1,4 +1,5 @@
 "use client";
+import PageLoader from "@/components/PageLoader";
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import {
@@ -12,13 +13,13 @@ import {
   getTechSummary, getCategoryAllocation, getAppTrends, getAppList,
   getAdoptionData, getTechCategories, fmtSeconds } from "@/lib/api";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
-import { format, subDays } from "date-fns";
-import { getGroups } from "@/lib/api";
+import GroupPicker from "@/components/GroupPicker";
+import { format } from "date-fns";
 import { useUser } from "@/hooks/useUser";
-import { AccessDenied } from "@/components/charts";
-import RefreshButton from "@/components/RefreshButton";
+import { AccessDenied } from "@/components/AccessDenied";
+import PageSkeleton from "@/components/PageSkeleton";
 import type {
-  TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory, Group } from "@/types";
+  TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory } from "@/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -26,7 +27,7 @@ const LINE_COLORS = ["#4a0f70","#22c55e","#f59e0b","#a855f7","#ef4444","#06b6d4"
 const RADIAN = Math.PI / 180;
 
 function PctBadge({ v }: { v: number }) {
-  if (v === 0) return <span className="inline-flex items-center gap-0.5 text-xs text-gray-400"><Minus size={10} />0%</span>;
+  if (v === 0) return <span className="inline-flex items-center gap-0.5 text-xs text-gray-600"><Minus size={10} />0%</span>;
   if (v > 0)   return <span className="inline-flex items-center gap-0.5 text-xs text-green-600"><ArrowUpRight size={10} />+{v.toFixed(1)}%</span>;
   return              <span className="inline-flex items-center gap-0.5 text-xs text-red-500"><ArrowDownRight size={10} />{v.toFixed(1)}%</span>;
 }
@@ -43,7 +44,24 @@ function FilterChip({
       >
         {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
-      <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+      <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
+    </div>
+  );
+}
+
+// Skeleton shown while a tab's data lazy-loads (tabs fetch only when selected).
+function TabSkeleton() {
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl shadow-sm p-5 animate-pulse">
+      <div className="h-4 w-56 bg-gray-200 rounded mb-4" />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="h-[280px] bg-gray-50 rounded-lg" />
+        <div className="space-y-2 py-2">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="h-5 bg-gray-100 rounded" style={{ width: `${90 - i * 7}%` }} />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -100,9 +118,9 @@ function OverviewTab({
             <p className="text-sm font-semibold text-gray-800">
               Usage by Category and Top Applications/Sites
             </p>
-            <Info size={13} className="text-gray-400" />
+            <Info size={13} className="text-gray-600" />
           </div>
-          <p className="text-xs text-gray-400 mt-0.5">
+          <p className="text-xs text-gray-600 mt-0.5">
             Identify your organisation&apos;s activity allocation (% of total duration) by category and top applications/sites.
           </p>
         </div>
@@ -110,11 +128,11 @@ function OverviewTab({
         <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-100">
           {/* LEFT — Donut */}
           <div className="p-5">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-3">
               Category Allocation %
             </p>
             {donutData.length === 0 ? (
-              <div className="h-[280px] flex items-center justify-center text-sm text-gray-400">No data yet.</div>
+              <div className="h-[280px] flex items-center justify-center text-sm text-gray-600">No data yet.</div>
             ) : (
               <ResponsiveContainer width="100%" height={300}>
                 <PieChart margin={{ top: 20, right: 60, bottom: 20, left: 60 }}>
@@ -150,11 +168,11 @@ function OverviewTab({
 
           {/* RIGHT — Horizontal bar chart */}
           <div className="p-5">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+            <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-3">
               Top Applications/Sites by Allocation % based on Activity Date
             </p>
             {barData.length === 0 ? (
-              <div className="h-[280px] flex items-center justify-center text-sm text-gray-400">No data yet.</div>
+              <div className="h-[280px] flex items-center justify-center text-sm text-gray-600">No data yet.</div>
             ) : (
               <div className="space-y-1.5 max-h-[380px] overflow-y-auto pr-1">
                 {barData.map(app => (
@@ -184,7 +202,7 @@ function OverviewTab({
                           </div>
                         )}
                       </div>
-                      <span className="text-xs text-gray-500 w-10 text-right tabular-nums shrink-0">
+                      <span className="text-xs text-gray-600 w-10 text-right tabular-nums shrink-0">
                         {app.pct.toFixed(1)}%
                       </span>
                     </div>
@@ -212,7 +230,7 @@ function TopChangesTab({ allocation, trends }: { allocation: CategoryAllocationI
       {/* Category change bar chart */}
       <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
         <p className="text-sm font-semibold text-gray-800 mb-0.5">Top Changes in Category Allocation</p>
-        <p className="text-xs text-gray-400 mb-4">Percentage point change vs comparison period</p>
+        <p className="text-xs text-gray-600 mb-4">Percentage point change vs comparison period</p>
         <ResponsiveContainer width="100%" height={Math.max(sorted.length * 36, 200)}>
           <BarChart data={sorted} layout="vertical" barCategoryGap="30%" margin={{ left: 8, right: 48 }}>
             <XAxis type="number" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false}
@@ -238,12 +256,12 @@ function TopChangesTab({ allocation, trends }: { allocation: CategoryAllocationI
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-100">
           <p className="text-sm font-semibold text-gray-800">Changes in Category Allocation</p>
-          <p className="text-xs text-gray-400 mt-0.5">Identify top changes in activity application/site allocation to understand technology usage trends.</p>
+          <p className="text-xs text-gray-600 mt-0.5">Identify top changes in activity application/site allocation to understand technology usage trends.</p>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm min-w-[640px]">
           <thead>
-            <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide">
+            <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
               <th className="text-left px-5 py-2.5 font-semibold">Category</th>
               <th className="text-left px-5 py-2.5 font-semibold">Allocation % Chg</th>
               <th className="text-left px-5 py-2.5 font-semibold">Allocation % (Activity Date)</th>
@@ -274,7 +292,7 @@ function TopChangesTab({ allocation, trends }: { allocation: CategoryAllocationI
               </tr>
             ))}
             {allocation.length === 0 && (
-              <tr><td colSpan={5} className="px-5 py-10 text-center text-gray-400">No data yet.</td></tr>
+              <tr><td colSpan={5} className="px-5 py-10 text-center text-gray-600">No data yet.</td></tr>
             )}
           </tbody>
         </table>
@@ -302,7 +320,7 @@ function TrendTable({ title, icon: Icon, items, up }: {
       <div className="overflow-x-auto">
         <table className="w-full text-sm min-w-[640px]">
         <thead>
-          <tr className="bg-gray-50 text-gray-400 text-xs uppercase tracking-wide">
+          <tr className="bg-gray-50 text-gray-600 text-xs uppercase tracking-wide">
             <th className="text-left px-4 py-2 font-semibold">App / Site</th>
             <th className="text-left px-4 py-2 font-semibold">Alloc % Chg</th>
             <th className="text-right px-4 py-2 font-semibold">Alloc %</th>
@@ -315,7 +333,7 @@ function TrendTable({ title, icon: Icon, items, up }: {
             <tr key={app.app_name} className="border-t border-gray-100 hover:bg-gray-50">
               <td className="px-4 py-2.5">
                 <p className="font-medium text-gray-800 text-xs truncate max-w-[110px]">{app.app_name}</p>
-                <p className="text-[11px] text-gray-400">{app.category_name}</p>
+                <p className="text-[11px] text-gray-600">{app.category_name}</p>
               </td>
               <td className="px-4 py-2.5">
                 <div className="flex items-center gap-1.5">
@@ -326,13 +344,13 @@ function TrendTable({ title, icon: Icon, items, up }: {
                   </div>
                 </div>
               </td>
-              <td className="px-4 py-2.5 text-right text-xs text-gray-500">{app.pct.toFixed(1)}%</td>
+              <td className="px-4 py-2.5 text-right text-xs text-gray-600">{app.pct.toFixed(1)}%</td>
               <td className="px-4 py-2.5 text-right text-xs text-gray-600">{app.hours.toFixed(1)}</td>
               <td className="px-4 py-2.5 text-right"><PctBadge v={app.user_change} /></td>
             </tr>
           ))}
           {items.length === 0 && (
-            <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-400">No changes in this period.</td></tr>
+            <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-600">No changes in this period.</td></tr>
           )}
         </tbody>
       </table>
@@ -346,13 +364,13 @@ function TrendTable({ title, icon: Icon, items, up }: {
 function AdoptionTab({ data }: { data: AdoptionData }) {
   if (!data.apps.length) return (
     <div className="bg-white border border-gray-200 rounded-xl p-10 shadow-sm text-center">
-      <p className="text-sm text-gray-400">No adoption data for this period.</p>
+      <p className="text-sm text-gray-600">No adoption data for this period.</p>
     </div>
   );
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
       <p className="text-sm font-semibold text-gray-800 mb-0.5">Application Adoption Over Time</p>
-      <p className="text-xs text-gray-400 mb-4">Daily unique users per top application</p>
+      <p className="text-xs text-gray-600 mb-4">Daily unique users per top application</p>
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={data.series} margin={{ top: 4, right: 16, bottom: 4, left: 0 }}>
           <XAxis dataKey="date" tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
@@ -377,40 +395,47 @@ type Tab = "overview" | "top-changes" | "adoption";
 export default function TechUtilizationPage() {
   const { loading, can } = useUser();
   const [tab,        setTab]        = useState<Tab>("overview");
-  const [dateRange,  setDateRange]  = useState<DateRange>({ since: format(subDays(new Date(), 29), "yyyy-MM-dd"), until: format(new Date(), "yyyy-MM-dd") });
+  // Default to TODAY only — a single-day aggregation is far cheaper than 30 days,
+  // which is the main reason this page's concurrent query burst was saturating
+  // the backend. Users widen the range via the filter when they need history.
+  const [dateRange,  setDateRange]  = useState<DateRange>({ since: format(new Date(), "yyyy-MM-dd"), until: format(new Date(), "yyyy-MM-dd") });
   const [groupId,    setGroupId]    = useState("");
   const [employeeId, setEmployeeId] = useState("");
   const [categoryId, setCategoryId] = useState("");
 
-  const { data: groups }     = useSWR<Group[]>("groups", () => import("@/lib/api").then(m => m.getGroups()));
   const { data: users }      = useSWR("users-tf", () => import("@/lib/api").then(m => m.getUsers()));
   const { data: categories } = useSWR<AppCategory[]>("tech-cats-filter", getTechCategories);
 
-  const { data: summary, mutate: ms } = useSWR(
+  // summary feeds the always-visible stat cards, so it always loads.
+  const { data: summary, isLoading: summaryLoading } = useSWR(
     ["tech-sum",   dateRange.since, dateRange.until, groupId, employeeId],
     () => getTechSummary(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
   );
-  const { data: allocation, mutate: ma } = useSWR(
-    ["tech-alloc", dateRange.since, dateRange.until, groupId, employeeId],
+  // Everything below is fetched ONLY for the tab that needs it (key = null when
+  // inactive → SWR skips the request). This turns the old 7-request mount burst
+  // — which was saturating the single backend worker and producing the CORS/5xx
+  // errors — into ~4 concurrent requests, and tab data loads on demand.
+  const { data: allocation } = useSWR(
+    tab !== "adoption" ? ["tech-alloc", dateRange.since, dateRange.until, groupId, employeeId] : null,
     () => getCategoryAllocation(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
   );
-  const { data: trends, mutate: mt } = useSWR(
-    ["tech-trends", dateRange.since, dateRange.until, groupId, employeeId],
+  const { data: trends } = useSWR(
+    tab === "top-changes" ? ["tech-trends", dateRange.since, dateRange.until, groupId, employeeId] : null,
     () => getAppTrends(dateRange.since, dateRange.until, 10),
   );
-  const { data: apps, mutate: mapp } = useSWR(
-    ["tech-apps", dateRange.since, dateRange.until, categoryId, groupId, employeeId],
+  const { data: apps } = useSWR(
+    tab === "overview" ? ["tech-apps", dateRange.since, dateRange.until, categoryId, groupId, employeeId] : null,
     () => getAppList(dateRange.since, dateRange.until, categoryId || undefined, 50, groupId || undefined, employeeId || undefined),
   );
-  const { data: adoption, mutate: mad } = useSWR(
-    ["tech-adoption", dateRange.since, dateRange.until],
+  const { data: adoption } = useSWR(
+    tab === "adoption" ? ["tech-adoption", dateRange.since, dateRange.until] : null,
     () => getAdoptionData(dateRange.since, dateRange.until, 5),
   );
 
-  function refresh() { return Promise.all([ms(), ma(), mt(), mapp(), mad()]); }
 
-  if (loading) return null;
+  if (loading) return <PageLoader />;
   if (!can("tech", "view")) return <AccessDenied label="Technology Utilization" />;
+  if (summaryLoading && !summary) return <PageSkeleton variant="dashboard" />;
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "overview",    label: "Overview"    },
@@ -435,9 +460,8 @@ export default function TechUtilizationPage() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Technology Utilization</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Track application usage and category allocation across your organisation</p>
+          <p className="text-sm text-gray-600 mt-0.5">Track application usage and category allocation across your organisation</p>
         </div>
-        <RefreshButton onRefresh={refresh} />
       </div>
 
       {/* Filter chips */}
@@ -445,14 +469,7 @@ export default function TechUtilizationPage() {
         {/* Activity Date */}
         <DateRangePicker value={dateRange} onChange={setDateRange} />
         {/* Team / Group */}
-        <div className="relative">
-          <select value={groupId} onChange={e => { setGroupId(e.target.value); setEmployeeId(""); }}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
-            <option value="">All Teams</option>
-            {(groups ?? []).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-          </select>
-          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-        </div>
+        <GroupPicker value={groupId} onChange={v => { setGroupId(v); setEmployeeId(""); }} />
 
         {/* User */}
         <div className="relative">
@@ -464,7 +481,7 @@ export default function TechUtilizationPage() {
               <option key={u.id} value={u.id}>{u.name}</option>
             ))}
           </select>
-          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
         </div>
 
         {/* Category filter */}
@@ -474,12 +491,12 @@ export default function TechUtilizationPage() {
             <option value="">All Categories</option>
             {(categories ?? []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
-          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
         </div>
 
         {(groupId || employeeId || categoryId) && (
           <button onClick={() => { setGroupId(""); setEmployeeId(""); setCategoryId(""); }}
-                  className="text-xs text-gray-400 hover:text-gray-700 underline">
+                  className="text-xs text-gray-600 hover:text-gray-700 underline">
             Clear filters
           </button>
         )}
@@ -493,10 +510,10 @@ export default function TechUtilizationPage() {
               <div className={`w-8 h-8 rounded-lg ${s.color.split(" ")[0]} flex items-center justify-center`}>
                 <s.icon size={15} className={s.color.split(" ")[1]} />
               </div>
-              <p className="text-xs text-gray-500 font-medium uppercase tracking-wide truncate">{s.label}</p>
+              <p className="text-xs text-gray-600 font-medium uppercase tracking-wide truncate">{s.label}</p>
             </div>
             <p className="text-2xl font-bold text-gray-900 truncate">{s.value}</p>
-            {s.sub && <p className="text-xs text-gray-400 mt-0.5 truncate">Category: {s.sub}</p>}
+            {s.sub && <p className="text-xs text-gray-600 mt-0.5 truncate">Category: {s.sub}</p>}
           </div>
         ))}
       </div>
@@ -509,7 +526,7 @@ export default function TechUtilizationPage() {
                     className={`px-5 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
                       tab === t.key
                         ? "border-brand-600 text-brand-600"
-                        : "border-transparent text-gray-500 hover:text-gray-800"
+                        : "border-transparent text-gray-600 hover:text-gray-800"
                     }`}>
               {t.label}
             </button>
@@ -517,15 +534,23 @@ export default function TechUtilizationPage() {
         </div>
       </div>
 
-      {/* Tab content */}
+      {/* Tab content — each tab shows a skeleton until its (lazy) data arrives.
+          Loaded-but-empty responses are arrays/objects (truthy), so the skeleton
+          only shows while genuinely fetching, never on a real empty result. */}
       {tab === "overview" && (
-        <OverviewTab allocation={allocation ?? []} apps={apps ?? []} categoryId={categoryId} />
+        allocation && apps
+          ? <OverviewTab allocation={allocation} apps={apps} categoryId={categoryId} />
+          : <TabSkeleton />
       )}
       {tab === "top-changes" && (
-        <TopChangesTab allocation={allocation ?? []} trends={trends ?? { trending_up: [], trending_down: [] }} />
+        allocation && trends
+          ? <TopChangesTab allocation={allocation} trends={trends} />
+          : <TabSkeleton />
       )}
       {tab === "adoption" && (
-        <AdoptionTab data={adoption ?? { apps: [], series: [] }} />
+        adoption
+          ? <AdoptionTab data={adoption} />
+          : <TabSkeleton />
       )}
     </div>
   );
