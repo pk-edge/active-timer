@@ -98,7 +98,7 @@ export default function ActivityPage() {
   }, [realtime, debouncedSearch]);
 
   if (loading) return <PageLoader />;
-  if (!can("home", "view")) return <AccessDenied label="the Activity Dashboard" />;
+  if (!can("activity", "view")) return <AccessDenied label="Activity Dashboard" />;
   // Cold load: skeleton while the SSE connection delivers the first snapshot.
   // keepPreviousData (global SWR config) serves the cache on re-navigation,
   // so the skeleton only appears on the very first visit.

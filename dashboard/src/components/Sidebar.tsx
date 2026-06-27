@@ -22,9 +22,9 @@ export const NAV_GROUPS: NavGroup[] = [
     title: "Home",
     items: [
       { href: "/home",       label: "Home",                  icon: Home,            module: "home" },
-      { href: "/overview",   label: "Organization Overview", icon: Building2,       module: "home" },
-      { href: "/team",       label: "Team Management",       icon: Users2,          module: "home" },
-      { href: "/activity",   label: "Activity Dashboard",    icon: LayoutDashboard, module: "home" },
+      { href: "/overview",   label: "Organization Overview", icon: Building2,       module: "overview" },
+      { href: "/team",       label: "Team Management",       icon: Users2,          module: "team" },
+      { href: "/activity",   label: "Activity Dashboard",    icon: LayoutDashboard, module: "activity" },
       { href: "/categories", label: "App Categories",        icon: Tag,             module: "categories" },
     ],
   },
