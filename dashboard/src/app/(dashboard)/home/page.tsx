@@ -201,12 +201,11 @@ function AdminHome() {
   const avgMins = Math.round(avgSecs / 60);
   const avgDisplay = avgSecs < 3600 ? `${avgMins}m` : `${avgHrs}h`;
 
-  // Online right now = same logic as /v1/devices is_online: any device seen within
-  // the cutoff window, regardless of whether its latest event was lock/idle_start.
-  // Use the live SSE count (active + passive) when available; fall back to overview.
-  const onlineNow = realtime.length > 0
-    ? realtime.filter(d => d.status !== "inactive").length
-    : s.active + s.passive;
+  // Prefer live SSE counts; fall back to stats API when stream hasn't connected yet.
+  const activeNow   = realtime.length > 0 ? realtime.filter(d => d.status === "active").length   : s.active;
+  const passiveNow  = realtime.length > 0 ? realtime.filter(d => d.status === "passive").length  : s.passive;
+  const inactiveNow = realtime.length > 0 ? realtime.filter(d => d.status === "inactive").length : s.inactive;
+  const onlineNow   = activeNow + passiveNow;
 
   const QUICK_ACTIONS = [
     { href: "/devices",  label: "Devices",  icon: Monitor,      module: "devices" },
@@ -274,19 +273,19 @@ function AdminHome() {
             <p className="text-sm font-semibold text-gray-800">Live Activity Status</p>
           </div>
           <div className="grid grid-cols-2 gap-4 items-center">
-            <StatusDonut active={s.active} passive={s.passive} inactive={s.inactive} />
+            <StatusDonut active={activeNow} passive={passiveNow} inactive={inactiveNow} />
             <div className="space-y-4">
               <div className="flex items-center gap-3">
                 <Wifi size={18} className="text-green-500" />
-                <div><p className="text-xl font-bold text-gray-900 leading-none">{s.active}</p><p className="text-xs text-gray-600 mt-0.5">Active now</p></div>
+                <div><p className="text-xl font-bold text-gray-900 leading-none">{activeNow}</p><p className="text-xs text-gray-600 mt-0.5">Active now</p></div>
               </div>
               <div className="flex items-center gap-3">
                 <Coffee size={18} className="text-amber-500" />
-                <div><p className="text-xl font-bold text-gray-900 leading-none">{s.passive}</p><p className="text-xs text-gray-600 mt-0.5">Passive now</p></div>
+                <div><p className="text-xl font-bold text-gray-900 leading-none">{passiveNow}</p><p className="text-xs text-gray-600 mt-0.5">Passive now</p></div>
               </div>
               <div className="flex items-center gap-3">
                 <WifiOff size={18} className="text-gray-600" />
-                <div><p className="text-xl font-bold text-gray-900 leading-none">{s.inactive}</p><p className="text-xs text-gray-600 mt-0.5">Inactive now</p></div>
+                <div><p className="text-xl font-bold text-gray-900 leading-none">{inactiveNow}</p><p className="text-xs text-gray-600 mt-0.5">Inactive now</p></div>
               </div>
             </div>
           </div>

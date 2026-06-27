@@ -36,7 +36,7 @@ export default function TeamPage() {
   );
 
   if (loading) return <PageLoader />;
-  if (!can("home", "view")) return <AccessDenied label="Team Management" />;
+  if (!can("team", "view")) return <AccessDenied label="Team Management" />;
   // Cold load: wait for groups, then for the selected group's stats.
   if (!groups || (groupId && !stats)) return <PageSkeleton variant="dashboard" />;
 
