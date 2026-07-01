@@ -74,8 +74,12 @@ _GOOGLE_USER_URL  = "https://www.googleapis.com/oauth2/v3/userinfo"
 _ENVIRONMENTS = [
     {"dashboard": "https://tracker.onedge.co",
      "api":       "https://api.tracker.onedge.co"},
+    {"dashboard": "https://beacon.onedge.co",
+     "api":       "https://api.beacon.onedge.co"},
     {"dashboard": "https://tracker.staging.onedge.co",
      "api":       "https://api.tracker.staging.onedge.co"},
+    {"dashboard": "https://beacon.staging.onedge.co",
+     "api":       "https://api.beacon.staging.onedge.co"},
     {"dashboard": "http://localhost:3002",
      "api":       "http://localhost:8000"},
 ]
