@@ -1,39 +1,4 @@
-"""
-Google OAuth 2.0 — server-side authorization code flow.
 
-Flow
-────
-1. GET  /v1/auth/google           → redirect browser to Google consent screen
-2. GET  /v1/auth/google/callback  → exchange code, validate domain, create/link
-                                    employee, issue JWT, redirect to dashboard
-3. POST /v1/auth/set-password     → lets Google-only users add an email password
-
-Configuration (.env)
-────────────────────
-GOOGLE_CLIENT_ID      — from Google Cloud Console
-GOOGLE_CLIENT_SECRET  — from Google Cloud Console (or use encrypted secrets file)
-GOOGLE_REDIRECT_URI   — OPTIONAL. Blank → derived from the request
-                        (request.url_for). Whatever value is used MUST be
-                        registered in Google Cloud Console.
-DASHBOARD_URL         — OPTIONAL fallback. The user is normally returned to the
-                        allowlisted origin they signed in from, so one backend
-                        serves localhost / staging / prod without per-env hosts.
-ALLOWED_EMAIL_DOMAIN  — only this domain is accepted (default: onedge.co)
-
-Multi-environment redirects
-───────────────────────────
-Both the Google callback URL and the post-login dashboard URL are derived from
-the live request (the dashboard origin is validated against CORS_ORIGINS so the
-token can never be redirected off-allowlist). This requires uvicorn to run with
---proxy-headers so the public https host behind the load balancer is seen.
-
-Security
-────────
-• Credentials: loaded from secrets/google_credentials.enc when SECRETS_KEY is set,
-  otherwise falls back to GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env vars.
-• CSRF: HMAC-signed state token (10-minute expiry, no DB storage).
-• Domain: rejects any email not ending in @ALLOWED_EMAIL_DOMAIN.
-"""
 import base64
 import hashlib
 import hmac
@@ -46,7 +11,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, field_validator
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -384,5 +349,10 @@ async def set_password(
     user: Employee = Depends(get_current_user),
     db:   AsyncSession = Depends(get_db),
 ):
-    user.password_hash = await hash_password_async(body.password)
+    # Explicit UPDATE: get_current_user returns a DETACHED instance (see
+    # app/api/deps.py), so mutating the object would silently not be flushed.
+    pw_hash = await hash_password_async(body.password)
+    await db.execute(
+        update(Employee).where(Employee.id == user.id).values(password_hash=pw_hash)
+    )
     await db.commit()

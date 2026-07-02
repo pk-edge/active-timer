@@ -35,7 +35,10 @@ export function UserProvider({ children }: { children: ReactNode }) {
 
   function can(module: string, action: string = "view"): boolean {
     if (!me) return false;
-    if (me.scope_type === "all") return true;   // Super Admin shortcut
+    // Always check the permissions array — the backend populates it correctly for
+    // every role including Super Admin. Relying on scope_type === "all" was wrong:
+    // scope_type controls data visibility (which devices), not feature access, so a
+    // non-system role with scope_type "all" would incorrectly bypass all checks.
     return me.permissions.some(p => p.module === module && p.action === action);
   }
 

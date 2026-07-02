@@ -3,8 +3,10 @@ import { useState, useEffect, FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { adminLogin, loginWithToken, setPassword, BASE } from "@/lib/api";
+import { logEvent } from "@/lib/auditLogger";
 import { Clock, Eye, EyeOff, X, ShieldOff } from "lucide-react";
 import EdgeLogo from "@/components/EdgeLogo";
+import PageLoader from "@/components/PageLoader";
 
 /* ── Google "G" SVG icon ─────────────────────────────────────────────────── */
 function GoogleIcon() {
@@ -139,6 +141,27 @@ const OAUTH_ERRORS: Record<string, string> = {
 };
 
 /* ── Main login page ─────────────────────────────────────────────────────── */
+// "form"          → email/Google sign-in form
+// "redirecting"   → session established; show ONLY the loader while we hand off
+//                   to /home (covers both email + Google, so there's no flash
+//                   of the form or a second loader style)
+// "password-setup"→ brand-new Google user setting an optional password
+type Phase = "form" | "redirecting" | "password-setup";
+
+// Decide the initial phase synchronously from the URL so a Google callback
+// (/login?token=…) paints the loader immediately instead of flashing the form
+// for a frame before the effect below runs. (For a normal visit — no token —
+// this returns "form", matching the server render.)
+function initialPhase(): Phase {
+  if (typeof window === "undefined") return "form";
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("error")) return "form";
+  if (params.get("token")) {
+    return params.get("new_user") === "true" ? "password-setup" : "redirecting";
+  }
+  return "form";
+}
+
 export default function LoginPage() {
   const router = useRouter();
 
@@ -148,8 +171,7 @@ export default function LoginPage() {
   const [pending,       setPending]      = useState(false);
   const [restricted,    setRestricted]   = useState(false);
   const [loading,       setLoading]      = useState(false);
-  const [googleLoading, setGoogleLoading] = useState(false);
-  const [showPwReset,   setShowPwReset]  = useState(false);
+  const [phase,         setPhase]        = useState<Phase>(initialPhase);
 
   /* ── Handle redirect from Google OAuth callback ──────────────────────── */
   useEffect(() => {
@@ -167,17 +189,20 @@ export default function LoginPage() {
       } else {
         setError(msg ?? "Google sign-in failed. Please try again.");
       }
+      setPhase("form");
       window.history.replaceState({}, "", "/login");
       return;
     }
 
     if (token) {
       loginWithToken(token);
+      logEvent("auth.login", "session", undefined, { method: "google" });
       window.history.replaceState({}, "", "/login");
       if (newUser) {
-        setShowPwReset(true); // show password-setup modal before navigating
+        setPhase("password-setup"); // show password-setup modal before navigating
       } else {
-        router.replace("/");
+        setPhase("redirecting");
+        router.replace("/home");
       }
     }
   }, [router]);
@@ -189,7 +214,11 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await adminLogin(email, password);
-      router.replace("/");
+      logEvent("auth.login", "session", undefined, { method: "email" });
+      // Swap the whole form for the loader and go straight to /home — one
+      // clean loader, then the dashboard.
+      setPhase("redirecting");
+      router.replace("/home");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       if (msg.includes("Portal access restricted")) {
@@ -199,14 +228,13 @@ export default function LoginPage() {
       } else {
         setError("Invalid email or password.");
       }
-    } finally {
       setLoading(false);
     }
   }
 
   /* ── Google sign-in ──────────────────────────────────────────────────── */
   function handleGoogleSignIn() {
-    setGoogleLoading(true);
+    setPhase("redirecting");
     // Always start OAuth on the SAME backend the rest of the app talks to
     // (BASE = NEXT_PUBLIC_API_URL). A separate OAuth-base var used to default to
     // localhost at build time and sent staging/prod sign-ins to the wrong host.
@@ -223,10 +251,13 @@ export default function LoginPage() {
     window.location.href = `${base}/v1/auth/google?origin=${origin}`;
   }
 
+  // Session established — show only the loader while we hand off to /home.
+  if (phase === "redirecting") return <PageLoader />;
+
   return (
     <>
-      {showPwReset && (
-        <SetPasswordModal onDone={() => { setShowPwReset(false); router.replace("/"); }} />
+      {phase === "password-setup" && (
+        <SetPasswordModal onDone={() => { setPhase("redirecting"); router.replace("/home"); }} />
       )}
 
       <div className="min-h-screen flex items-center justify-center p-4 bg-gray-50">
@@ -245,11 +276,10 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={handleGoogleSignIn}
-              disabled={googleLoading}
               className="w-full flex items-center justify-center gap-3 border border-gray-300 hover:border-gray-400 bg-white hover:bg-gray-50 disabled:opacity-50 text-gray-700 font-medium py-2.5 rounded-lg text-sm transition mb-5"
             >
               <GoogleIcon />
-              {googleLoading ? "Redirecting…" : "Continue with Google"}
+              Continue with Google
             </button>
 
             {/* ── Divider ───────────────────────────────────────────────── */}

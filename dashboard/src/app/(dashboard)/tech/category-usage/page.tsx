@@ -4,7 +4,7 @@ import { format } from "date-fns";
 import { useState, useMemo, useEffect } from "react";
 import useSWR from "swr";
 import Link from "next/link";
-import { ArrowUpRight, ChevronLeft } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, ChevronLeft } from "lucide-react";
 import { getCategoryUsage, getCategoryUsageDetail } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/AccessDenied";
@@ -149,6 +149,9 @@ export default function CategoryUsagePage() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
+      <Link href="/tech" className="inline-flex items-center gap-1.5 text-gray-600 text-sm mb-3 hover:text-gray-700 transition w-fit">
+        <ArrowLeft size={13} /> Tech Utilization
+      </Link>
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div>

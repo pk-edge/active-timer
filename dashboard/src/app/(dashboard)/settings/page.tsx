@@ -1,11 +1,15 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
 import PageSkeleton from "@/components/PageSkeleton";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/AccessDenied";
-import { getCompanyInfo, updateCompanySettings, type CompanyInfo } from "@/lib/api";
+import {
+  getCompanyInfo, updateCompanySettings,
+  type CompanyInfo, type CompanySettings,
+} from "@/lib/api";
+import { logEvent } from "@/lib/auditLogger";
 import {
   Building2, Activity, Bell, Link2,
   Check, ChevronRight, Copy, Eye, EyeOff,
@@ -20,13 +24,24 @@ const TABS: { key: Tab; label: string; icon: React.ReactNode }[] = [
   { key: "integration",   label: "Integration",   icon: <Link2     size={16} /> },
 ];
 
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+const DEFAULT_SETTINGS: CompanySettings = {
+  timezone: "UTC", work_start: "09:00", work_end: "18:00",
+  track_urls: true, track_window_titles: true, track_keyboard: false,
+  idle_timeout_mins: 5,
+  email_alerts: true, idle_alert_mins: 30, offline_alert_mins: 15, daily_report: true,
+  max_file_size_mb: 500,
+};
+
+function Toggle({ checked, onChange, disabled }: {
+  checked: boolean; onChange: (v: boolean) => void; disabled?: boolean;
+}) {
   return (
     <button
-      onClick={() => onChange(!checked)}
+      onClick={() => !disabled && onChange(!checked)}
+      disabled={disabled}
       className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
         checked ? "bg-brand-600" : "bg-gray-300"
-      }`}
+      } ${disabled ? "opacity-60 cursor-not-allowed" : ""}`}
     >
       <span
         className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
@@ -71,20 +86,91 @@ function SelectInput({ value, onChange, options }: {
 export default function SettingsPage() {
   const { loading, can } = useUser();
   const [tab, setTab] = useState<Tab>("general");
-  const [saved, setSaved] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [tokenVisible, setTokenVisible] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const { data: companyInfo, mutate: mutateCompany, isLoading } = useSWR<CompanyInfo>("company-info", getCompanyInfo);
   const [savingHeadless, setSavingHeadless] = useState(false);
+  const [inactiveDays, setInactiveDays]     = useState<string>("");
+  const [inactiveEnabled, setInactiveEnabled] = useState(false);
+  const [savingInactive, setSavingInactive]   = useState(false);
+
+  // General
+  const [orgName,   setOrgName]   = useState("");
+  // All persisted general/tracking/notification prefs live in one object.
+  const [prefs, setPrefs] = useState<CompanySettings>(DEFAULT_SETTINGS);
+  const setPref = <K extends keyof CompanySettings>(k: K, v: CompanySettings[K]) => {
+    setPrefs(p => ({ ...p, [k]: v }));
+    setSaveState("idle");
+  };
+
+  // Sync local state when company data loads
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => {
+    if (companyInfo && !hydrated) {
+      setOrgName(companyInfo.name);
+      setPrefs({ ...DEFAULT_SETTINGS, ...(companyInfo.settings ?? {}) });
+      const prev = companyInfo.inactive_device_days;
+      setInactiveDays(prev != null ? String(prev) : "30");
+      setInactiveEnabled(prev != null);
+      setHydrated(true);
+    }
+  }, [companyInfo, hydrated]);
+
+  async function persist(overrides?: {
+    headless?: boolean; days?: number | null; settings?: Partial<CompanySettings>;
+  }): Promise<boolean> {
+    if (!companyInfo) return false;
+    try {
+      const updated = await updateCompanySettings({
+        agent_headless: overrides?.headless ?? !!companyInfo.agent_headless,
+        inactive_device_days:
+          overrides?.days !== undefined
+            ? overrides.days
+            : inactiveEnabled ? (parseInt(inactiveDays) || null) : null,
+        name: orgName.trim() || undefined,
+        settings: { ...prefs, ...(overrides?.settings ?? {}) },
+      });
+      mutateCompany(updated, { revalidate: false });
+      return true;
+    } catch {
+      return false; // keep previous value on failure
+    }
+  }
+
+  async function handleSave() {
+    if (saveState === "saving") return;
+    setSaveState("saving");
+    const ok = await persist();
+    setSaveState(ok ? "saved" : "error");
+    if (ok) {
+      logEvent("settings.save", "settings", undefined, { section: tab });
+      setTimeout(() => setSaveState("idle"), 2500);
+    }
+  }
+
   async function toggleHeadless(v: boolean) {
     if (savingHeadless) return;
     setSavingHeadless(true);
-    try {
-      const updated = await updateCompanySettings(v);
-      mutateCompany(updated, { revalidate: false });
-    } catch { /* keep previous value on failure */ }
+    try { await persist({ headless: v }); }
     finally { setSavingHeadless(false); }
+  }
+
+  async function toggleInactiveEnabled(v: boolean) {
+    setInactiveEnabled(v);
+    setSavingInactive(true);
+    try { await persist({ days: v ? (parseInt(inactiveDays) || 30) : null }); }
+    finally { setSavingInactive(false); }
+  }
+
+  async function saveInactiveDays() {
+    if (!inactiveEnabled) return;
+    const days = parseInt(inactiveDays);
+    if (!days || days < 1) return;
+    setSavingInactive(true);
+    try { await persist({ days }); }
+    finally { setSavingInactive(false); }
   }
 
   function copyToken() {
@@ -94,32 +180,11 @@ export default function SettingsPage() {
     setTimeout(() => setCopied(false), 2000);
   }
 
-  // General
-  const [orgName,   setOrgName]   = useState("My Organization");
-  const [timezone,  setTimezone]  = useState("UTC");
-  const [workStart, setWorkStart] = useState("09:00");
-  const [workEnd,   setWorkEnd]   = useState("18:00");
-
-  // Tracking
-  const [trackUrls,       setTrackUrls]       = useState(true);
-  const [trackWindowTitles, setTrackWindowTitles] = useState(true);
-  const [idleTimeout,     setIdleTimeout]     = useState("5");
-  const [trackKeyboard,   setTrackKeyboard]   = useState(false);
-
-  // Notifications
-  const [emailAlerts,      setEmailAlerts]      = useState(true);
-  const [idleAlertMins,    setIdleAlertMins]    = useState("30");
-  const [offlineAlertMins, setOfflineAlertMins] = useState("15");
-  const [dailyReport,      setDailyReport]      = useState(true);
-
-  function handleSave() {
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2500);
-  }
-
   if (loading) return <PageLoader />;
   if (!can("settings", "view")) return <AccessDenied label="Settings" />;
   if (isLoading && !companyInfo) return <PageSkeleton variant="list" rows={4} />;
+
+  const canEdit = can("settings", "edit");
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
@@ -130,13 +195,19 @@ export default function SettingsPage() {
         </div>
         <button
           onClick={handleSave}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition ${
-            saved
+          disabled={!canEdit || saveState === "saving"}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition disabled:opacity-60 ${
+            saveState === "saved"
               ? "bg-green-50 text-green-600 border border-green-200"
-              : "bg-brand-600 text-white hover:bg-brand-700"
+              : saveState === "error"
+                ? "bg-red-50 text-red-600 border border-red-200"
+                : "bg-brand-600 text-white hover:bg-brand-700"
           }`}
         >
-          {saved ? <><Check size={14} /> Saved</> : "Save changes"}
+          {saveState === "saved"  && <><Check size={14} /> Saved</>}
+          {saveState === "error"  && "Save failed — retry"}
+          {saveState === "saving" && "Saving…"}
+          {saveState === "idle"   && "Save changes"}
         </button>
       </div>
 
@@ -177,15 +248,15 @@ export default function SettingsPage() {
                 <input
                   type="text"
                   value={orgName}
-                  onChange={e => setOrgName(e.target.value)}
+                  onChange={e => { setOrgName(e.target.value); setSaveState("idle"); }}
                   className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 w-52 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
                 />
               </SettingRow>
 
               <SettingRow label="Timezone" description="Used for all time displays and reports">
                 <SelectInput
-                  value={timezone}
-                  onChange={setTimezone}
+                  value={prefs.timezone}
+                  onChange={v => setPref("timezone", v)}
                   options={[
                     { label: "UTC", value: "UTC" },
                     { label: "Asia/Karachi (PKT +5:00)", value: "Asia/Karachi" },
@@ -200,8 +271,8 @@ export default function SettingsPage() {
               <SettingRow label="Work hours start" description="Start of the standard working day">
                 <input
                   type="time"
-                  value={workStart}
-                  onChange={e => setWorkStart(e.target.value)}
+                  value={prefs.work_start}
+                  onChange={e => setPref("work_start", e.target.value)}
                   className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
                 />
               </SettingRow>
@@ -209,10 +280,28 @@ export default function SettingsPage() {
               <SettingRow label="Work hours end" description="End of the standard working day">
                 <input
                   type="time"
-                  value={workEnd}
-                  onChange={e => setWorkEnd(e.target.value)}
+                  value={prefs.work_end}
+                  onChange={e => setPref("work_end", e.target.value)}
                   className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
                 />
+              </SettingRow>
+
+              <SettingRow
+                label="Maximum shared-file size"
+                description="Largest file that can be uploaded on the Shared Files page (1–5120 MB)"
+              >
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    min={1}
+                    max={5120}
+                    value={prefs.max_file_size_mb}
+                    onChange={e => setPref("max_file_size_mb", parseInt(e.target.value) || 0)}
+                    disabled={!canEdit}
+                    className="w-24 bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-800 text-center focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 disabled:opacity-50"
+                  />
+                  <span className="text-sm text-gray-500">MB</span>
+                </div>
               </SettingRow>
             </div>
           )}
@@ -227,23 +316,23 @@ export default function SettingsPage() {
                 label="Make agents invisible (headless)"
                 description="Hide the floating timer AND tray icon on ALL agents in this company. Tracking continues silently; running agents apply it within ~60s. You can override this per device on the device page."
               >
-                <Toggle checked={!!companyInfo?.agent_headless} onChange={toggleHeadless} />
+                <Toggle checked={!!companyInfo?.agent_headless} onChange={toggleHeadless} disabled={!canEdit || savingHeadless} />
               </SettingRow>
 
-              <SettingRow label="Track active applications" description="Record which app is in focus and for how long">
-                <Toggle checked={true} onChange={() => {}} />
+              <SettingRow label="Track active applications" description="Core tracking signal — always on">
+                <Toggle checked={true} onChange={() => {}} disabled />
               </SettingRow>
 
-              <SettingRow label="Track window titles" description="Capture the title bar text of the active window">
-                <Toggle checked={trackWindowTitles} onChange={setTrackWindowTitles} />
+              <SettingRow label="Track window titles" description="Capture the title bar text of the active window. Agents apply this within ~60s.">
+                <Toggle checked={prefs.track_window_titles} onChange={v => setPref("track_window_titles", v)} disabled={!canEdit} />
               </SettingRow>
 
-              <SettingRow label="Track browser URLs" description="Record URLs visited in Chrome, Firefox, and Edge">
-                <Toggle checked={trackUrls} onChange={setTrackUrls} />
+              <SettingRow label="Track browser URLs" description="Record URLs visited in Chrome, Firefox, and Edge. Agents apply this within ~60s.">
+                <Toggle checked={prefs.track_urls} onChange={v => setPref("track_urls", v)} disabled={!canEdit} />
               </SettingRow>
 
               <SettingRow label="Track keyboard activity" description="Detect keyboard usage for idle detection (no keylogging)">
-                <Toggle checked={trackKeyboard} onChange={setTrackKeyboard} />
+                <Toggle checked={prefs.track_keyboard} onChange={v => setPref("track_keyboard", v)} disabled={!canEdit} />
               </SettingRow>
 
               <SettingRow
@@ -251,8 +340,8 @@ export default function SettingsPage() {
                 description="Mark user as idle after this many minutes of no input"
               >
                 <SelectInput
-                  value={idleTimeout}
-                  onChange={setIdleTimeout}
+                  value={String(prefs.idle_timeout_mins)}
+                  onChange={v => setPref("idle_timeout_mins", parseInt(v) || 5)}
                   options={[
                     { label: "2 minutes", value: "2" },
                     { label: "5 minutes", value: "5" },
@@ -261,6 +350,34 @@ export default function SettingsPage() {
                     { label: "30 minutes", value: "30" },
                   ]}
                 />
+              </SettingRow>
+
+              <SettingRow
+                label="Auto-archive inactive devices"
+                description="Automatically archive devices that have not been seen for the specified number of days. Archived devices stop receiving data but can be restored."
+              >
+                <div className="flex items-center gap-3">
+                  <Toggle
+                    checked={inactiveEnabled}
+                    onChange={toggleInactiveEnabled}
+                    disabled={!canEdit}
+                  />
+                  {inactiveEnabled && (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min={1}
+                        max={365}
+                        value={inactiveDays}
+                        onChange={e => setInactiveDays(e.target.value)}
+                        onBlur={saveInactiveDays}
+                        disabled={savingInactive || !canEdit}
+                        className="w-16 bg-white border border-gray-300 rounded-lg px-2 py-1.5 text-sm text-gray-800 text-center focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 disabled:opacity-50"
+                      />
+                      <span className="text-sm text-gray-500">days</span>
+                    </div>
+                  )}
+                </div>
               </SettingRow>
             </div>
           )}
@@ -343,7 +460,7 @@ export default function SettingsPage() {
               <p className="text-sm text-gray-600 mb-5">Alerts and automated report delivery</p>
 
               <SettingRow label="Email alerts" description="Send alerts to the admin email address">
-                <Toggle checked={emailAlerts} onChange={setEmailAlerts} />
+                <Toggle checked={prefs.email_alerts} onChange={v => setPref("email_alerts", v)} disabled={!canEdit} />
               </SettingRow>
 
               <SettingRow
@@ -351,8 +468,8 @@ export default function SettingsPage() {
                 description="Send an alert when a device has been idle for this duration"
               >
                 <SelectInput
-                  value={idleAlertMins}
-                  onChange={setIdleAlertMins}
+                  value={String(prefs.idle_alert_mins)}
+                  onChange={v => setPref("idle_alert_mins", parseInt(v) || 0)}
                   options={[
                     { label: "15 minutes", value: "15" },
                     { label: "30 minutes", value: "30" },
@@ -368,8 +485,8 @@ export default function SettingsPage() {
                 description="Send an alert when a device goes offline for this duration"
               >
                 <SelectInput
-                  value={offlineAlertMins}
-                  onChange={setOfflineAlertMins}
+                  value={String(prefs.offline_alert_mins)}
+                  onChange={v => setPref("offline_alert_mins", parseInt(v) || 0)}
                   options={[
                     { label: "5 minutes", value: "5" },
                     { label: "15 minutes", value: "15" },
@@ -381,7 +498,7 @@ export default function SettingsPage() {
               </SettingRow>
 
               <SettingRow label="Daily summary report" description="Receive a daily email with activity highlights">
-                <Toggle checked={dailyReport} onChange={setDailyReport} />
+                <Toggle checked={prefs.daily_report} onChange={v => setPref("daily_report", v)} disabled={!canEdit} />
               </SettingRow>
             </div>
           )}

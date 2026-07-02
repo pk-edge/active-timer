@@ -33,6 +33,7 @@ MODULES: list[ModuleDef] = [
     {"key": "policy",     "label": "URL Policies",  "actions": ["view", "edit"]},
     {"key": "audit",      "label": "Audit Log",     "actions": ["view"]},
     {"key": "settings",   "label": "Settings",      "actions": ["view", "edit"]},
+    {"key": "files",      "label": "Shared Files",  "actions": ["view", "create", "delete"]},
 ]
 
 _VALID: set[tuple[str, str]] = {(m["key"], a) for m in MODULES for a in m["actions"]}

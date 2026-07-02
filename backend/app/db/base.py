@@ -14,7 +14,17 @@ log = logging.getLogger(__name__)
 
 settings = get_settings()
 
-def _make_engine(pool_size: int, max_overflow: int):
+def _make_engine(pool_size: int, max_overflow: int, statement_timeout_ms: int | None = None):
+    connect_args: dict = {
+        "timeout": 10,  # seconds before giving up on establishing a new connection
+    }
+    if statement_timeout_ms:
+        # Session-level ceiling on every statement from this pool. A runaway
+        # analytics query can otherwise pin a pooled connection for minutes and
+        # convoy every other request. Workers that legitimately need longer set
+        # their own `SET LOCAL statement_timeout` inside their transaction, and
+        # the migration runner resets it to 0 on its raw connections.
+        connect_args["server_settings"] = {"statement_timeout": str(statement_timeout_ms)}
     return create_async_engine(
         settings.DATABASE_URL,
         echo=False,
@@ -29,9 +39,7 @@ def _make_engine(pool_size: int, max_overflow: int):
         # LIFO keeps a hot core of connections busy and lets the rest idle out
         # via pool_recycle — fewer open connections on small DB instances.
         pool_use_lifo=True,
-        connect_args={
-            "timeout": 10,  # seconds before giving up on establishing a new connection
-        },
+        connect_args=connect_args,
     )
 
 
@@ -40,7 +48,8 @@ def _make_engine(pool_size: int, max_overflow: int):
 # Per-task connection budget = (DB_POOL_SIZE + DB_MAX_OVERFLOW)
 #                            + (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW);
 # keep 2x that under the DB max_connections to survive rolling deploys.
-engine = _make_engine(settings.DB_POOL_SIZE, settings.DB_MAX_OVERFLOW)
+engine = _make_engine(settings.DB_POOL_SIZE, settings.DB_MAX_OVERFLOW,
+                      statement_timeout_ms=settings.DB_STATEMENT_TIMEOUT_MS)
 ingest_engine = _make_engine(settings.INGEST_DB_POOL_SIZE, settings.INGEST_DB_MAX_OVERFLOW)
 
 AsyncSessionLocal = async_sessionmaker(
@@ -82,18 +91,18 @@ async def _wait_for_db(retries: int = 15, delay: float = 2.0) -> None:
 
 async def _statements(sql: str):
     # asyncpg can't run multi-statement scripts in one call; split on ;
-    # Chunks holding only comments/whitespace are dropped — a ';' inside a
-    # comment line otherwise yields an empty statement that asyncpg rejects.
+    # Comment-only lines are removed BEFORE splitting: a ';' inside a comment
+    # otherwise cuts the comment mid-line and the remainder is executed as SQL
+    # (the "syntax error at or near ..." migration failures). Trailing inline
+    # comments after code keep working as long as they contain no ';'.
+    code_lines = [
+        line for line in sql.splitlines()
+        if line.strip() and not line.strip().startswith("--")
+    ]
     out = []
-    for chunk in sql.split(";"):
+    for chunk in "\n".join(code_lines).split(";"):
         chunk = chunk.strip()
-        if not chunk:
-            continue
-        has_sql = any(
-            line.strip() and not line.strip().startswith("--")
-            for line in chunk.splitlines()
-        )
-        if has_sql:
+        if chunk:
             out.append(chunk)
     return out
 
@@ -175,33 +184,42 @@ async def _apply_migration(f: Path) -> None:
     sql = f.read_text()
     stmts = await _statements(sql)
 
-    if "CONCURRENTLY" in sql.upper():
-        # Statement by statement on the RAW asyncpg connection: CONCURRENTLY
-        # builds take no write-blocking lock (agents keep ingesting), Postgres
-        # forbids them inside a transaction, and the SQLAlchemy cursor layer is
-        # flaky here — its rowcount regex raises TypeError when the driver
-        # returns no status message for concurrent DDL (seen on first boot).
-        async with engine.connect() as conn:
-            raw = await conn.get_raw_connection()
+    # Always use the raw asyncpg connection for DDL statements.  SQLAlchemy's
+    # text() parser treats :name tokens as bind parameters even inside SQL
+    # comments, which breaks migrations whose comments reference query params
+    # like :cid or :days.  The raw driver bypasses that parsing entirely.
+    #
+    # CONCURRENTLY builds additionally cannot run inside a transaction, so they
+    # run autocommit.  Everything else runs in a single transaction so a failure
+    # rolls back only that file.
+    concurrent = "CONCURRENTLY" in sql.upper()
+    async with engine.connect() as conn:
+        raw = await conn.get_raw_connection()
+        driver = raw.driver_connection   # bare asyncpg Connection
+        # Migrations (index builds, backfills) legitimately run long — lift the
+        # engine's session-level statement_timeout for this connection.
+        await driver.execute("SET statement_timeout = 0")
+        if not concurrent:
+            await driver.execute("SET lock_timeout = '5s'")
+            tr = driver.transaction()
+            await tr.start()
+        try:
             for stmt in stmts:
-                await raw.driver_connection.execute(stmt)
-        async with engine.begin() as conn:
-            await conn.execute(
-                text("INSERT INTO schema_migrations (filename) VALUES (:f) ON CONFLICT DO NOTHING"),
-                {"f": f.name},
-            )
-    else:
-        # One transaction per file: short lock windows, and a failure rolls
-        # back only this file. lock_timeout fails fast instead of queueing
-        # behind live ingest writes and stalling the whole startup.
-        async with engine.begin() as conn:
-            await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
-            for stmt in stmts:
-                await conn.execute(text(stmt))
-            await conn.execute(
-                text("INSERT INTO schema_migrations (filename) VALUES (:f) ON CONFLICT DO NOTHING"),
-                {"f": f.name},
-            )
+                await driver.execute(stmt)
+            if not concurrent:
+                await tr.commit()
+        except Exception:
+            if not concurrent:
+                await tr.rollback()
+            raise
+
+    # Record the applied file outside the DDL transaction so the record is
+    # durable even when the migration contained autocommit statements.
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO schema_migrations (filename) VALUES (:f) ON CONFLICT DO NOTHING"),
+            {"f": f.name},
+        )
 
 
 async def _bootstrap_admin() -> None:

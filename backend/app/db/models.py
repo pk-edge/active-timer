@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, JSON, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -16,8 +16,15 @@ class Company(Base):
     enrollment_token: Mapped[str]       = mapped_column(String, unique=True, nullable=False)
     # Company-wide default agent visibility. TRUE = all agents run headless
     # (no floating widget, no tray icon). Per-device override lives on Device.
-    agent_headless:   Mapped[bool]      = mapped_column(Boolean, default=True)
-    created_at:       Mapped[datetime]  = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    agent_headless:       Mapped[bool]      = mapped_column(Boolean, default=True)
+    # NULL = auto-archive disabled; positive int = days before inactive device is archived
+    # deferred=True: excluded from the default SELECT so the app keeps running even
+    # before migration 027 is applied (avoids "column does not exist" on every Company query).
+    inactive_device_days: Mapped[int | None] = mapped_column(Integer, nullable=True, deferred=True)
+    # Free-form dashboard settings (general/tracking/notifications). deferred for
+    # the same pre-migration (031) safety as inactive_device_days.
+    settings:             Mapped[dict | None] = mapped_column(JSONB, nullable=True, deferred=True)
+    created_at:           Mapped[datetime]   = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
     devices:   Mapped[list["Device"]]   = relationship(back_populates="company")
     employees: Mapped[list["Employee"]] = relationship(back_populates="company")
@@ -314,3 +321,21 @@ class BlockedUrl(Base):
     is_deleted:  Mapped[bool]             = mapped_column(Boolean, default=False)
     created_by:  Mapped[uuid.UUID | None] = mapped_column(UUID, ForeignKey("employees.id"), nullable=True)
     created_at:  Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# ── Shared Files ──────────────────────────────────────────────────────────────
+
+class SharedFile(Base):
+    __tablename__ = "shared_files"
+
+    id:                Mapped[uuid.UUID]        = mapped_column(UUID, primary_key=True, default=uuid.uuid4)
+    company_id:        Mapped[uuid.UUID]        = mapped_column(UUID, ForeignKey("companies.id"))
+    uploaded_by:       Mapped[uuid.UUID]        = mapped_column(UUID, ForeignKey("employees.id"))
+    original_filename: Mapped[str]              = mapped_column(Text, nullable=False)
+    s3_key:            Mapped[str]              = mapped_column(Text, nullable=False)
+    mime_type:         Mapped[str | None]       = mapped_column(Text, nullable=True)
+    file_size_bytes:   Mapped[int]              = mapped_column(BigInteger, default=0)
+    public_token:      Mapped[str]              = mapped_column(Text, unique=True, nullable=False)
+    created_at:        Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+    uploader: Mapped["Employee"] = relationship("Employee", foreign_keys=[uploaded_by], lazy="joined")

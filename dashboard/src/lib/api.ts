@@ -2,8 +2,8 @@ import type {
   Device, TimelineEvent, DailyStat, CompanyDay, AppUsage, LogEvent,
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
-  OverviewStats, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
-  AppCategory, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
+  OverviewStats, HomeWidgets, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
+  AppCategory, CategoriesPage, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
   WebsiteListOut, WebsiteDetailOut,
   AppUsageListOut, AppUsageDetailOut,
@@ -33,12 +33,47 @@ export class AbortedError extends Error {
   }
 }
 
+// ── Navigation-scoped request cancellation ────────────────────────────────────
+// Every GET issued through request() is tied to the current "page generation".
+// When the route changes (see components/NavigationAbort.tsx) the previous
+// generation's controller is aborted: the browser drops the sockets and the
+// backend cancels the matching queries, so a heavy page you navigated away
+// from stops costing anything. Mutations (POST/PATCH/…) are never auto-aborted.
+let navController: AbortController | null = null;
+
+function navSignal(): AbortSignal | undefined {
+  if (typeof window === "undefined") return undefined;
+  if (!navController) navController = new AbortController();
+  return navController.signal;
+}
+
+/** Abort all in-flight GETs from the previous page. Called on route change. */
+export function abortInFlightGets(): void {
+  navController?.abort();
+  navController = new AbortController();
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    cache: "no-store",
-    ...init,
-    headers: { ...authHeaders(), ...init?.headers },
-  });
+  const method = (init?.method ?? "GET").toUpperCase();
+  const signal = init?.signal ?? (method === "GET" ? navSignal() : undefined);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      cache: "no-store",
+      ...init,
+      signal,
+      headers: { ...authHeaders(), ...init?.headers },
+    });
+  } catch (err) {
+    // A navigation-aborted fetch rejects with a DOMException named "AbortError".
+    // Re-throw it as our AbortedError so SWR recognizes it and does NOT retry —
+    // otherwise an aborted GET was treated as a real error and re-sent, which
+    // showed up as "request cancelled, then immediately fired again".
+    if (signal?.aborted || (err as { name?: string })?.name === "AbortError") {
+      throw new AbortedError();
+    }
+    throw err;
+  }
 
   if (res.status === 401) {
     if (typeof window !== "undefined") {
@@ -335,6 +370,15 @@ export const getOverview = (
   if (until_date) extra.until_date = until_date;
   return request<OverviewStats>(`/v1/home/overview${gq(group_id, extra)}`);
 };
+
+export const getHomeWidgets = (
+  group_id?: string,
+  app_days = 1,
+  app_limit = 12,
+) => {
+  const extra: Record<string, string | number> = { app_days, app_limit };
+  return request<HomeWidgets>(`/v1/home/widgets${gq(group_id, extra)}`);
+};
 export const getRealtime = (group_id?: string) =>
   request<RealtimeDevice[]>(`/v1/home/realtime${gq(group_id)}`);
 export const getHomeAppUsage = (group_id?: string, days = 1) =>
@@ -361,8 +405,14 @@ export const markNotificationsRead = (keys: string[]) =>
 
 // ── Technology & AI Usage ─────────────────────────────────────────────────────
 
-export const getTechCategories = () =>
-  request<AppCategory[]>("/v1/tech/categories");
+export const getTechCategories = (params?: { page?: number; per_page?: number; is_system?: boolean }) => {
+  const q = new URLSearchParams();
+  if (params?.page)     q.set("page",      String(params.page));
+  if (params?.per_page) q.set("per_page",  String(params.per_page));
+  if (params?.is_system !== undefined) q.set("is_system", String(params.is_system));
+  const qs = q.toString();
+  return request<CategoriesPage>(`/v1/tech/categories${qs ? `?${qs}` : ""}`);
+};
 
 export const createTechCategory = (body: { name: string; color: string; description?: string }) =>
   request<AppCategory>("/v1/tech/categories", { method: "POST", body: JSON.stringify(body) });
@@ -484,17 +534,39 @@ export const getCategoryUsageDetail = (cat_id: string | null, tab: string, since
 
 // ── Company ───────────────────────────────────────────────────────────────────
 
+export interface CompanySettings {
+  timezone: string;
+  work_start: string;
+  work_end: string;
+  track_urls: boolean;
+  track_window_titles: boolean;
+  track_keyboard: boolean;
+  idle_timeout_mins: number;
+  email_alerts: boolean;
+  idle_alert_mins: number;
+  offline_alert_mins: number;
+  daily_report: boolean;
+  max_file_size_mb: number;
+}
+
 export interface CompanyInfo {
   name: string;
   enrollment_token: string;
   agent_headless: boolean;
+  inactive_device_days: number | null;
+  settings: CompanySettings;
 }
 
 export const getCompanyInfo = () => request<CompanyInfo>("/v1/company/info");
-export const updateCompanySettings = (agent_headless: boolean) =>
+export const updateCompanySettings = (body: {
+  agent_headless: boolean;
+  inactive_device_days: number | null;
+  name?: string;
+  settings?: Partial<CompanySettings>;
+}) =>
   request<CompanyInfo>("/v1/company/settings", {
     method: "PATCH",
-    body: JSON.stringify({ agent_headless }),
+    body: JSON.stringify(body),
   });
 // Per-device visibility override: null = inherit company default, true/false = force.
 export const setDeviceHeadless = (deviceId: string, override: boolean | null) =>
@@ -529,6 +601,67 @@ export const updateBlockedUrl = (id: string, body: Partial<{
 export const deleteBlockedUrl = (id: string) =>
   request<void>(`/v1/policy/blocked-urls/${id}`, { method: "DELETE" });
 
+// ── Fleet & device detailed reports ──────────────────────────────────────────
+
+export interface FleetReport {
+  since: string;
+  until: string;
+  total_devices: number;
+  online_devices: number;
+  offline_devices: number;
+  archived_devices: number;
+  platform_breakdown: { platform: string; count: number }[];
+  daily_activity: { date: string; active_seconds: number; idle_seconds: number; device_count: number }[];
+  top_apps: { app_name: string; seconds: number }[];
+  most_active_devices: { device_id: string; hostname: string; employee_name: string | null; active_seconds: number }[];
+}
+
+export interface DeviceFullReport {
+  device: {
+    id: string; hostname: string; platform: string;
+    employee_name: string | null; enrolled_at: string; last_seen: string | null;
+  };
+  since: string;
+  until: string;
+  total_active_seconds: number;
+  total_idle_seconds: number;
+  working_days: number;
+  daily_breakdown: { date: string; active_seconds: number; idle_seconds: number }[];
+  top_apps: { app_name: string; seconds: number; pct: number }[];
+  top_urls: { url: string; visits: number }[];
+}
+
+export const getFleetReport = (since: string, until: string) =>
+  request<FleetReport>(`/v1/reports/devices/fleet?since=${since}&until=${until}`);
+
+export const getDeviceFullReport = (deviceId: string, since: string, until: string) =>
+  request<DeviceFullReport>(`/v1/reports/device/${deviceId}/full?since=${since}&until=${until}`);
+
+// ── Report background jobs ────────────────────────────────────────────────────
+
+export interface ReportJob {
+  job_id: string;
+  type: string;
+  status: "pending" | "running" | "done" | "failed";
+  progress: number;
+  error: string | null;
+  result: FleetReport | DeviceFullReport | null;
+}
+
+export const createReportJob = (params: {
+  type: "device_full" | "fleet";
+  device_id?: string;
+  since: string;
+  until: string;
+}) =>
+  request<ReportJob>("/v1/reports/jobs", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
+export const getReportJob = (jobId: string) =>
+  request<ReportJob>(`/v1/reports/jobs/${jobId}`);
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export function fmtSeconds(s: number): string {
@@ -545,3 +678,36 @@ export function fmtTime(ts: number): string {
 export function fmtBytes(bytes: number): string {
   return bytes < 1024 ? `${bytes}B` : `${(bytes / 1024).toFixed(0)}KB`;
 }
+
+// ── Shared Files ──────────────────────────────────────────────────────────────
+
+import type { SharedFile, SharedFilesPage } from "@/types";
+
+export function getSharedFiles(q?: string, offset = 0, limit = 20): Promise<SharedFilesPage> {
+  const qs = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (q) qs.set("q", q);
+  return request<SharedFilesPage>(`/v1/files?${qs}`);
+}
+
+export const getFileLimits = (): Promise<{ max_file_size_mb: number }> =>
+  request<{ max_file_size_mb: number }>("/v1/files/limits");
+
+export async function uploadSharedFile(file: File): Promise<SharedFile> {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`${BASE}/v1/files`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${getToken()}` },
+    body: fd,
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    let msg = `${res.status}: ${body}`;
+    try { const j = JSON.parse(body); if (j.detail) msg = j.detail; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return res.json() as Promise<SharedFile>;
+}
+
+export const deleteSharedFile = (id: string): Promise<void> =>
+  request<void>(`/v1/files/${id}`, { method: "DELETE" });
