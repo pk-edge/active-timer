@@ -60,14 +60,31 @@ services:
         mc anonymous set download local/${S3_BUCKET:-timetracker-screenshots}
       "
 
-  # ── Redis (SSE pub/sub fan-out) ──────────────────────────────────────────────
-  # Backs app/core/broadcaster.py so device-update events reach every backend
-  # worker/replica. Pub/sub only — no persistence, so RDB+AOF are disabled and
-  # the container stays stateless (no volume).
+  # ── Redis (pub/sub + cache + audit stream) ──────────────────────────────────
+  # Used by three subsystems:
+  #   • broadcaster.py  — SSE pub/sub fan-out (channel: devices_updated)
+  #   • RedisCache.py   — stale-while-revalidate response cache (tt:c:*)
+  #   • audit.py        — durable audit event stream (tt:s:audit, maxlen 100k)
+  #
+  # No RDB/AOF — cache + stream data is ephemeral; a restart just forces a
+  # cold-cache recompute. The stream survives restart only if a volume is added.
+  #
+  # SECURITY: port 16379 is exposed for local redis-cli convenience. Redis
+  # protected-mode catches HTTP probes on this port (the "Possible SECURITY
+  # ATTACK" log is its protection working; the connection is always aborted).
+  # For staging/prod use a managed endpoint (ElastiCache) and set REDIS_URL.
+  # To add password protection, append: --requirepass "${REDIS_PASSWORD}"
+  # and update REDIS_URL to: redis://:${REDIS_PASSWORD}@redis:6379/0
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: [
+      "redis-server",
+      "--save", "",
+      "--appendonly", "no",
+      "--loglevel", "notice",
+      "--protected-mode", "yes",
+    ]
     ports:
       - "16379:6379"   # host port avoids clashing with a local redis on 6379
     healthcheck:

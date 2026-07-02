@@ -6,7 +6,7 @@ import {
   LayoutDashboard, Building2, Users2,
   Monitor, BarChart2, Settings, LogOut, ScrollText,
   UserCog, FolderKanban, Shield, DownloadCloud, ClipboardList, Home,
-  Cpu, Tag, Globe, ShieldAlert, X,
+  Cpu, Tag, Globe, ShieldAlert, X, Paperclip,
 } from "lucide-react";
 import EdgeLogo from "@/components/EdgeLogo";
 import clsx from "clsx";
@@ -52,7 +52,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/groups",   label: "Groups",    icon: FolderKanban,  module: "groups" },
       { href: "/roles",    label: "Roles",     icon: Shield,        module: "roles" },
       { href: "/agents",   label: "Agents",    icon: DownloadCloud, module: "agents" },
-      { href: "/policies", label: "URL Policies", icon: ShieldAlert, module: "policy" },
+      { href: "/policies", label: "URL Policies", icon: ShieldAlert,  module: "policy" },
+      { href: "/files",    label: "Shared Files", icon: Paperclip,    module: "files" },
       { href: "/audit",    label: "Audit Log",   icon: ClipboardList, module: "audit" },
       { href: "/settings", label: "Settings",    icon: Settings,      module: "settings" },
     ],
@@ -107,7 +108,7 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
         <div className="h-14 shrink-0 flex items-center gap-3 px-5 border-b border-white/10">
           <EdgeLogo variant="icon" size={30} />
           <span className="font-bold text-sm tracking-tight text-white">
-            Edge Tracker
+            Edge Beacon
           </span>
           {/* Close button — mobile only */}
           <button

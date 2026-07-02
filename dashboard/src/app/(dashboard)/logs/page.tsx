@@ -6,7 +6,7 @@ import useSWR from "swr";
 import { format } from "date-fns";
 import {
   Monitor, Globe, Lock, MousePointer,
-  Search, X, ChevronDown } from "lucide-react";
+  Search, X, ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { getLogs, getDevices, getUsers, fmtTime, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
@@ -49,6 +49,8 @@ const EVENT_LABEL: Record<string, string> = {
 const EVENT_TYPES = [
   "window_change", "url_visit", "lock", "unlock", "idle_start", "idle_end",
 ];
+
+const PAGE_SIZE = 50;
 
 function EventBadge({ type }: { type: string }) {
   const cls = EVENT_COLOR[type] ?? "bg-gray-100 text-gray-600 border-gray-200";
@@ -120,6 +122,7 @@ export default function LogsPage() {
   const [selUser,   setSelUser]   = useState("");
   const [selType,   setSelType]   = useState("");
   const [search,    setSearch]    = useState("");
+  const [logsPage,  setLogsPage]  = useState(0);
 
   const { data: devices } = useSWR<Device[]>("devices", getDevices);
   const { data: users }   = useSWR<User[]>("users-list", () => getUsers());
@@ -151,6 +154,10 @@ export default function LogsPage() {
     );
   }, [logs, debouncedSearch]);
 
+  const logsTotalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  const safeLogsPage   = Math.min(logsPage, Math.max(0, logsTotalPages - 1));
+  const pagedLogs      = filtered.slice(safeLogsPage * PAGE_SIZE, (safeLogsPage + 1) * PAGE_SIZE);
+
   const counts = logs?.reduce<Record<string, number>>((acc, e) => {
     acc[e.event_type] = (acc[e.event_type] ?? 0) + 1;
     return acc;
@@ -160,7 +167,7 @@ export default function LogsPage() {
   if (!can("logs", "view")) return <AccessDenied label="Activity Logs" />;
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-5">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6 shrink-0">
         <div>
@@ -179,7 +186,7 @@ export default function LogsPage() {
               type="date"
               value={selDate}
               max={today}
-              onChange={e => setSelDate(e.target.value)}
+              onChange={e => { setSelDate(e.target.value); setLogsPage(0); }}
               className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
             />
           </div>
@@ -190,7 +197,7 @@ export default function LogsPage() {
             <div className="relative">
               <select
                 value={selDevice}
-                onChange={e => setSelDevice(e.target.value)}
+                onChange={e => { setSelDevice(e.target.value); setLogsPage(0); }}
                 className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
               >
                 <option value="">All devices</option>
@@ -210,7 +217,7 @@ export default function LogsPage() {
             <div className="relative">
               <select
                 value={selUser}
-                onChange={e => { setSelUser(e.target.value); setSelDevice(""); }}
+                onChange={e => { setSelUser(e.target.value); setSelDevice(""); setLogsPage(0); }}
                 className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
               >
                 <option value="">All users</option>
@@ -228,7 +235,7 @@ export default function LogsPage() {
             <div className="relative">
               <select
                 value={selType}
-                onChange={e => setSelType(e.target.value)}
+                onChange={e => { setSelType(e.target.value); setLogsPage(0); }}
                 className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
               >
                 <option value="">All types</option>
@@ -249,12 +256,12 @@ export default function LogsPage() {
                 type="text"
                 placeholder="App, window title, URL, user, hostname…"
                 value={search}
-                onChange={e => setSearch(e.target.value)}
+                onChange={e => { setSearch(e.target.value); setLogsPage(0); }}
                 className="w-full pl-9 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
               />
               {search && (
                 <button
-                  onClick={() => setSearch("")}
+                  onClick={() => { setSearch(""); setLogsPage(0); }}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600"
                 >
                   <X size={13} />
@@ -272,7 +279,7 @@ export default function LogsPage() {
               .map(([type, count]) => (
                 <button
                   key={type}
-                  onClick={() => setSelType(selType === type ? "" : type)}
+                  onClick={() => { setSelType(selType === type ? "" : type); setLogsPage(0); }}
                   className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition ${
                     selType === type
                       ? EVENT_COLOR[type] ?? "bg-brand-50 text-brand-700 border-brand-200"
@@ -290,8 +297,8 @@ export default function LogsPage() {
         )}
       </div>
 
-      {/* Table — fills remaining height and scrolls internally */}
-      <div className="flex-1 min-h-0 bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm flex flex-col">
+      {/* Table */}
+      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
         {isLoading ? (
           <div className="py-16 text-center text-gray-600 text-sm animate-pulse">Loading activity…</div>
         ) : !filtered.length ? (
@@ -301,11 +308,10 @@ export default function LogsPage() {
           </div>
         ) : (
           <>
-            {/* Sticky header */}
-            <div className="shrink-0 overflow-x-auto border-b border-gray-200">
+            <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="bg-gray-50">
+                  <tr className="bg-gray-50 border-b border-gray-200">
                     <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Time</th>
                     <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Type</th>
                     <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">Activity</th>
@@ -314,16 +320,37 @@ export default function LogsPage() {
                     <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Device</th>
                   </tr>
                 </thead>
-              </table>
-            </div>
-            {/* Scrollable body */}
-            <div className="flex-1 overflow-y-auto overflow-x-auto min-h-0">
-              <table className="w-full text-sm">
                 <tbody>
-                  {filtered.map(e => <LogRow key={e.id} e={e} />)}
+                  {pagedLogs.map(e => <LogRow key={e.id} e={e} />)}
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination */}
+            {filtered.length > PAGE_SIZE && (
+              <div className="border-t border-gray-100 px-4 py-3 flex items-center justify-between">
+                <span className="text-xs text-gray-600">
+                  Showing {safeLogsPage * PAGE_SIZE + 1}–{Math.min((safeLogsPage + 1) * PAGE_SIZE, filtered.length)} of {filtered.length.toLocaleString()}
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    disabled={safeLogsPage <= 0}
+                    onClick={() => setLogsPage(p => Math.max(0, p - 1))}
+                    className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <span className="text-xs text-gray-600 px-2">Page {safeLogsPage + 1} of {logsTotalPages}</span>
+                  <button
+                    disabled={safeLogsPage >= logsTotalPages - 1}
+                    onClick={() => setLogsPage(p => Math.min(logsTotalPages - 1, p + 1))}
+                    className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

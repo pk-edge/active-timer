@@ -94,7 +94,7 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
 
       {/* ── Back link ── */}
       <Link
-        href="/"
+        href="/devices"
         className="inline-flex items-center gap-1.5 text-gray-600 text-sm mb-3 hover:text-gray-700 transition w-fit"
       >
         <ArrowLeft size={13} /> All devices

@@ -42,6 +42,14 @@ class RuleCreate(BaseModel):
     app_pattern: str
 
 
+class CategoriesPageOut(BaseModel):
+    items:       list[CategoryOut]
+    total:       int
+    page:        int
+    per_page:    int
+    total_pages: int
+
+
 # ── Utilization analytics ─────────────────────────────────────────────────────
 
 class CategoryAllocationItem(BaseModel):

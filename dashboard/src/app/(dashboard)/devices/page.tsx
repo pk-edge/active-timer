@@ -3,10 +3,12 @@ import PageLoader from "@/components/PageLoader";
 import { useState, useMemo, useEffect } from "react";
 import useSWR, { mutate as globalMutate } from "swr";
 import Link from "next/link";
+import { format, subDays, subMonths, subYears, startOfMonth, startOfYear } from "date-fns";
 import { formatDistanceToNow } from "date-fns";
 import {
   getDevices, getUsers, getOverview,
   assignDevice, archiveDevice, restoreDevice, deleteDevice,
+  getFleetReport, getDeviceFullReport,
 } from "@/lib/api";
 import type { OverviewStats } from "@/types";
 import { useUser } from "@/hooks/useUser";
@@ -17,13 +19,104 @@ import { useDevicesPush } from "@/hooks/useDevicesPush";
 import {
   Monitor, Wifi, WifiOff, Search, X, Users2, Archive,
   RotateCcw, Trash2, UserRound, ChevronLeft, ChevronRight,
-  CheckSquare,
+  CheckSquare, Download, FileText, Loader2,
 } from "lucide-react";
 import type { Device, User } from "@/types";
+import { openFleetReport, openDeviceReport } from "./_components/ReportGenerator";
 
 type Filter = "all" | "online" | "offline";
 
 const PAGE_SIZE = 25;
+
+// ── Fleet report modal ────────────────────────────────────────────────────────
+
+type FleetPeriod = "weekly" | "monthly" | "yearly" | "custom";
+
+function FleetReportModal({ onClose }: { onClose: () => void }) {
+  const today = format(new Date(), "yyyy-MM-dd");
+  const [period, setPeriod]   = useState<FleetPeriod>("monthly");
+  const [since,  setSince]    = useState(format(subMonths(new Date(), 1), "yyyy-MM-dd"));
+  const [until,  setUntil]    = useState(today);
+  const [loading, setLoading] = useState(false);
+
+  function applyPreset(p: FleetPeriod) {
+    setPeriod(p);
+    const now = new Date();
+    if (p === "weekly")  { setSince(format(subDays(now, 7),    "yyyy-MM-dd")); setUntil(today); }
+    if (p === "monthly") { setSince(format(subMonths(now, 1),  "yyyy-MM-dd")); setUntil(today); }
+    if (p === "yearly")  { setSince(format(subYears(now, 1),   "yyyy-MM-dd")); setUntil(today); }
+  }
+
+  async function generate() {
+    setLoading(true);
+    try {
+      const data = await getFleetReport(since, until);
+      openFleetReport(data);
+      onClose();
+    } catch (e) {
+      alert(String(e instanceof Error ? e.message : e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
+        <div className="flex items-start justify-between mb-5">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Fleet Activity Report</h2>
+            <p className="text-xs text-gray-500 mt-0.5">Board-level overview — opens as a printable page</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+
+        <div className="flex gap-1.5 mb-5 p-1 bg-gray-100 rounded-lg">
+          {(["weekly", "monthly", "yearly", "custom"] as FleetPeriod[]).map(p => (
+            <button
+              key={p}
+              onClick={() => applyPreset(p)}
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition capitalize ${period === p ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-800"}`}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+
+        {period === "custom" && (
+          <div className="grid grid-cols-2 gap-3 mb-5">
+            <div>
+              <label className="text-xs text-gray-500 mb-1 block">From</label>
+              <input type="date" value={since} onChange={e => setSince(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
+            </div>
+            <div>
+              <label className="text-xs text-gray-500 mb-1 block">To</label>
+              <input type="date" value={until} onChange={e => setUntil(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
+            </div>
+          </div>
+        )}
+
+        {period !== "custom" && (
+          <p className="text-xs text-gray-500 mb-5">{since} &rarr; {until}</p>
+        )}
+
+        <div className="flex gap-2 justify-end">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button
+            onClick={generate}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-brand-600 hover:bg-brand-700 rounded-lg disabled:opacity-50"
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
+            {loading ? "Generating…" : "Generate Report"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── Stat card (clickable filter) ─────────────────────────────────────────────
 
@@ -183,7 +276,7 @@ function Pagination({
 function DeviceRow({
   device, employees, canAssign, canArchive, canDelete,
   onAssigned, onArchived, onRestored, onDeleted,
-  selected, onToggleSelect,
+  selected, onToggleSelect, onExport, exporting,
 }: {
   device: Device;
   employees: { id: string; name: string }[];
@@ -196,6 +289,8 @@ function DeviceRow({
   onDeleted: () => void;
   selected?: boolean;
   onToggleSelect?: (id: string) => void;
+  onExport?: () => void;
+  exporting?: boolean;
 }) {
   const [saving, setSaving] = useState(false);
   const showActions = canArchive || canDelete;
@@ -325,6 +420,21 @@ function DeviceRow({
         }
       </td>
 
+      {/* Export */}
+      {onExport && (
+        <td className="px-4 py-3.5">
+          <button
+            onClick={onExport}
+            disabled={exporting || saving}
+            title="Export device report"
+            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50 px-2 py-1 rounded transition disabled:opacity-40"
+          >
+            {exporting ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
+            Export
+          </button>
+        </td>
+      )}
+
       {/* Actions */}
       {showActions && (
         <td className="px-4 py-3.5">
@@ -377,11 +487,14 @@ type RowCallbacks = {
   selectedIds?: Set<string>;
   onToggleSelect?: (id: string) => void;
   onToggleAll?: (ids: string[], checked: boolean) => void;
+  onExport?: (deviceId: string) => void;
+  exportingId?: string | null;
 };
 
 function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) {
   const showActions = row.canArchive || row.canDelete;
-  const colCount = 5 + (showActions ? 1 : 0) + (row.canDelete ? 1 : 0);
+  const showExport = !!row.onExport;
+  const colCount = 5 + (showExport ? 1 : 0) + (showActions ? 1 : 0) + (row.canDelete ? 1 : 0);
 
   const allSelected = devices.length > 0 && devices.every(d => row.selectedIds?.has(d.id));
   const someSelected = !allSelected && devices.some(d => row.selectedIds?.has(d.id));
@@ -407,6 +520,9 @@ function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) 
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Employee</th>
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Platform</th>
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Last Seen</th>
+            {showExport && (
+              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Export</th>
+            )}
             {showActions && (
               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
             )}
@@ -420,6 +536,8 @@ function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) 
               {...row}
               selected={row.selectedIds?.has(d.id)}
               onToggleSelect={row.onToggleSelect}
+              onExport={row.onExport ? () => row.onExport!(d.id) : undefined}
+              exporting={row.exportingId === d.id}
             />
           ))}
           {devices.length === 0 && (
@@ -446,6 +564,8 @@ export default function DevicesPage() {
   const [page, setPage]               = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [showFleetModal, setShowFleetModal] = useState(false);
+  const [exportingId, setExportingId] = useState<string | null>(null);
 
   const canArchive  = can("devices", "archive");
   const canDelete   = can("devices", "delete");
@@ -496,6 +616,21 @@ export default function DevicesPage() {
       { revalidate: true },
     );
     globalMutate("home-overview-base", undefined, { revalidate: true });
+  }
+
+  async function handleDeviceExport(id: string) {
+    if (exportingId) return;
+    setExportingId(id);
+    try {
+      const today = format(new Date(), "yyyy-MM-dd");
+      const since = format(subMonths(new Date(), 1), "yyyy-MM-dd");
+      const data = await getDeviceFullReport(id, since, today);
+      openDeviceReport(data);
+    } catch (e) {
+      alert(String(e instanceof Error ? e.message : e));
+    } finally {
+      setExportingId(null);
+    }
   }
 
   async function handleBulkDelete() {
@@ -578,16 +713,28 @@ export default function DevicesPage() {
     selectedIds,
     onToggleSelect: toggleSelect,
     onToggleAll: toggleAll,
+    onExport: handleDeviceExport,
+    exportingId,
   };
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+
+      {showFleetModal && <FleetReportModal onClose={() => setShowFleetModal(false)} />}
 
       {/* ── Header ── */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">All Devices</h1>
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowFleetModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50 transition"
+          >
+            <Download size={14} />
+            Fleet Report
+          </button>
+
           {canArchive && (
             <button
               onClick={() => { setShowArchived(v => !v); setFilter("all"); }}
