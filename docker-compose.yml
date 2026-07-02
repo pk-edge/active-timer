@@ -82,11 +82,16 @@ services:
       "redis-server",
       "--save", "",
       "--appendonly", "no",
-      "--loglevel", "notice",
+      "--loglevel", "verbose",
       "--protected-mode", "yes",
     ]
     ports:
       - "16379:6379"   # host port avoids clashing with a local redis on 6379
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

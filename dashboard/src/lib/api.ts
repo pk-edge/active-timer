@@ -637,6 +637,31 @@ export const getFleetReport = (since: string, until: string) =>
 export const getDeviceFullReport = (deviceId: string, since: string, until: string) =>
   request<DeviceFullReport>(`/v1/reports/device/${deviceId}/full?since=${since}&until=${until}`);
 
+// ── Report background jobs ────────────────────────────────────────────────────
+
+export interface ReportJob {
+  job_id: string;
+  type: string;
+  status: "pending" | "running" | "done" | "failed";
+  progress: number;
+  error: string | null;
+  result: FleetReport | DeviceFullReport | null;
+}
+
+export const createReportJob = (params: {
+  type: "device_full" | "fleet";
+  device_id?: string;
+  since: string;
+  until: string;
+}) =>
+  request<ReportJob>("/v1/reports/jobs", {
+    method: "POST",
+    body: JSON.stringify(params),
+  });
+
+export const getReportJob = (jobId: string) =>
+  request<ReportJob>(`/v1/reports/jobs/${jobId}`);
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export function fmtSeconds(s: number): string {

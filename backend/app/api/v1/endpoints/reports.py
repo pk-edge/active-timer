@@ -1,8 +1,9 @@
 import uuid
+import json
 from datetime import date, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
@@ -10,6 +11,8 @@ from sqlalchemy import select, text
 from app.api.deps import get_db, get_current_admin, require
 from app.core.scoping import visible_device_ids, ALL
 from app.core.RedisCache import cache_get, cache_set, FRESH_ANALYTICS, STALE_ANALYTICS, FRESH_DETAIL, STALE_DETAIL
+from app.core.RedisClient import get_client
+from app.db.base import AsyncSessionLocal
 from app.db.models import Device, Employee
 from app.schemas.report import CompanyDayOut, AppUsageOut, UrlVisitOut
 
@@ -336,6 +339,364 @@ class DeviceFullReportOut(BaseModel):
     daily_breakdown: List[DayBreakdownOut]
     top_apps: List[AppDetailOut]
     top_urls: List[UrlVisitOut]
+
+
+# ── Report job queue (Redis-backed background jobs) ───────────────────────────
+
+_JOB_TTL = 1800  # 30 minutes
+
+
+class ReportJobRequest(BaseModel):
+    type: str                   # "device_full" | "fleet"
+    device_id: Optional[str] = None
+    since: str                  # YYYY-MM-DD
+    until: str                  # YYYY-MM-DD (inclusive)
+
+
+class ReportJobOut(BaseModel):
+    job_id: str
+    type: str
+    status: str                 # pending | running | done | failed
+    progress: int               # 0-100
+    error: Optional[str] = None
+    result: Optional[dict] = None
+
+
+async def _job_get(job_id: str) -> dict | None:
+    r = get_client()
+    if not r:
+        return None
+    raw = await r.get(f"tt:rjob:{job_id}")
+    return json.loads(raw) if raw else None
+
+
+async def _job_set(job_id: str, data: dict) -> None:
+    r = get_client()
+    if r:
+        await r.setex(f"tt:rjob:{job_id}", _JOB_TTL, json.dumps(data))
+
+
+# ── Background workers ────────────────────────────────────────────────────────
+
+async def _run_device_full_job(
+    job_id: str, device_id: str, company_id: str, since: str, until: str,
+) -> None:
+    """Run a device_full report in the background; update job state in Redis throughout."""
+
+    async def _upd(st: str, prog: int, error: str | None = None, result: dict | None = None):
+        await _job_set(job_id, {
+            "job_id": job_id, "type": "device_full",
+            "status": st, "progress": prog, "error": error, "result": result,
+        })
+
+    try:
+        await _upd("running", 5)
+        since_dt = date.fromisoformat(since)
+        until_dt = date.fromisoformat(until)
+
+        async with AsyncSessionLocal() as db:
+            dev_row = (await db.execute(text("""
+                SELECT d.hostname, d.platform, d.enrolled_at, d.last_seen,
+                       e.name AS employee_name
+                FROM   devices d
+                LEFT JOIN employees e ON e.id = d.employee_id
+                WHERE  d.id = :did AND d.company_id = :cid AND d.is_deleted = FALSE
+            """), {"did": device_id, "cid": company_id})).fetchone()
+
+            if not dev_row:
+                await _upd("failed", 0, error="Device not found")
+                return
+
+            await _upd("running", 20)
+
+            daily = (await db.execute(text(f"""
+                SELECT DATE(ae.timestamp) AS day,
+                       SUM({_ACTIVE_CASE}) AS active,
+                       SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle
+                FROM   activity_events ae
+                WHERE  ae.device_id = :did
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                GROUP  BY day ORDER BY day
+            """), {"did": device_id, "since": since_dt, "until": until_dt})).fetchall()
+
+            await _upd("running", 50)
+
+            apps_raw = (await db.execute(text("""
+                SELECT normalize_app_name(ae.app_name) AS app_name,
+                       SUM(ae.duration) AS seconds
+                FROM   activity_events ae
+                WHERE  ae.device_id = :did
+                  AND  ae.event_type = 'window_change'
+                  AND  ae.app_name IS NOT NULL
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                  AND  ae.app_name NOT IN ('System Idle Process','LockApp','LogonUI','Idle','screensaver')
+                GROUP  BY normalize_app_name(ae.app_name)
+                ORDER  BY seconds DESC LIMIT 20
+            """), {"did": device_id, "since": since_dt, "until": until_dt})).fetchall()
+
+            await _upd("running", 75)
+
+            top_urls = (await db.execute(text("""
+                SELECT substring(ae.url FROM '^https?://([^/]+)') AS host,
+                       COUNT(*) AS visits
+                FROM   activity_events ae
+                WHERE  ae.device_id = :did
+                  AND  ae.event_type = 'url_visit'
+                  AND  ae.url IS NOT NULL
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                GROUP  BY host
+                HAVING substring(ae.url FROM '^https?://([^/]+)') IS NOT NULL
+                ORDER  BY visits DESC LIMIT 15
+            """), {"did": device_id, "since": since_dt, "until": until_dt})).fetchall()
+
+            await _upd("running", 90)
+
+            total_active   = sum(int(r.active or 0) for r in daily)
+            total_idle     = sum(int(r.idle   or 0) for r in daily)
+            working_days   = len([r for r in daily if int(r.active or 0) > 0])
+            total_app_secs = sum(int(r.seconds or 0) for r in apps_raw) or 1
+
+            enrolled_str  = dev_row.enrolled_at.strftime("%Y-%m-%d") if dev_row.enrolled_at else ""
+            last_seen_str = dev_row.last_seen.strftime("%Y-%m-%d %H:%M UTC") if dev_row.last_seen else None
+
+            result = {
+                "device": {
+                    "id": device_id,
+                    "hostname": dev_row.hostname,
+                    "platform": (dev_row.platform or "").capitalize(),
+                    "employee_name": dev_row.employee_name,
+                    "enrolled_at": enrolled_str,
+                    "last_seen": last_seen_str,
+                },
+                "since": str(since_dt),
+                "until": str(until_dt),
+                "total_active_seconds": total_active,
+                "total_idle_seconds": total_idle,
+                "working_days": working_days,
+                "daily_breakdown": [
+                    {"date": str(r.day), "active_seconds": int(r.active or 0), "idle_seconds": int(r.idle or 0)}
+                    for r in daily
+                ],
+                "top_apps": [
+                    {
+                        "app_name": r.app_name,
+                        "seconds": int(r.seconds or 0),
+                        "pct": round(int(r.seconds or 0) / total_app_secs * 100, 1),
+                    }
+                    for r in apps_raw
+                ],
+                "top_urls": [{"url": r.host, "visits": int(r.visits or 0)} for r in top_urls],
+            }
+
+            # Warm the regular GET cache so an immediate follow-up request is free
+            _ckey = ("report:dev_full", device_id, str(since_dt), str(until_dt))
+            await cache_set(_ckey, result, fresh_secs=FRESH_DETAIL, stale_secs=STALE_DETAIL)
+
+            await _upd("done", 100, result=result)
+
+    except Exception as exc:  # noqa: BLE001
+        await _job_set(job_id, {
+            "job_id": job_id, "type": "device_full",
+            "status": "failed", "progress": 0, "error": str(exc), "result": None,
+        })
+
+
+async def _run_fleet_job(
+    job_id: str, company_id: str, since: str, until: str,
+) -> None:
+    """Run a fleet report in the background; update job state in Redis throughout."""
+
+    async def _upd(st: str, prog: int, error: str | None = None, result: dict | None = None):
+        await _job_set(job_id, {
+            "job_id": job_id, "type": "fleet",
+            "status": st, "progress": prog, "error": error, "result": result,
+        })
+
+    try:
+        await _upd("running", 5)
+        since_dt = date.fromisoformat(since)
+        until_dt = date.fromisoformat(until)
+
+        async with AsyncSessionLocal() as db:
+            counts = (await db.execute(text("""
+                SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE is_archived = TRUE) AS archived,
+                    COUNT(*) FILTER (
+                        WHERE is_archived = FALSE
+                          AND last_seen >= NOW() - (:cutoff * INTERVAL '1 second')
+                    ) AS online,
+                    COUNT(*) FILTER (
+                        WHERE is_archived = FALSE
+                          AND (last_seen IS NULL OR last_seen < NOW() - (:cutoff * INTERVAL '1 second'))
+                    ) AS offline
+                FROM devices
+                WHERE company_id = :cid AND is_deleted = FALSE
+            """), {"cid": company_id, "cutoff": ONLINE_CUTOFF_SECS})).fetchone()
+
+            await _upd("running", 20)
+
+            platforms = (await db.execute(text("""
+                SELECT platform, COUNT(*) AS cnt
+                FROM   devices
+                WHERE  company_id = :cid AND is_deleted = FALSE AND is_archived = FALSE
+                GROUP  BY platform ORDER BY cnt DESC
+            """), {"cid": company_id})).fetchall()
+
+            await _upd("running", 35)
+
+            daily = (await db.execute(text(f"""
+                SELECT DATE(ae.timestamp) AS day,
+                       SUM({_ACTIVE_CASE}) AS active,
+                       SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle,
+                       COUNT(DISTINCT ae.device_id) AS device_count
+                FROM   activity_events ae
+                JOIN   devices d ON d.id = ae.device_id
+                WHERE  d.company_id = :cid
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                GROUP  BY day ORDER BY day
+            """), {"cid": company_id, "since": since_dt, "until": until_dt})).fetchall()
+
+            await _upd("running", 55)
+
+            top_apps = (await db.execute(text(f"""
+                SELECT normalize_app_name(ae.app_name) AS app_name,
+                       SUM(ae.duration) AS seconds
+                FROM   activity_events ae
+                JOIN   devices d ON d.id = ae.device_id
+                WHERE  d.company_id = :cid
+                  AND  ae.event_type = 'window_change'
+                  AND  ae.app_name IS NOT NULL
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                  {_EXCL_IDLE}
+                GROUP  BY normalize_app_name(ae.app_name)
+                ORDER  BY seconds DESC LIMIT 20
+            """), {"cid": company_id, "since": since_dt, "until": until_dt})).fetchall()
+
+            await _upd("running", 75)
+
+            top_devices = (await db.execute(text(f"""
+                SELECT d.id::text AS device_id,
+                       d.hostname,
+                       e.name     AS employee_name,
+                       SUM({_ACTIVE_CASE}) AS active_seconds
+                FROM   activity_events ae
+                JOIN   devices   d ON d.id = ae.device_id
+                LEFT JOIN employees e ON e.id = d.employee_id
+                WHERE  d.company_id = :cid
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                GROUP  BY d.id, d.hostname, e.name
+                ORDER  BY active_seconds DESC
+                LIMIT  10
+            """), {"cid": company_id, "since": since_dt, "until": until_dt})).fetchall()
+
+            await _upd("running", 90)
+
+            result = {
+                "since": str(since_dt),
+                "until": str(until_dt),
+                "total_devices": int(counts.total or 0),
+                "online_devices": int(counts.online or 0),
+                "offline_devices": int(counts.offline or 0),
+                "archived_devices": int(counts.archived or 0),
+                "platform_breakdown": [
+                    {"platform": (r.platform or "").capitalize(), "count": int(r.cnt)}
+                    for r in platforms
+                ],
+                "daily_activity": [
+                    {
+                        "date": str(r.day),
+                        "active_seconds": int(r.active or 0),
+                        "idle_seconds": int(r.idle or 0),
+                        "device_count": int(r.device_count or 0),
+                    }
+                    for r in daily
+                ],
+                "top_apps": [
+                    {"app_name": r.app_name, "seconds": int(r.seconds or 0)}
+                    for r in top_apps
+                ],
+                "most_active_devices": [
+                    {
+                        "device_id": r.device_id,
+                        "hostname": r.hostname,
+                        "employee_name": r.employee_name,
+                        "active_seconds": int(r.active_seconds or 0),
+                    }
+                    for r in top_devices
+                ],
+            }
+
+            # Warm the regular GET cache
+            _ckey = ("report:fleet", company_id, str(since_dt), str(until_dt))
+            await cache_set(_ckey, result, fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+
+            await _upd("done", 100, result=result)
+
+    except Exception as exc:  # noqa: BLE001
+        await _job_set(job_id, {
+            "job_id": job_id, "type": "fleet",
+            "status": "failed", "progress": 0, "error": str(exc), "result": None,
+        })
+
+
+# ── Job endpoints ─────────────────────────────────────────────────────────────
+
+@router.post("/jobs", response_model=ReportJobOut, status_code=202)
+async def create_report_job(
+    req: ReportJobRequest,
+    background_tasks: BackgroundTasks,
+    admin: Employee = Depends(require("reports", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue a report job. Returns job_id immediately; poll GET /jobs/{id} for progress."""
+    if req.type not in ("device_full", "fleet"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="type must be 'device_full' or 'fleet'")
+    if not get_client():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis unavailable — use synchronous endpoints")
+
+    since_dt = _parse_date(req.since, "since")
+    until_dt = _parse_date(req.until, "until")
+    cid = str(admin.company_id)
+
+    device_id: str | None = None
+    if req.type == "device_full":
+        if not req.device_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_id required for device_full")
+        device = await _get_visible_device(req.device_id, admin, db)
+        device_id = str(device.id)
+
+    job_id = str(uuid.uuid4())
+    initial: dict = {
+        "job_id": job_id, "type": req.type,
+        "status": "pending", "progress": 0, "error": None, "result": None,
+    }
+    await _job_set(job_id, initial)
+
+    if req.type == "device_full":
+        background_tasks.add_task(_run_device_full_job, job_id, device_id, cid, req.since, req.until)
+    else:
+        background_tasks.add_task(_run_fleet_job, job_id, cid, req.since, req.until)
+
+    return initial
+
+
+@router.get("/jobs/{job_id}", response_model=ReportJobOut)
+async def get_report_job(
+    job_id: str,
+    _admin: Employee = Depends(require("reports", "view")),
+):
+    """Poll report job status. result is populated when status='done'."""
+    job = await _job_get(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found or expired")
+    return job
 
 
 # ── Helper: parse date string safely ──────────────────────────────────────────

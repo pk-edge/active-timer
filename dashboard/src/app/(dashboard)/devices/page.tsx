@@ -8,8 +8,9 @@ import { formatDistanceToNow } from "date-fns";
 import {
   getDevices, getUsers, getOverview,
   assignDevice, archiveDevice, restoreDevice, deleteDevice,
-  getFleetReport, getDeviceFullReport,
+  createReportJob, getReportJob,
 } from "@/lib/api";
+import type { FleetReport, DeviceFullReport } from "@/lib/api";
 import type { OverviewStats } from "@/types";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
@@ -34,10 +35,12 @@ type FleetPeriod = "weekly" | "monthly" | "yearly" | "custom";
 
 function FleetReportModal({ onClose }: { onClose: () => void }) {
   const today = format(new Date(), "yyyy-MM-dd");
-  const [period, setPeriod]   = useState<FleetPeriod>("monthly");
-  const [since,  setSince]    = useState(format(subMonths(new Date(), 1), "yyyy-MM-dd"));
-  const [until,  setUntil]    = useState(today);
-  const [loading, setLoading] = useState(false);
+  const [period, setPeriod]     = useState<FleetPeriod>("monthly");
+  const [since,  setSince]      = useState(format(subMonths(new Date(), 1), "yyyy-MM-dd"));
+  const [until,  setUntil]      = useState(today);
+  const [loading, setLoading]   = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [statusMsg, setStatusMsg] = useState("");
 
   function applyPreset(p: FleetPeriod) {
     setPeriod(p);
@@ -49,41 +52,56 @@ function FleetReportModal({ onClose }: { onClose: () => void }) {
 
   async function generate() {
     setLoading(true);
+    setProgress(0);
+    setStatusMsg("Queuing report…");
     try {
-      const data = await getFleetReport(since, until);
-      openFleetReport(data);
+      const job = await createReportJob({ type: "fleet", since, until });
+      setProgress(5);
+      setStatusMsg("Generating report in the background…");
+
+      let current = job;
+      while (current.status === "pending" || current.status === "running") {
+        await new Promise(r => setTimeout(r, 2000));
+        current = await getReportJob(job.job_id);
+        setProgress(current.progress);
+        if (current.status === "failed") throw new Error(current.error ?? "Report generation failed");
+      }
+
+      setProgress(100);
+      setStatusMsg("Opening report…");
+      openFleetReport(current.result as FleetReport);
       onClose();
     } catch (e) {
       alert(String(e instanceof Error ? e.message : e));
-    } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={loading ? undefined : onClose}>
       <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-start justify-between mb-5">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Fleet Activity Report</h2>
             <p className="text-xs text-gray-500 mt-0.5">Board-level overview — opens as a printable page</p>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+          {!loading && <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>}
         </div>
 
         <div className="flex gap-1.5 mb-5 p-1 bg-gray-100 rounded-lg">
           {(["weekly", "monthly", "yearly", "custom"] as FleetPeriod[]).map(p => (
             <button
               key={p}
+              disabled={loading}
               onClick={() => applyPreset(p)}
-              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition capitalize ${period === p ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-800"}`}
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition capitalize disabled:opacity-40 ${period === p ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-800"}`}
             >
               {p}
             </button>
           ))}
         </div>
 
-        {period === "custom" && (
+        {period === "custom" && !loading && (
           <div className="grid grid-cols-2 gap-3 mb-5">
             <div>
               <label className="text-xs text-gray-500 mb-1 block">From</label>
@@ -98,12 +116,28 @@ function FleetReportModal({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        {period !== "custom" && (
+        {period !== "custom" && !loading && (
           <p className="text-xs text-gray-500 mb-5">{since} &rarr; {until}</p>
         )}
 
+        {loading && (
+          <div className="mb-5">
+            <div className="flex justify-between items-center text-xs text-gray-500 mb-2">
+              <span>{statusMsg}</span>
+              <span className="font-medium text-brand-600">{progress}%</span>
+            </div>
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div
+                className="bg-brand-500 h-2 rounded-full transition-all duration-700 ease-out"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <p className="text-[11px] text-gray-400 mt-2">You can keep using the app — report will open automatically when ready.</p>
+          </div>
+        )}
+
         <div className="flex gap-2 justify-end">
-          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+          {!loading && <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>}
           <button
             onClick={generate}
             disabled={loading}
@@ -624,8 +658,14 @@ export default function DevicesPage() {
     try {
       const today = format(new Date(), "yyyy-MM-dd");
       const since = format(subMonths(new Date(), 1), "yyyy-MM-dd");
-      const data = await getDeviceFullReport(id, since, today);
-      openDeviceReport(data);
+      const job = await createReportJob({ type: "device_full", device_id: id, since, until: today });
+      let current = job;
+      while (current.status === "pending" || current.status === "running") {
+        await new Promise(r => setTimeout(r, 2000));
+        current = await getReportJob(job.job_id);
+        if (current.status === "failed") throw new Error(current.error ?? "Report generation failed");
+      }
+      openDeviceReport(current.result as DeviceFullReport);
     } catch (e) {
       alert(String(e instanceof Error ? e.message : e));
     } finally {
