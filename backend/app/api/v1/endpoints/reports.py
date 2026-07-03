@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 import json
 from datetime import date, timedelta
@@ -507,7 +508,11 @@ async def _run_device_full_job(
 async def _run_fleet_job(
     job_id: str, company_id: str, since: str, until: str,
 ) -> None:
-    """Run a fleet report in the background; update job state in Redis throughout."""
+    """Run a fleet report in the background.
+
+    All five queries run concurrently (asyncio.gather + separate sessions) so
+    wall time ≈ slowest single query instead of the sum of all five.
+    """
 
     async def _upd(st: str, prog: int, error: str | None = None, result: dict | None = None):
         await _job_set(job_id, {
@@ -520,124 +525,140 @@ async def _run_fleet_job(
         since_dt = date.fromisoformat(since)
         until_dt = date.fromisoformat(until)
 
-        async with AsyncSessionLocal() as db:
-            counts = (await db.execute(text("""
-                SELECT
-                    COUNT(*) AS total,
-                    COUNT(*) FILTER (WHERE is_archived = TRUE) AS archived,
-                    COUNT(*) FILTER (
-                        WHERE is_archived = FALSE
-                          AND last_seen >= NOW() - (:cutoff * INTERVAL '1 second')
-                    ) AS online,
-                    COUNT(*) FILTER (
-                        WHERE is_archived = FALSE
-                          AND (last_seen IS NULL OR last_seen < NOW() - (:cutoff * INTERVAL '1 second'))
-                    ) AS offline
-                FROM devices
-                WHERE company_id = :cid AND is_deleted = FALSE
-            """), {"cid": company_id, "cutoff": ONLINE_CUTOFF_SECS})).fetchone()
+        p_meta = {"cid": company_id, "cutoff": ONLINE_CUTOFF_SECS}
+        p_time = {"cid": company_id, "since": since_dt, "until": until_dt}
 
-            await _upd("running", 20)
+        # Each helper opens its own session so they can truly run in parallel.
 
-            platforms = (await db.execute(text("""
-                SELECT platform, COUNT(*) AS cnt
-                FROM   devices
-                WHERE  company_id = :cid AND is_deleted = FALSE AND is_archived = FALSE
-                GROUP  BY platform ORDER BY cnt DESC
-            """), {"cid": company_id})).fetchall()
+        async def q_counts():
+            async with AsyncSessionLocal() as db:
+                return (await db.execute(text("""
+                    SELECT
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE is_archived = TRUE) AS archived,
+                        COUNT(*) FILTER (
+                            WHERE is_archived = FALSE
+                              AND last_seen >= NOW() - (:cutoff * INTERVAL '1 second')
+                        ) AS online,
+                        COUNT(*) FILTER (
+                            WHERE is_archived = FALSE
+                              AND (last_seen IS NULL
+                                   OR last_seen < NOW() - (:cutoff * INTERVAL '1 second'))
+                        ) AS offline
+                    FROM devices
+                    WHERE company_id = :cid AND is_deleted = FALSE
+                """), p_meta)).fetchone()
 
-            await _upd("running", 35)
+        async def q_platforms():
+            async with AsyncSessionLocal() as db:
+                return (await db.execute(text("""
+                    SELECT platform, COUNT(*) AS cnt
+                    FROM   devices
+                    WHERE  company_id = :cid AND is_deleted = FALSE AND is_archived = FALSE
+                    GROUP  BY platform ORDER BY cnt DESC
+                """), p_meta)).fetchall()
 
-            daily = (await db.execute(text(f"""
-                SELECT DATE(ae.timestamp) AS day,
-                       SUM({_ACTIVE_CASE}) AS active,
-                       SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle,
-                       COUNT(DISTINCT ae.device_id) AS device_count
-                FROM   activity_events ae
-                JOIN   devices d ON d.id = ae.device_id
-                WHERE  d.company_id = :cid
-                  AND  ae.timestamp >= CAST(:since AS date)
-                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
-                GROUP  BY day ORDER BY day
-            """), {"cid": company_id, "since": since_dt, "until": until_dt})).fetchall()
+        async def q_daily():
+            async with AsyncSessionLocal() as db:
+                return (await db.execute(text(f"""
+                    SELECT DATE(ae.timestamp) AS day,
+                           SUM({_ACTIVE_CASE}) AS active,
+                           SUM(CASE WHEN ae.event_type = 'idle_start'
+                               THEN ae.duration ELSE 0 END) AS idle,
+                           COUNT(DISTINCT ae.device_id) AS device_count
+                    FROM   activity_events ae
+                    JOIN   devices d ON d.id = ae.device_id
+                    WHERE  d.company_id = :cid
+                      AND  ae.timestamp >= CAST(:since AS date)
+                      AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                    GROUP  BY day ORDER BY day
+                """), p_time)).fetchall()
 
-            await _upd("running", 55)
+        async def q_apps():
+            async with AsyncSessionLocal() as db:
+                return (await db.execute(text(f"""
+                    SELECT normalize_app_name(ae.app_name) AS app_name,
+                           SUM(ae.duration) AS seconds
+                    FROM   activity_events ae
+                    JOIN   devices d ON d.id = ae.device_id
+                    WHERE  d.company_id = :cid
+                      AND  ae.event_type = 'window_change'
+                      AND  ae.app_name IS NOT NULL
+                      AND  ae.timestamp >= CAST(:since AS date)
+                      AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                      {_EXCL_IDLE}
+                    GROUP  BY normalize_app_name(ae.app_name)
+                    ORDER  BY seconds DESC LIMIT 20
+                """), p_time)).fetchall()
 
-            top_apps = (await db.execute(text(f"""
-                SELECT normalize_app_name(ae.app_name) AS app_name,
-                       SUM(ae.duration) AS seconds
-                FROM   activity_events ae
-                JOIN   devices d ON d.id = ae.device_id
-                WHERE  d.company_id = :cid
-                  AND  ae.event_type = 'window_change'
-                  AND  ae.app_name IS NOT NULL
-                  AND  ae.timestamp >= CAST(:since AS date)
-                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
-                  {_EXCL_IDLE}
-                GROUP  BY normalize_app_name(ae.app_name)
-                ORDER  BY seconds DESC LIMIT 20
-            """), {"cid": company_id, "since": since_dt, "until": until_dt})).fetchall()
+        async def q_top_devices():
+            async with AsyncSessionLocal() as db:
+                return (await db.execute(text(f"""
+                    SELECT d.id::text AS device_id,
+                           d.hostname,
+                           e.name     AS employee_name,
+                           SUM({_ACTIVE_CASE}) AS active_seconds
+                    FROM   activity_events ae
+                    JOIN   devices   d ON d.id = ae.device_id
+                    LEFT JOIN employees e ON e.id = d.employee_id
+                    WHERE  d.company_id = :cid
+                      AND  ae.timestamp >= CAST(:since AS date)
+                      AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                    GROUP  BY d.id, d.hostname, e.name
+                    ORDER  BY active_seconds DESC LIMIT 10
+                """), p_time)).fetchall()
 
-            await _upd("running", 75)
+        # Fire all five concurrently — wall time ≈ max(query times) not sum
+        counts, platforms, daily, top_apps, top_devices = await asyncio.gather(
+            q_counts(), q_platforms(), q_daily(), q_apps(), q_top_devices(),
+        )
 
-            top_devices = (await db.execute(text(f"""
-                SELECT d.id::text AS device_id,
-                       d.hostname,
-                       e.name     AS employee_name,
-                       SUM({_ACTIVE_CASE}) AS active_seconds
-                FROM   activity_events ae
-                JOIN   devices   d ON d.id = ae.device_id
-                LEFT JOIN employees e ON e.id = d.employee_id
-                WHERE  d.company_id = :cid
-                  AND  ae.timestamp >= CAST(:since AS date)
-                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
-                GROUP  BY d.id, d.hostname, e.name
-                ORDER  BY active_seconds DESC
-                LIMIT  10
-            """), {"cid": company_id, "since": since_dt, "until": until_dt})).fetchall()
+        await _upd("running", 90)
 
-            await _upd("running", 90)
+        total_app_secs = sum(int(r.seconds or 0) for r in top_apps)
+        result = {
+            "since": str(since_dt),
+            "until": str(until_dt),
+            "total_devices":    int(counts.total    or 0),
+            "online_devices":   int(counts.online   or 0),
+            "offline_devices":  int(counts.offline  or 0),
+            "archived_devices": int(counts.archived or 0),
+            "platform_breakdown": [
+                {"platform": (r.platform or "").capitalize(), "count": int(r.cnt)}
+                for r in platforms
+            ],
+            "daily_activity": [
+                {
+                    "date":           str(r.day),
+                    "active_seconds": int(r.active        or 0),
+                    "idle_seconds":   int(r.idle          or 0),
+                    "device_count":   int(r.device_count  or 0),
+                }
+                for r in daily
+            ],
+            "top_apps": [
+                {
+                    "app_name": r.app_name,
+                    "seconds":  int(r.seconds or 0),
+                    "pct": round(int(r.seconds or 0) / total_app_secs * 100, 1)
+                           if total_app_secs else 0,
+                }
+                for r in top_apps
+            ],
+            "most_active_devices": [
+                {
+                    "device_id":      r.device_id,
+                    "hostname":       r.hostname,
+                    "employee_name":  r.employee_name,
+                    "active_seconds": int(r.active_seconds or 0),
+                }
+                for r in top_devices
+            ],
+        }
 
-            result = {
-                "since": str(since_dt),
-                "until": str(until_dt),
-                "total_devices": int(counts.total or 0),
-                "online_devices": int(counts.online or 0),
-                "offline_devices": int(counts.offline or 0),
-                "archived_devices": int(counts.archived or 0),
-                "platform_breakdown": [
-                    {"platform": (r.platform or "").capitalize(), "count": int(r.cnt)}
-                    for r in platforms
-                ],
-                "daily_activity": [
-                    {
-                        "date": str(r.day),
-                        "active_seconds": int(r.active or 0),
-                        "idle_seconds": int(r.idle or 0),
-                        "device_count": int(r.device_count or 0),
-                    }
-                    for r in daily
-                ],
-                "top_apps": [
-                    {"app_name": r.app_name, "seconds": int(r.seconds or 0)}
-                    for r in top_apps
-                ],
-                "most_active_devices": [
-                    {
-                        "device_id": r.device_id,
-                        "hostname": r.hostname,
-                        "employee_name": r.employee_name,
-                        "active_seconds": int(r.active_seconds or 0),
-                    }
-                    for r in top_devices
-                ],
-            }
-
-            # Warm the regular GET cache
-            _ckey = ("report:fleet", company_id, str(since_dt), str(until_dt))
-            await cache_set(_ckey, result, fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-
-            await _upd("done", 100, result=result)
+        _ckey = ("report:fleet", company_id, str(since_dt), str(until_dt))
+        await cache_set(_ckey, result, fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+        await _upd("done", 100, result=result)
 
     except Exception as exc:  # noqa: BLE001
         await _job_set(job_id, {
@@ -655,14 +676,14 @@ async def create_report_job(
     admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Queue a report job. Returns job_id immediately; poll GET /jobs/{id} for progress."""
+    """Queue a report job. Returns job_id immediately; poll GET /jobs/{id} for progress.
+    Falls back to running synchronously when Redis is unavailable — the response will
+    contain status='done' and the full result already populated."""
     if req.type not in ("device_full", "fleet"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="type must be 'device_full' or 'fleet'")
-    if not get_client():
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis unavailable — use synchronous endpoints")
 
-    since_dt = _parse_date(req.since, "since")
-    until_dt = _parse_date(req.until, "until")
+    _parse_date(req.since, "since")   # validate dates early
+    _parse_date(req.until, "until")
     cid = str(admin.company_id)
 
     device_id: str | None = None
@@ -673,18 +694,195 @@ async def create_report_job(
         device_id = str(device.id)
 
     job_id = str(uuid.uuid4())
-    initial: dict = {
-        "job_id": job_id, "type": req.type,
-        "status": "pending", "progress": 0, "error": None, "result": None,
-    }
-    await _job_set(job_id, initial)
 
-    if req.type == "device_full":
-        background_tasks.add_task(_run_device_full_job, job_id, device_id, cid, req.since, req.until)
-    else:
-        background_tasks.add_task(_run_fleet_job, job_id, cid, req.since, req.until)
+    # ── Redis available: true background job ──────────────────────────────────
+    if get_client():
+        initial: dict = {
+            "job_id": job_id, "type": req.type,
+            "status": "pending", "progress": 0, "error": None, "result": None,
+        }
+        await _job_set(job_id, initial)
+        if req.type == "device_full":
+            background_tasks.add_task(_run_device_full_job, job_id, device_id, cid, req.since, req.until)
+        else:
+            background_tasks.add_task(_run_fleet_job, job_id, cid, req.since, req.until)
+        return initial
 
-    return initial
+    # ── Redis unavailable: run synchronously, return completed job inline ─────
+    # Mirrors the background workers but uses the request's db session directly.
+    try:
+        if req.type == "device_full":
+            since_dt = date.fromisoformat(req.since)
+            until_dt = date.fromisoformat(req.until)
+            did = device_id
+
+            dev_row = (await db.execute(text("""
+                SELECT d.hostname, d.platform, d.enrolled_at, d.last_seen,
+                       e.name AS employee_name
+                FROM   devices d
+                LEFT JOIN employees e ON e.id = d.employee_id
+                WHERE  d.id = :did AND d.company_id = :cid AND d.is_deleted = FALSE
+            """), {"did": did, "cid": cid})).fetchone()
+
+            daily = (await db.execute(text(f"""
+                SELECT DATE(ae.timestamp) AS day,
+                       SUM({_ACTIVE_CASE}) AS active,
+                       SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle
+                FROM   activity_events ae
+                WHERE  ae.device_id = :did
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                GROUP  BY day ORDER BY day
+            """), {"did": did, "since": since_dt, "until": until_dt})).fetchall()
+
+            apps_raw = (await db.execute(text("""
+                SELECT normalize_app_name(ae.app_name) AS app_name,
+                       SUM(ae.duration) AS seconds
+                FROM   activity_events ae
+                WHERE  ae.device_id = :did
+                  AND  ae.event_type = 'window_change'
+                  AND  ae.app_name IS NOT NULL
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                  AND  ae.app_name NOT IN ('System Idle Process','LockApp','LogonUI','Idle','screensaver')
+                GROUP  BY normalize_app_name(ae.app_name)
+                ORDER  BY seconds DESC LIMIT 20
+            """), {"did": did, "since": since_dt, "until": until_dt})).fetchall()
+
+            top_urls = (await db.execute(text("""
+                SELECT substring(ae.url FROM '^https?://([^/]+)') AS host,
+                       COUNT(*) AS visits
+                FROM   activity_events ae
+                WHERE  ae.device_id = :did
+                  AND  ae.event_type = 'url_visit'
+                  AND  ae.url IS NOT NULL
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                GROUP  BY host
+                HAVING substring(ae.url FROM '^https?://([^/]+)') IS NOT NULL
+                ORDER  BY visits DESC LIMIT 15
+            """), {"did": did, "since": since_dt, "until": until_dt})).fetchall()
+
+            total_active   = sum(int(r.active or 0) for r in daily)
+            total_idle     = sum(int(r.idle   or 0) for r in daily)
+            working_days   = len([r for r in daily if int(r.active or 0) > 0])
+            total_app_secs = sum(int(r.seconds or 0) for r in apps_raw) or 1
+            enrolled_str   = dev_row.enrolled_at.strftime("%Y-%m-%d") if (dev_row and dev_row.enrolled_at) else ""
+            last_seen_str  = dev_row.last_seen.strftime("%Y-%m-%d %H:%M UTC") if (dev_row and dev_row.last_seen) else None
+
+            result: dict = {
+                "device": {
+                    "id": did,
+                    "hostname": dev_row.hostname if dev_row else did,
+                    "platform": (dev_row.platform or "").capitalize() if dev_row else "",
+                    "employee_name": dev_row.employee_name if dev_row else None,
+                    "enrolled_at": enrolled_str,
+                    "last_seen": last_seen_str,
+                },
+                "since": req.since, "until": req.until,
+                "total_active_seconds": total_active, "total_idle_seconds": total_idle,
+                "working_days": working_days,
+                "daily_breakdown": [
+                    {"date": str(r.day), "active_seconds": int(r.active or 0), "idle_seconds": int(r.idle or 0)}
+                    for r in daily
+                ],
+                "top_apps": [
+                    {"app_name": r.app_name, "seconds": int(r.seconds or 0),
+                     "pct": round(int(r.seconds or 0) / total_app_secs * 100, 1)}
+                    for r in apps_raw
+                ],
+                "top_urls": [{"url": r.host, "visits": int(r.visits or 0)} for r in top_urls],
+            }
+
+        else:  # fleet
+            since_dt = date.fromisoformat(req.since)
+            until_dt = date.fromisoformat(req.until)
+
+            counts = (await db.execute(text("""
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE is_archived = TRUE) AS archived,
+                       COUNT(*) FILTER (
+                           WHERE is_archived = FALSE
+                             AND last_seen >= NOW() - (:cutoff * INTERVAL '1 second')
+                       ) AS online,
+                       COUNT(*) FILTER (
+                           WHERE is_archived = FALSE
+                             AND (last_seen IS NULL OR last_seen < NOW() - (:cutoff * INTERVAL '1 second'))
+                       ) AS offline
+                FROM devices WHERE company_id = :cid AND is_deleted = FALSE
+            """), {"cid": cid, "cutoff": ONLINE_CUTOFF_SECS})).fetchone()
+
+            platforms = (await db.execute(text("""
+                SELECT platform, COUNT(*) AS cnt FROM devices
+                WHERE company_id = :cid AND is_deleted = FALSE AND is_archived = FALSE
+                GROUP BY platform ORDER BY cnt DESC
+            """), {"cid": cid})).fetchall()
+
+            daily = (await db.execute(text(f"""
+                SELECT DATE(ae.timestamp) AS day, SUM({_ACTIVE_CASE}) AS active,
+                       SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle,
+                       COUNT(DISTINCT ae.device_id) AS device_count
+                FROM   activity_events ae JOIN devices d ON d.id = ae.device_id
+                WHERE  d.company_id = :cid
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                GROUP  BY day ORDER BY day
+            """), {"cid": cid, "since": since_dt, "until": until_dt})).fetchall()
+
+            top_apps = (await db.execute(text(f"""
+                SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS seconds
+                FROM   activity_events ae JOIN devices d ON d.id = ae.device_id
+                WHERE  d.company_id = :cid AND ae.event_type = 'window_change'
+                  AND  ae.app_name IS NOT NULL
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                  {_EXCL_IDLE}
+                GROUP  BY normalize_app_name(ae.app_name) ORDER BY seconds DESC LIMIT 20
+            """), {"cid": cid, "since": since_dt, "until": until_dt})).fetchall()
+
+            top_devices = (await db.execute(text(f"""
+                SELECT d.id::text AS device_id, d.hostname, e.name AS employee_name,
+                       SUM({_ACTIVE_CASE}) AS active_seconds
+                FROM   activity_events ae JOIN devices d ON d.id = ae.device_id
+                LEFT JOIN employees e ON e.id = d.employee_id
+                WHERE  d.company_id = :cid
+                  AND  ae.timestamp >= CAST(:since AS date)
+                  AND  ae.timestamp <  CAST(:until AS date) + INTERVAL '1 day'
+                GROUP  BY d.id, d.hostname, e.name ORDER BY active_seconds DESC LIMIT 10
+            """), {"cid": cid, "since": since_dt, "until": until_dt})).fetchall()
+
+            result = {
+                "since": req.since, "until": req.until,
+                "total_devices": int(counts.total or 0),
+                "online_devices": int(counts.online or 0),
+                "offline_devices": int(counts.offline or 0),
+                "archived_devices": int(counts.archived or 0),
+                "platform_breakdown": [
+                    {"platform": (r.platform or "").capitalize(), "count": int(r.cnt)} for r in platforms
+                ],
+                "daily_activity": [
+                    {"date": str(r.day), "active_seconds": int(r.active or 0),
+                     "idle_seconds": int(r.idle or 0), "device_count": int(r.device_count or 0)}
+                    for r in daily
+                ],
+                "top_apps": [{"app_name": r.app_name, "seconds": int(r.seconds or 0)} for r in top_apps],
+                "most_active_devices": [
+                    {"device_id": r.device_id, "hostname": r.hostname,
+                     "employee_name": r.employee_name, "active_seconds": int(r.active_seconds or 0)}
+                    for r in top_devices
+                ],
+            }
+
+        return {
+            "job_id": job_id, "type": req.type,
+            "status": "done", "progress": 100, "error": None, "result": result,
+        }
+
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "job_id": job_id, "type": req.type,
+            "status": "failed", "progress": 0, "error": str(exc), "result": None,
+        }
 
 
 @router.get("/jobs/{job_id}", response_model=ReportJobOut)

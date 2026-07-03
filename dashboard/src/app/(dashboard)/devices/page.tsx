@@ -3,14 +3,15 @@ import PageLoader from "@/components/PageLoader";
 import { useState, useMemo, useEffect } from "react";
 import useSWR, { mutate as globalMutate } from "swr";
 import Link from "next/link";
-import { format, subDays, subMonths, subYears, startOfMonth, startOfYear } from "date-fns";
+import { format, subDays, subMonths, subYears } from "date-fns";
 import { formatDistanceToNow } from "date-fns";
 import {
   getDevices, getUsers, getOverview,
   assignDevice, archiveDevice, restoreDevice, deleteDevice,
-  createReportJob, getReportJob,
+  createReportJob,
 } from "@/lib/api";
-import type { FleetReport, DeviceFullReport } from "@/lib/api";
+import { useReportJobs } from "@/contexts/ReportJobsContext";
+import type { ReportFormat } from "@/contexts/ReportJobsContext";
 import type { OverviewStats } from "@/types";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
@@ -20,10 +21,10 @@ import { useDevicesPush } from "@/hooks/useDevicesPush";
 import {
   Monitor, Wifi, WifiOff, Search, X, Users2, Archive,
   RotateCcw, Trash2, UserRound, ChevronLeft, ChevronRight,
-  CheckSquare, Download, FileText, Loader2,
+  CheckSquare, Download, FileText, ChevronDown,
+  FileSpreadsheet, Files,
 } from "lucide-react";
 import type { Device, User } from "@/types";
-import { openFleetReport, openDeviceReport } from "./_components/ReportGenerator";
 
 type Filter = "all" | "online" | "offline";
 
@@ -33,76 +34,65 @@ const PAGE_SIZE = 25;
 
 type FleetPeriod = "weekly" | "monthly" | "yearly" | "custom";
 
+const FORMAT_OPTIONS: { value: ReportFormat; label: string; icon: React.ElementType; desc: string }[] = [
+  { value: "pdf",  label: "PDF",       icon: FileText,        desc: "Formatted report (print-ready)" },
+  { value: "xlsx", label: "Excel",     icon: FileSpreadsheet, desc: "Spreadsheet with raw data" },
+  { value: "both", label: "Both",      icon: Files,           desc: "PDF + Excel together" },
+];
+
 function FleetReportModal({ onClose }: { onClose: () => void }) {
   const today = format(new Date(), "yyyy-MM-dd");
-  const [period, setPeriod]     = useState<FleetPeriod>("monthly");
-  const [since,  setSince]      = useState(format(subMonths(new Date(), 1), "yyyy-MM-dd"));
-  const [until,  setUntil]      = useState(today);
-  const [loading, setLoading]   = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [statusMsg, setStatusMsg] = useState("");
+  const [period, setPeriod] = useState<FleetPeriod>("monthly");
+  const [since,  setSince]  = useState(format(subMonths(new Date(), 1), "yyyy-MM-dd"));
+  const [until,  setUntil]  = useState(today);
+  const [fmt,    setFmt]    = useState<ReportFormat>("pdf");
+  const { addJob, activateJob, failJob } = useReportJobs();
 
   function applyPreset(p: FleetPeriod) {
     setPeriod(p);
     const now = new Date();
-    if (p === "weekly")  { setSince(format(subDays(now, 7),    "yyyy-MM-dd")); setUntil(today); }
-    if (p === "monthly") { setSince(format(subMonths(now, 1),  "yyyy-MM-dd")); setUntil(today); }
-    if (p === "yearly")  { setSince(format(subYears(now, 1),   "yyyy-MM-dd")); setUntil(today); }
+    if (p === "weekly")  { setSince(format(subDays(now, 7),   "yyyy-MM-dd")); setUntil(today); }
+    if (p === "monthly") { setSince(format(subMonths(now, 1), "yyyy-MM-dd")); setUntil(today); }
+    if (p === "yearly")  { setSince(format(subYears(now, 1),  "yyyy-MM-dd")); setUntil(today); }
   }
 
-  async function generate() {
-    setLoading(true);
-    setProgress(0);
-    setStatusMsg("Queuing report…");
-    try {
-      const job = await createReportJob({ type: "fleet", since, until });
-      setProgress(5);
-      setStatusMsg("Generating report in the background…");
+  function generate() {
+    // 1. Close modal + show pending immediately (no API wait)
+    const tempId = `tmp-fleet-${since}-${until}`;
+    const label  = `Fleet ${since} → ${until}`;
+    addJob({ job_id: tempId, label, type: "fleet", format: fmt });
+    onClose();
 
-      let current = job;
-      while (current.status === "pending" || current.status === "running") {
-        await new Promise(r => setTimeout(r, 2000));
-        current = await getReportJob(job.job_id);
-        setProgress(current.progress);
-        if (current.status === "failed") throw new Error(current.error ?? "Report generation failed");
-      }
-
-      setProgress(100);
-      setStatusMsg("Opening report…");
-      openFleetReport(current.result as FleetReport);
-      onClose();
-    } catch (e) {
-      alert(String(e instanceof Error ? e.message : e));
-      setLoading(false);
-    }
+    // 2. POST in background — swap temp ID for real one on response
+    createReportJob({ type: "fleet", since, until })
+      .then(job => activateJob(tempId, job.job_id, job.status === "done" ? job.result ?? undefined : undefined))
+      .catch(e  => failJob(tempId, e instanceof Error ? e.message : String(e)));
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={loading ? undefined : onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-start justify-between mb-5">
           <div>
             <h2 className="text-base font-semibold text-gray-900">Fleet Activity Report</h2>
-            <p className="text-xs text-gray-500 mt-0.5">Board-level overview — opens as a printable page</p>
+            <p className="text-xs text-gray-500 mt-0.5">Progress shown in the sidebar — navigate freely while it runs</p>
           </div>
-          {!loading && <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>}
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
         </div>
 
-        <div className="flex gap-1.5 mb-5 p-1 bg-gray-100 rounded-lg">
+        {/* Period */}
+        <label className="text-xs font-medium text-gray-600 mb-1.5 block">Period</label>
+        <div className="flex gap-1.5 mb-4 p-1 bg-gray-100 rounded-lg">
           {(["weekly", "monthly", "yearly", "custom"] as FleetPeriod[]).map(p => (
-            <button
-              key={p}
-              disabled={loading}
-              onClick={() => applyPreset(p)}
-              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition capitalize disabled:opacity-40 ${period === p ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-800"}`}
-            >
+            <button key={p} onClick={() => applyPreset(p)}
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition capitalize ${period === p ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-800"}`}>
               {p}
             </button>
           ))}
         </div>
 
-        {period === "custom" && !loading && (
-          <div className="grid grid-cols-2 gap-3 mb-5">
+        {period === "custom" ? (
+          <div className="grid grid-cols-2 gap-3 mb-4">
             <div>
               <label className="text-xs text-gray-500 mb-1 block">From</label>
               <input type="date" value={since} onChange={e => setSince(e.target.value)}
@@ -114,37 +104,32 @@ function FleetReportModal({ onClose }: { onClose: () => void }) {
                 className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
             </div>
           </div>
+        ) : (
+          <p className="text-xs text-gray-500 mb-4">{since} &rarr; {until}</p>
         )}
 
-        {period !== "custom" && !loading && (
-          <p className="text-xs text-gray-500 mb-5">{since} &rarr; {until}</p>
-        )}
-
-        {loading && (
-          <div className="mb-5">
-            <div className="flex justify-between items-center text-xs text-gray-500 mb-2">
-              <span>{statusMsg}</span>
-              <span className="font-medium text-brand-600">{progress}%</span>
-            </div>
-            <div className="w-full bg-gray-100 rounded-full h-2">
-              <div
-                className="bg-brand-500 h-2 rounded-full transition-all duration-700 ease-out"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-            <p className="text-[11px] text-gray-400 mt-2">You can keep using the app — report will open automatically when ready.</p>
-          </div>
-        )}
+        {/* Format */}
+        <label className="text-xs font-medium text-gray-600 mb-1.5 block">Format</label>
+        <div className="grid grid-cols-3 gap-2 mb-5">
+          {FORMAT_OPTIONS.map(opt => (
+            <button key={opt.value} onClick={() => setFmt(opt.value)}
+              className={`flex flex-col items-center gap-1 py-2.5 rounded-xl border text-xs font-medium transition ${
+                fmt === opt.value
+                  ? "border-brand-400 bg-brand-50 text-brand-700"
+                  : "border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50"
+              }`}>
+              <opt.icon size={16} />
+              {opt.label}
+            </button>
+          ))}
+        </div>
 
         <div className="flex gap-2 justify-end">
-          {!loading && <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>}
-          <button
-            onClick={generate}
-            disabled={loading}
-            className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-brand-600 hover:bg-brand-700 rounded-lg disabled:opacity-50"
-          >
-            {loading ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
-            {loading ? "Generating…" : "Generate Report"}
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button onClick={generate}
+            className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-brand-600 hover:bg-brand-700 rounded-lg">
+            <Download size={14} />
+            Generate &amp; Download
           </button>
         </div>
       </div>
@@ -310,7 +295,7 @@ function Pagination({
 function DeviceRow({
   device, employees, canAssign, canArchive, canDelete,
   onAssigned, onArchived, onRestored, onDeleted,
-  selected, onToggleSelect, onExport, exporting,
+  selected, onToggleSelect, onExport,
 }: {
   device: Device;
   employees: { id: string; name: string }[];
@@ -323,10 +308,10 @@ function DeviceRow({
   onDeleted: () => void;
   selected?: boolean;
   onToggleSelect?: (id: string) => void;
-  onExport?: () => void;
-  exporting?: boolean;
+  onExport?: (format: ReportFormat) => void;
 }) {
   const [saving, setSaving] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
   const showActions = canArchive || canDelete;
 
   const lastSeen = device.last_seen_unix
@@ -454,18 +439,34 @@ function DeviceRow({
         }
       </td>
 
-      {/* Export */}
+      {/* Export — format dropdown */}
       {onExport && (
         <td className="px-4 py-3.5">
-          <button
-            onClick={onExport}
-            disabled={exporting || saving}
-            title="Export device report"
-            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50 px-2 py-1 rounded transition disabled:opacity-40"
-          >
-            {exporting ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
-            Export
-          </button>
+          <div className="relative">
+            <button
+              disabled={saving}
+              onClick={() => setShowExportMenu(v => !v)}
+              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50 px-2 py-1 rounded transition disabled:opacity-40"
+            >
+              <Download size={11} /> Export <ChevronDown size={10} />
+            </button>
+            {showExportMenu && (
+              <div
+                className="absolute z-20 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg py-1 w-32"
+                onMouseLeave={() => setShowExportMenu(false)}
+              >
+                {FORMAT_OPTIONS.map(opt => (
+                  <button
+                    key={opt.value}
+                    onClick={() => { onExport(opt.value); setShowExportMenu(false); }}
+                    className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 transition"
+                  >
+                    <opt.icon size={11} className="text-gray-400" /> {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </td>
       )}
 
@@ -521,8 +522,7 @@ type RowCallbacks = {
   selectedIds?: Set<string>;
   onToggleSelect?: (id: string) => void;
   onToggleAll?: (ids: string[], checked: boolean) => void;
-  onExport?: (deviceId: string) => void;
-  exportingId?: string | null;
+  onExport?: (deviceId: string, format: ReportFormat) => void;
 };
 
 function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) {
@@ -570,8 +570,7 @@ function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) 
               {...row}
               selected={row.selectedIds?.has(d.id)}
               onToggleSelect={row.onToggleSelect}
-              onExport={row.onExport ? () => row.onExport!(d.id) : undefined}
-              exporting={row.exportingId === d.id}
+              onExport={row.onExport ? (fmt) => row.onExport!(d.id, fmt) : undefined}
             />
           ))}
           {devices.length === 0 && (
@@ -599,12 +598,12 @@ export default function DevicesPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [showFleetModal, setShowFleetModal] = useState(false);
-  const [exportingId, setExportingId] = useState<string | null>(null);
 
   const canArchive  = can("devices", "archive");
   const canDelete   = can("devices", "delete");
   const canAssign   = can("devices", "assign") && can("users", "view");
-  const showActions = canArchive || canDelete;
+
+  const { addJob, activateJob, failJob } = useReportJobs();
 
   function toggleSelect(id: string) {
     setSelectedIds(prev => {
@@ -652,25 +651,20 @@ export default function DevicesPage() {
     globalMutate("home-overview-base", undefined, { revalidate: true });
   }
 
-  async function handleDeviceExport(id: string) {
-    if (exportingId) return;
-    setExportingId(id);
-    try {
-      const today = format(new Date(), "yyyy-MM-dd");
-      const since = format(subMonths(new Date(), 1), "yyyy-MM-dd");
-      const job = await createReportJob({ type: "device_full", device_id: id, since, until: today });
-      let current = job;
-      while (current.status === "pending" || current.status === "running") {
-        await new Promise(r => setTimeout(r, 2000));
-        current = await getReportJob(job.job_id);
-        if (current.status === "failed") throw new Error(current.error ?? "Report generation failed");
-      }
-      openDeviceReport(current.result as DeviceFullReport);
-    } catch (e) {
-      alert(String(e instanceof Error ? e.message : e));
-    } finally {
-      setExportingId(null);
-    }
+  function handleDeviceExport(id: string, fmt: ReportFormat) {
+    const device = devices?.find(d => d.id === id);
+    const label  = device?.hostname ?? id.slice(0, 8);
+    const today  = format(new Date(), "yyyy-MM-dd");
+    const since  = format(subMonths(new Date(), 1), "yyyy-MM-dd");
+
+    // 1. Show pending in sidebar immediately
+    const tempId = `tmp-device-${id}`;
+    addJob({ job_id: tempId, label: `Device: ${label}`, type: "device_full", format: fmt });
+
+    // 2. POST in background — swap temp ID for real one on response
+    createReportJob({ type: "device_full", device_id: id, since, until: today })
+      .then(job => activateJob(tempId, job.job_id, job.status === "done" ? job.result ?? undefined : undefined))
+      .catch(e  => failJob(tempId, e instanceof Error ? e.message : String(e)));
   }
 
   async function handleBulkDelete() {
@@ -754,7 +748,6 @@ export default function DevicesPage() {
     onToggleSelect: toggleSelect,
     onToggleAll: toggleAll,
     onExport: handleDeviceExport,
-    exportingId,
   };
 
   return (
