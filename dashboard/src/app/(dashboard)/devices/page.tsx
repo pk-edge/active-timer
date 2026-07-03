@@ -3,11 +3,15 @@ import PageLoader from "@/components/PageLoader";
 import { useState, useMemo, useEffect } from "react";
 import useSWR, { mutate as globalMutate } from "swr";
 import Link from "next/link";
+import { format, subDays, subMonths, subYears } from "date-fns";
 import { formatDistanceToNow } from "date-fns";
 import {
   getDevices, getUsers, getOverview,
   assignDevice, archiveDevice, restoreDevice, deleteDevice,
+  createReportJob,
 } from "@/lib/api";
+import { useReportJobs } from "@/contexts/ReportJobsContext";
+import type { ReportFormat } from "@/contexts/ReportJobsContext";
 import type { OverviewStats } from "@/types";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
@@ -17,13 +21,121 @@ import { useDevicesPush } from "@/hooks/useDevicesPush";
 import {
   Monitor, Wifi, WifiOff, Search, X, Users2, Archive,
   RotateCcw, Trash2, UserRound, ChevronLeft, ChevronRight,
-  CheckSquare,
+  CheckSquare, Download, FileText, ChevronDown,
+  FileSpreadsheet, Files,
 } from "lucide-react";
 import type { Device, User } from "@/types";
 
 type Filter = "all" | "online" | "offline";
 
 const PAGE_SIZE = 25;
+
+// ── Fleet report modal ────────────────────────────────────────────────────────
+
+type FleetPeriod = "weekly" | "monthly" | "yearly" | "custom";
+
+const FORMAT_OPTIONS: { value: ReportFormat; label: string; icon: React.ElementType; desc: string }[] = [
+  { value: "pdf",  label: "PDF",       icon: FileText,        desc: "Formatted report (print-ready)" },
+  { value: "xlsx", label: "Excel",     icon: FileSpreadsheet, desc: "Spreadsheet with raw data" },
+  { value: "both", label: "Both",      icon: Files,           desc: "PDF + Excel together" },
+];
+
+function FleetReportModal({ onClose }: { onClose: () => void }) {
+  const today = format(new Date(), "yyyy-MM-dd");
+  const [period, setPeriod] = useState<FleetPeriod>("monthly");
+  const [since,  setSince]  = useState(format(subMonths(new Date(), 1), "yyyy-MM-dd"));
+  const [until,  setUntil]  = useState(today);
+  const [fmt,    setFmt]    = useState<ReportFormat>("pdf");
+  const { addJob, activateJob, failJob } = useReportJobs();
+
+  function applyPreset(p: FleetPeriod) {
+    setPeriod(p);
+    const now = new Date();
+    if (p === "weekly")  { setSince(format(subDays(now, 7),   "yyyy-MM-dd")); setUntil(today); }
+    if (p === "monthly") { setSince(format(subMonths(now, 1), "yyyy-MM-dd")); setUntil(today); }
+    if (p === "yearly")  { setSince(format(subYears(now, 1),  "yyyy-MM-dd")); setUntil(today); }
+  }
+
+  function generate() {
+    // 1. Close modal + show pending immediately (no API wait)
+    const tempId = `tmp-fleet-${since}-${until}`;
+    const label  = `Fleet ${since} → ${until}`;
+    addJob({ job_id: tempId, label, type: "fleet", format: fmt });
+    onClose();
+
+    // 2. POST in background — swap temp ID for real one on response
+    createReportJob({ type: "fleet", since, until })
+      .then(job => activateJob(tempId, job.job_id, job.status === "done" ? job.result ?? undefined : undefined))
+      .catch(e  => failJob(tempId, e instanceof Error ? e.message : String(e)));
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" onClick={e => e.stopPropagation()}>
+        <div className="flex items-start justify-between mb-5">
+          <div>
+            <h2 className="text-base font-semibold text-gray-900">Fleet Activity Report</h2>
+            <p className="text-xs text-gray-500 mt-0.5">Progress shown in the sidebar — navigate freely while it runs</p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+
+        {/* Period */}
+        <label className="text-xs font-medium text-gray-600 mb-1.5 block">Period</label>
+        <div className="flex gap-1.5 mb-4 p-1 bg-gray-100 rounded-lg">
+          {(["weekly", "monthly", "yearly", "custom"] as FleetPeriod[]).map(p => (
+            <button key={p} onClick={() => applyPreset(p)}
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition capitalize ${period === p ? "bg-white text-gray-900 shadow-sm" : "text-gray-600 hover:text-gray-800"}`}>
+              {p}
+            </button>
+          ))}
+        </div>
+
+        {period === "custom" ? (
+          <div className="grid grid-cols-2 gap-3 mb-4">
+            <div>
+              <label className="text-xs text-gray-500 mb-1 block">From</label>
+              <input type="date" value={since} onChange={e => setSince(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
+            </div>
+            <div>
+              <label className="text-xs text-gray-500 mb-1 block">To</label>
+              <input type="date" value={until} onChange={e => setUntil(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
+            </div>
+          </div>
+        ) : (
+          <p className="text-xs text-gray-500 mb-4">{since} &rarr; {until}</p>
+        )}
+
+        {/* Format */}
+        <label className="text-xs font-medium text-gray-600 mb-1.5 block">Format</label>
+        <div className="grid grid-cols-3 gap-2 mb-5">
+          {FORMAT_OPTIONS.map(opt => (
+            <button key={opt.value} onClick={() => setFmt(opt.value)}
+              className={`flex flex-col items-center gap-1 py-2.5 rounded-xl border text-xs font-medium transition ${
+                fmt === opt.value
+                  ? "border-brand-400 bg-brand-50 text-brand-700"
+                  : "border-gray-200 text-gray-600 hover:border-gray-300 hover:bg-gray-50"
+              }`}>
+              <opt.icon size={16} />
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex gap-2 justify-end">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">Cancel</button>
+          <button onClick={generate}
+            className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-brand-600 hover:bg-brand-700 rounded-lg">
+            <Download size={14} />
+            Generate &amp; Download
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── Stat card (clickable filter) ─────────────────────────────────────────────
 
@@ -183,7 +295,7 @@ function Pagination({
 function DeviceRow({
   device, employees, canAssign, canArchive, canDelete,
   onAssigned, onArchived, onRestored, onDeleted,
-  selected, onToggleSelect,
+  selected, onToggleSelect, onExport,
 }: {
   device: Device;
   employees: { id: string; name: string }[];
@@ -196,8 +308,10 @@ function DeviceRow({
   onDeleted: () => void;
   selected?: boolean;
   onToggleSelect?: (id: string) => void;
+  onExport?: (format: ReportFormat) => void;
 }) {
   const [saving, setSaving] = useState(false);
+  const [showExportMenu, setShowExportMenu] = useState(false);
   const showActions = canArchive || canDelete;
 
   const lastSeen = device.last_seen_unix
@@ -325,6 +439,37 @@ function DeviceRow({
         }
       </td>
 
+      {/* Export — format dropdown */}
+      {onExport && (
+        <td className="px-4 py-3.5">
+          <div className="relative">
+            <button
+              disabled={saving}
+              onClick={() => setShowExportMenu(v => !v)}
+              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 hover:bg-blue-50 px-2 py-1 rounded transition disabled:opacity-40"
+            >
+              <Download size={11} /> Export <ChevronDown size={10} />
+            </button>
+            {showExportMenu && (
+              <div
+                className="absolute z-20 right-0 top-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg py-1 w-32"
+                onMouseLeave={() => setShowExportMenu(false)}
+              >
+                {FORMAT_OPTIONS.map(opt => (
+                  <button
+                    key={opt.value}
+                    onClick={() => { onExport(opt.value); setShowExportMenu(false); }}
+                    className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 transition"
+                  >
+                    <opt.icon size={11} className="text-gray-400" /> {opt.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </td>
+      )}
+
       {/* Actions */}
       {showActions && (
         <td className="px-4 py-3.5">
@@ -377,11 +522,13 @@ type RowCallbacks = {
   selectedIds?: Set<string>;
   onToggleSelect?: (id: string) => void;
   onToggleAll?: (ids: string[], checked: boolean) => void;
+  onExport?: (deviceId: string, format: ReportFormat) => void;
 };
 
 function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) {
   const showActions = row.canArchive || row.canDelete;
-  const colCount = 5 + (showActions ? 1 : 0) + (row.canDelete ? 1 : 0);
+  const showExport = !!row.onExport;
+  const colCount = 5 + (showExport ? 1 : 0) + (showActions ? 1 : 0) + (row.canDelete ? 1 : 0);
 
   const allSelected = devices.length > 0 && devices.every(d => row.selectedIds?.has(d.id));
   const someSelected = !allSelected && devices.some(d => row.selectedIds?.has(d.id));
@@ -407,6 +554,9 @@ function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) 
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Employee</th>
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Platform</th>
             <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Last Seen</th>
+            {showExport && (
+              <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Export</th>
+            )}
             {showActions && (
               <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
             )}
@@ -420,6 +570,7 @@ function DeviceTable({ devices, ...row }: { devices: Device[] } & RowCallbacks) 
               {...row}
               selected={row.selectedIds?.has(d.id)}
               onToggleSelect={row.onToggleSelect}
+              onExport={row.onExport ? (fmt) => row.onExport!(d.id, fmt) : undefined}
             />
           ))}
           {devices.length === 0 && (
@@ -446,11 +597,13 @@ export default function DevicesPage() {
   const [page, setPage]               = useState(1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [showFleetModal, setShowFleetModal] = useState(false);
 
   const canArchive  = can("devices", "archive");
   const canDelete   = can("devices", "delete");
   const canAssign   = can("devices", "assign") && can("users", "view");
-  const showActions = canArchive || canDelete;
+
+  const { addJob, activateJob, failJob } = useReportJobs();
 
   function toggleSelect(id: string) {
     setSelectedIds(prev => {
@@ -496,6 +649,22 @@ export default function DevicesPage() {
       { revalidate: true },
     );
     globalMutate("home-overview-base", undefined, { revalidate: true });
+  }
+
+  function handleDeviceExport(id: string, fmt: ReportFormat) {
+    const device = devices?.find(d => d.id === id);
+    const label  = device?.hostname ?? id.slice(0, 8);
+    const today  = format(new Date(), "yyyy-MM-dd");
+    const since  = format(subMonths(new Date(), 1), "yyyy-MM-dd");
+
+    // 1. Show pending in sidebar immediately
+    const tempId = `tmp-device-${id}`;
+    addJob({ job_id: tempId, label: `Device: ${label}`, type: "device_full", format: fmt });
+
+    // 2. POST in background — swap temp ID for real one on response
+    createReportJob({ type: "device_full", device_id: id, since, until: today })
+      .then(job => activateJob(tempId, job.job_id, job.status === "done" ? job.result ?? undefined : undefined))
+      .catch(e  => failJob(tempId, e instanceof Error ? e.message : String(e)));
   }
 
   async function handleBulkDelete() {
@@ -578,16 +747,27 @@ export default function DevicesPage() {
     selectedIds,
     onToggleSelect: toggleSelect,
     onToggleAll: toggleAll,
+    onExport: handleDeviceExport,
   };
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+
+      {showFleetModal && <FleetReportModal onClose={() => setShowFleetModal(false)} />}
 
       {/* ── Header ── */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-1">
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">All Devices</h1>
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowFleetModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50 transition"
+          >
+            <Download size={14} />
+            Fleet Report
+          </button>
+
           {canArchive && (
             <button
               onClick={() => { setShowArchived(v => !v); setFilter("all"); }}

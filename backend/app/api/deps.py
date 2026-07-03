@@ -170,6 +170,15 @@ async def get_current_user(
     else:
         user._perms = set()
         user._scope_type = "own"
+
+    # Detach from the session: a later db.rollback() anywhere in the request
+    # (e.g. a cache-read helper swallowing an error) expires every attached
+    # instance, and the next user.company_id access would lazy-load outside the
+    # greenlet context and 500 with MissingGreenlet. Everything the request
+    # needs (scalars + role/permissions) is eagerly loaded above, so a detached
+    # copy is always safe to read. Endpoints that mutate the current user must
+    # issue an explicit UPDATE instead of relying on ORM dirty-tracking.
+    db.expunge(user)
     return user
 
 

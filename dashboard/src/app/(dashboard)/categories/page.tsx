@@ -4,7 +4,7 @@ import { useState, useMemo } from "react";
 import useSWR from "swr";
 import {
   Plus, Trash2, Edit2, Tag, X, Check, ChevronDown, Search,
-  Globe, Monitor, Zap, RefreshCw, ChevronRight,
+  Globe, Monitor, Zap, RefreshCw, ChevronRight, ChevronLeft,
 } from "lucide-react";
 import {
   getTechCategories, createTechCategory, updateTechCategory,
@@ -14,13 +14,51 @@ import {
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/AccessDenied";
 import ConfirmDialog from "@/components/ConfirmDialog";
-import type { AppCategory, UncategorizedItem } from "@/types";
+import type { AppCategory, CategoriesPage, UncategorizedItem } from "@/types";
 
 const PRESET_COLORS = [
   "#4a0f70", "#22c55e", "#f59e0b", "#a855f7", "#ef4444",
   "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#6366f1",
   "#14b8a6", "#64748b",
 ];
+
+const PER_PAGE = 6;
+const UNCAT_PER_PAGE = 20;
+
+// ── Pagination nav ────────────────────────────────────────────────────────────
+
+function PageNav({
+  page, totalPages, total, label,
+  onPrev, onNext,
+}: {
+  page: number; totalPages: number; total: number; label: string;
+  onPrev: () => void; onNext: () => void;
+}) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-100">
+      <span className="text-xs text-gray-500">
+        Page {page} of {totalPages} &nbsp;·&nbsp; {total} {label}
+      </span>
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={onPrev}
+          disabled={page <= 1}
+          className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+        >
+          <ChevronLeft size={13} /> Previous
+        </button>
+        <button
+          onClick={onNext}
+          disabled={page >= totalPages}
+          className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
+        >
+          Next <ChevronRight size={13} />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // ── Category form modal ───────────────────────────────────────────────────────
 
@@ -195,32 +233,33 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
   const [tab,  setTab]            = useState<"apps" | "urls">("apps");
   const [search, setSearch]       = useState("");
   const [assigning, setAssigning] = useState<UncategorizedItem | null>(null);
-  // Collapsed by default so the page's initial load is a SINGLE request
-  // (just /v1/tech/categories). The heavy uncategorized scan only runs once
-  // the user actually opens this panel — keeping the slow query off the
-  // critical path entirely.
   const [expanded, setExpanded]   = useState(false);
+  const [ucPage, setUcPage]       = useState(1);
 
-  // Derive since/until from the days preset (relative to today)
   const since = (() => {
     const d = new Date(); d.setDate(d.getDate() - (days - 1));
     return d.toISOString().slice(0, 10);
   })();
   const until = new Date().toISOString().slice(0, 10);
 
-  // Key is null until the panel is expanded → SWR suspends, no request fires on
-  // mount. Re-expanding within the dedupe window serves the cached result.
   const { data, mutate, isLoading } = useSWR(
     expanded ? ["uncategorized", days] : null,
     () => getUncategorized(since, until),
     { revalidateOnFocus: false },
   );
 
-  const items = useMemo(() => {
+  // Reset page when tab, search or days changes
+  const filtered = useMemo(() => {
+    setUcPage(1);
     const raw = tab === "apps" ? (data?.apps ?? []) : (data?.urls ?? []);
     if (!search.trim()) return raw;
     return raw.filter(i => i.pattern.toLowerCase().includes(search.toLowerCase()));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, tab, search]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / UNCAT_PER_PAGE));
+  const safePage   = Math.min(ucPage, totalPages);
+  const pageItems  = filtered.slice((safePage - 1) * UNCAT_PER_PAGE, safePage * UNCAT_PER_PAGE);
 
   const totalApps = data?.apps.length ?? 0;
   const totalUrls = data?.urls.length ?? 0;
@@ -265,7 +304,6 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
           <div className="border-t border-gray-100">
             {/* Toolbar */}
             <div className="flex items-center gap-3 px-5 py-3 border-b border-gray-100 flex-wrap">
-              {/* Tabs */}
               <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden shrink-0">
                 <button
                   onClick={() => setTab("apps")}
@@ -273,8 +311,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                     tab === "apps" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"
                   }`}
                 >
-                  <Monitor size={11} />
-                  Apps
+                  <Monitor size={11} /> Apps
                   {totalApps > 0 && (
                     <span className="bg-gray-200 text-gray-600 text-[10px] px-1.5 rounded-full">{totalApps}</span>
                   )}
@@ -285,15 +322,13 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                     tab === "urls" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"
                   }`}
                 >
-                  <Globe size={11} />
-                  Websites
+                  <Globe size={11} /> Websites
                   {totalUrls > 0 && (
                     <span className="bg-gray-200 text-gray-600 text-[10px] px-1.5 rounded-full">{totalUrls}</span>
                   )}
                 </button>
               </div>
 
-              {/* Search */}
               <div className="relative flex-1 min-w-[160px]">
                 <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600" />
                 <input
@@ -304,7 +339,6 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                 />
               </div>
 
-              {/* Period */}
               <div className="relative shrink-0">
                 <select
                   value={days}
@@ -323,7 +357,7 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
             {/* Item list */}
             {isLoading ? (
               <div className="px-5 py-8 text-center text-sm text-gray-600">Loading…</div>
-            ) : items.length === 0 ? (
+            ) : filtered.length === 0 ? (
               <div className="px-5 py-10 text-center">
                 <div className="w-10 h-10 rounded-full bg-green-50 flex items-center justify-center mx-auto mb-3">
                   <Check size={18} className="text-green-500" />
@@ -336,8 +370,8 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                 <p className="text-xs text-gray-600 mt-1">Check back after agents report new activity.</p>
               </div>
             ) : (
-              <div className="divide-y divide-gray-100 max-h-96 overflow-y-auto">
-                {items.map(item => (
+              <div className="divide-y divide-gray-100">
+                {pageItems.map(item => (
                   <div
                     key={item.pattern}
                     className="flex items-center gap-3 px-5 py-3 hover:bg-gray-50 group"
@@ -367,10 +401,36 @@ function UncategorizedPanel({ categories, onAssigned }: UncategorizedPanelProps)
                     </button>
                   </div>
                 ))}
+
+                {/* Uncategorized pagination */}
+                <div className="px-5 py-3 flex items-center justify-between border-t border-gray-100 bg-gray-50/50">
+                  <span className="text-xs text-gray-500">
+                    {filtered.length > 0
+                      ? `${(safePage - 1) * UNCAT_PER_PAGE + 1}–${Math.min(safePage * UNCAT_PER_PAGE, filtered.length)} of ${filtered.length}`
+                      : "0 items"}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => setUcPage(p => Math.max(1, p - 1))}
+                      disabled={safePage <= 1}
+                      className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    >
+                      <ChevronLeft size={12} /> Prev
+                    </button>
+                    <span className="text-xs text-gray-500 px-1">{safePage}/{totalPages}</span>
+                    <button
+                      onClick={() => setUcPage(p => Math.min(totalPages, p + 1))}
+                      disabled={safePage >= totalPages}
+                      className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg border border-gray-200 text-gray-600 hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed transition"
+                    >
+                      Next <ChevronRight size={12} />
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
 
-            {items.length > 0 && (
+            {filtered.length > 0 && (
               <div className="px-5 py-2 border-t border-gray-100 text-xs text-gray-600 flex items-center gap-1">
                 <Zap size={11} className="text-amber-400" />
                 Hover a row and click <strong className="text-gray-600 mx-0.5">Assign</strong> to add it to a category instantly
@@ -400,12 +460,10 @@ function CategoryCard({
   cat: AppCategory;
   canEdit: boolean;
   onEdit: () => void;
-  /** Called when user taps delete — parent owns the confirm dialog */
   onDelete: () => void;
   onRefresh: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [search, setSearch]     = useState("");
   const [newRule, setNewRule]   = useState("");
   const [adding, setAdding]     = useState(false);
@@ -435,10 +493,6 @@ function CategoryCard({
     try { await deleteCategoryRule(ruleId); onRefresh(); } catch { /* ignore */ }
   }
 
-  function handleDelete() {
-    onDelete();  // page-level ConfirmDialog handles actual deletion
-  }
-
   return (
     <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
       <div className="flex items-center gap-3 px-5 py-4">
@@ -463,8 +517,8 @@ function CategoryCard({
             </button>
           )}
           {canEdit && !cat.is_system && (
-            <button onClick={handleDelete} disabled={deleting}
-                    className="p-1.5 text-gray-600 hover:text-red-500 hover:bg-red-50 rounded-lg transition disabled:opacity-50">
+            <button onClick={onDelete}
+                    className="p-1.5 text-gray-600 hover:text-red-500 hover:bg-red-50 rounded-lg transition">
               <Trash2 size={14} />
             </button>
           )}
@@ -526,32 +580,55 @@ function CategoryCard({
 
 export default function CategoriesPage() {
   const { loading, can } = useUser();
-  const [showForm,       setShowForm]       = useState(false);
-  const [editing,        setEditing]        = useState<AppCategory | undefined>(undefined);
-  const [search,         setSearch]         = useState("");
-  const [pendingDelete,  setPendingDelete]  = useState<AppCategory | null>(null);
-  const [deleting,       setDeleting]       = useState(false);
+  const [showForm,      setShowForm]      = useState(false);
+  const [editing,       setEditing]       = useState<AppCategory | undefined>(undefined);
+  const [search,        setSearch]        = useState("");
+  const [pendingDelete, setPendingDelete] = useState<AppCategory | null>(null);
+  const [deleting,      setDeleting]      = useState(false);
+
+  // Separate page state for system and custom sections
+  const [sysPage,  setSysPage]  = useState(1);
+  const [custPage, setCustPage] = useState(1);
+
+  const canEdit = can("categories", "edit");
+
+  // Two independent SWR fetches — system and custom categories, each paginated
+  const { data: sysData,  mutate: mutateSys } = useSWR<CategoriesPage>(
+    ["tech-categories", "system", sysPage, PER_PAGE, search],
+    () => getTechCategories({ page: sysPage, per_page: PER_PAGE, is_system: true }),
+    { keepPreviousData: true },
+  );
+  const { data: custData, mutate: mutateCust } = useSWR<CategoriesPage>(
+    ["tech-categories", "custom", custPage, PER_PAGE, search],
+    () => getTechCategories({ page: custPage, per_page: PER_PAGE, is_system: false }),
+    { keepPreviousData: true },
+  );
+
+  // All categories (no pagination) — used only for the assign modal in UncategorizedPanel
+  const { data: allCats, mutate: mutateAll } = useSWR<CategoriesPage>(
+    ["tech-categories", "all"],
+    () => getTechCategories({ per_page: 200 }),
+  );
+
+  function mutateAll3() { mutateSys(); mutateCust(); mutateAll(); }
 
   async function confirmCatDelete() {
     if (!pendingDelete) return;
     setDeleting(true);
-    try { await deleteTechCategory(pendingDelete.id); mutate(); setPendingDelete(null); }
-    finally { setDeleting(false); }
+    try {
+      await deleteTechCategory(pendingDelete.id);
+      mutateAll3();
+      setPendingDelete(null);
+    } finally {
+      setDeleting(false); }
   }
-
-  const { data: categories, mutate } = useSWR<AppCategory[]>("tech-categories", getTechCategories);
-
-  const canEdit = can("categories", "edit");
 
   if (loading) return <PageLoader />;
   if (!can("categories", "view")) return <AccessDenied label="App Categories" />;
 
-  const filtered = (categories ?? []).filter(c =>
-    !search || c.name.toLowerCase().includes(search.toLowerCase())
-  );
-  const systemCats = filtered.filter(c => c.is_system);
-  const customCats = filtered.filter(c => !c.is_system);
-  const totalRules = (categories ?? []).reduce((s, c) => s + c.rule_count, 0);
+  const sysTotal    = sysData?.total  ?? 0;
+  const custTotal   = custData?.total ?? 0;
+  const totalRules  = [...(sysData?.items ?? []), ...(custData?.items ?? [])].reduce((s, c) => s + c.rule_count, 0);
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto pr-1">
@@ -576,10 +653,10 @@ export default function CategoriesPage() {
       {/* Stats */}
       <div className="flex flex-wrap gap-3 mb-6">
         {[
-          { label: "Total Categories", value: (categories ?? []).length, color: "bg-brand-50 text-brand-600" },
-          { label: "System",           value: (categories ?? []).filter(c => c.is_system).length, color: "bg-gray-50 text-gray-600" },
-          { label: "Custom",           value: (categories ?? []).filter(c => !c.is_system).length, color: "bg-purple-50 text-purple-600" },
-          { label: "Total Rules",      value: totalRules, color: "bg-green-50 text-green-600" },
+          { label: "Total Categories", value: sysTotal + custTotal,  color: "bg-brand-50 text-brand-600" },
+          { label: "System",           value: sysTotal,              color: "bg-gray-50 text-gray-600" },
+          { label: "Custom",           value: custTotal,             color: "bg-purple-50 text-purple-600" },
+          { label: "Total Rules",      value: totalRules,            color: "bg-green-50 text-green-600" },
         ].map(s => (
           <div key={s.label} className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm flex items-center gap-3">
             <div className={`w-8 h-8 rounded-lg ${s.color} flex items-center justify-center`}>
@@ -593,72 +670,102 @@ export default function CategoriesPage() {
         ))}
       </div>
 
-      {/* Auto-detect panel — always visible at top */}
+      {/* Unassigned panel */}
       <UncategorizedPanel
-        categories={categories ?? []}
-        onAssigned={() => mutate()}
+        categories={allCats?.items ?? []}
+        onAssigned={mutateAll3}
       />
 
       {/* Search */}
       <div className="relative mb-4 max-w-sm">
         <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600" />
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search categories…"
-               className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-300 bg-white shadow-sm" />
+        <input
+          value={search}
+          onChange={e => { setSearch(e.target.value); setSysPage(1); setCustPage(1); }}
+          placeholder="Search categories…"
+          className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-300 bg-white shadow-sm"
+        />
       </div>
 
       {/* System categories */}
-      {systemCats.length > 0 && (
-        <div className="mb-5">
-          <p className="text-xs font-semibold uppercase tracking-wider text-gray-600 mb-3">System Categories</p>
+      {sysTotal > 0 && (
+        <div className="mb-6 bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+          <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-4">
+            System Categories
+            <span className="ml-2 font-normal normal-case text-gray-400">({sysTotal})</span>
+          </p>
           <div className="space-y-3">
-            {systemCats.map(cat => (
+            {(sysData?.items ?? []).map(cat => (
               <CategoryCard
                 key={cat.id}
                 cat={cat}
                 canEdit={canEdit}
                 onEdit={() => { setEditing(cat); setShowForm(true); }}
                 onDelete={() => setPendingDelete(cat)}
-                onRefresh={() => mutate()}
+                onRefresh={mutateAll3}
               />
             ))}
           </div>
+          <PageNav
+            page={sysPage}
+            totalPages={sysData?.total_pages ?? 1}
+            total={sysTotal}
+            label="system categories"
+            onPrev={() => setSysPage(p => Math.max(1, p - 1))}
+            onNext={() => setSysPage(p => p + 1)}
+          />
         </div>
       )}
 
       {/* Custom categories */}
-      {customCats.length > 0 && (
-        <div className="mb-5">
-          <p className="text-xs font-semibold uppercase tracking-wider text-gray-600 mb-3">Custom Categories</p>
-          <div className="space-y-3">
-            {customCats.map(cat => (
-              <CategoryCard
-                key={cat.id}
-                cat={cat}
-                canEdit={canEdit}
-                onEdit={() => { setEditing(cat); setShowForm(true); }}
-                onDelete={() => setPendingDelete(cat)}
-                onRefresh={() => mutate()}
-              />
-            ))}
+      <div className="mb-6 bg-white border border-gray-200 rounded-xl shadow-sm p-5">
+        <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-4">
+          Custom Categories
+          <span className="ml-2 font-normal normal-case text-gray-400">({custTotal})</span>
+        </p>
+        {custTotal === 0 ? (
+          <div className="py-8 text-center">
+            <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-3">
+              <Tag size={17} className="text-gray-400" />
+            </div>
+            <p className="text-sm text-gray-500">No custom categories yet</p>
+            {canEdit && (
+              <p className="text-xs text-gray-400 mt-1">
+                Click <strong>New Category</strong> to create one
+              </p>
+            )}
           </div>
-        </div>
-      )}
-
-      {(categories ?? []).length === 0 && (
-        <div className="bg-white border border-gray-200 rounded-xl p-10 text-center shadow-sm">
-          <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-3">
-            <Tag size={20} className="text-gray-600" />
-          </div>
-          <p className="text-gray-700 font-medium">No categories yet</p>
-          <p className="text-gray-600 text-sm mt-1">Create a category to start classifying applications.</p>
-        </div>
-      )}
+        ) : (
+          <>
+            <div className="space-y-3">
+              {(custData?.items ?? []).map(cat => (
+                <CategoryCard
+                  key={cat.id}
+                  cat={cat}
+                  canEdit={canEdit}
+                  onEdit={() => { setEditing(cat); setShowForm(true); }}
+                  onDelete={() => setPendingDelete(cat)}
+                  onRefresh={mutateAll3}
+                />
+              ))}
+            </div>
+            <PageNav
+              page={custPage}
+              totalPages={custData?.total_pages ?? 1}
+              total={custTotal}
+              label="custom categories"
+              onPrev={() => setCustPage(p => Math.max(1, p - 1))}
+              onNext={() => setCustPage(p => p + 1)}
+            />
+          </>
+        )}
+      </div>
 
       {showForm && (
         <CategoryForm
           initial={editing}
           onClose={() => { setShowForm(false); setEditing(undefined); }}
-          onSave={() => mutate()}
+          onSave={mutateAll3}
         />
       )}
 

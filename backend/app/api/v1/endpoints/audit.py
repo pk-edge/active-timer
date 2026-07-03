@@ -1,15 +1,49 @@
-"""Audit log viewer — filterable, paginated."""
+"""Audit log viewer + frontend event ingest."""
 from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, require
+from app.api.deps import get_current_user, get_db, require
+from app.core import audit as _audit_core
 from app.db.models import Employee
 
 router = APIRouter()
+
+
+# ── Frontend event ingest ─────────────────────────────────────────────────────
+
+class AuditEventIn(BaseModel):
+    action: str = Field(..., max_length=120)
+    target_type: str | None = Field(None, max_length=80)
+    target_id: str | None = Field(None, max_length=200)
+    metadata: dict | None = None
+
+
+@router.post("/events", status_code=202)
+async def ingest_client_events(
+    events: list[AuditEventIn],
+    user: Employee = Depends(get_current_user),
+):
+    """Accept a batch of UI-originated audit events (max 50) and enqueue for
+    background write. Returns 202 immediately — writes are best-effort."""
+    role_obj = getattr(user, "role_obj", None)
+    actor_role = (getattr(role_obj, "name", None) if role_obj else None) or getattr(user, "role", None)
+
+    for ev in events[:50]:
+        _audit_core.record_direct(
+            company_id=user.company_id,
+            actor_employee_id=user.id,
+            actor_role=actor_role,
+            action=ev.action,
+            target_type=ev.target_type,
+            target_id=ev.target_id,
+            metadata=ev.metadata,
+        )
+    return {"accepted": min(len(events), 50)}
 
 
 @router.get("")

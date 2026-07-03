@@ -6,13 +6,14 @@ import {
   LayoutDashboard, Building2, Users2,
   Monitor, BarChart2, Settings, LogOut, ScrollText,
   UserCog, FolderKanban, Shield, DownloadCloud, ClipboardList, Home,
-  Cpu, Tag, Globe, ShieldAlert, X,
+  Cpu, Tag, Globe, ShieldAlert, X, Paperclip,
+  CheckCircle2, AlertCircle, FileDown,
 } from "lucide-react";
-import EdgeLogo from "@/components/EdgeLogo";
 import clsx from "clsx";
 import { adminLogout } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { useReportJobs } from "@/contexts/ReportJobsContext";
 
 type NavItem = { href: string; label: string; icon: React.ElementType; module: string };
 type NavGroup = { title: string | null; items: NavItem[] };
@@ -52,7 +53,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/groups",   label: "Groups",    icon: FolderKanban,  module: "groups" },
       { href: "/roles",    label: "Roles",     icon: Shield,        module: "roles" },
       { href: "/agents",   label: "Agents",    icon: DownloadCloud, module: "agents" },
-      { href: "/policies", label: "URL Policies", icon: ShieldAlert, module: "policy" },
+      { href: "/policies", label: "URL Policies", icon: ShieldAlert,  module: "policy" },
+      { href: "/files",    label: "Shared Files", icon: Paperclip,    module: "files" },
       { href: "/audit",    label: "Audit Log",   icon: ClipboardList, module: "audit" },
       { href: "/settings", label: "Settings",    icon: Settings,      module: "settings" },
     ],
@@ -83,6 +85,7 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
   const path = usePathname();
   const { me, can } = useUser();
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const { jobs, dismiss } = useReportJobs();
 
   return (
     <>
@@ -104,11 +107,13 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           open ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         )}
       >
-        <div className="h-14 shrink-0 flex items-center gap-3 px-5 border-b border-white/10">
-          <EdgeLogo variant="icon" size={30} />
-          <span className="font-bold text-sm tracking-tight text-white">
-            Edge Tracker
-          </span>
+        <div className="h-14 shrink-0 flex items-center px-5 border-b border-white/10">
+          {/* Full wordmark from public/Edge_beacon.svg — white via CSS filter */}
+          <img
+            src="/Edge_beacon.svg"
+            alt="Edge Beacon"
+            style={{ height: 30, width: "auto", filter: "brightness(0) invert(1)" }}
+          />
           {/* Close button — mobile only */}
           <button
             onClick={onClose}
@@ -155,6 +160,77 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
             );
           })}
         </nav>
+
+        {/* ── Active report downloads ── */}
+        {jobs.length > 0 && (
+          <div className="px-3 pt-3 pb-2 border-t border-white/10">
+            <p className="px-1 mb-2 text-[10px] font-semibold uppercase tracking-widest text-white/50 flex items-center gap-1.5">
+              <FileDown size={10} /> Downloads
+            </p>
+            <div className="space-y-2">
+              {jobs.map(job => {
+                const isActive = job.status === "pending" || job.status === "running";
+                const isDone   = job.status === "done";
+                const isFailed = job.status === "failed";
+                const fmtLabel = job.format === "both" ? "PDF + XLS" : job.format.toUpperCase();
+                return (
+                  <div key={job.job_id} className="group bg-white/8 border border-white/10 rounded-xl px-2.5 py-2 hover:bg-white/12 transition-colors">
+                    <div className="flex items-start justify-between gap-2 mb-1.5">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[11px] font-medium text-white/90 truncate leading-tight">{job.label}</p>
+                        <span className="inline-block mt-0.5 text-[9px] bg-white/15 rounded px-1.5 py-px text-white/55 font-medium tracking-wide">
+                          {fmtLabel}
+                        </span>
+                      </div>
+                      {isDone   && <CheckCircle2 size={13} className="text-emerald-400 shrink-0 mt-0.5" />}
+                      {isFailed && <AlertCircle  size={13} className="text-red-400     shrink-0 mt-0.5" />}
+                      {isActive && (
+                        <span className="text-[10px] font-semibold text-white/55 tabular-nums shrink-0">
+                          {job.progress}%
+                        </span>
+                      )}
+                    </div>
+
+                    {isActive && (
+                      <div className="w-full bg-white/15 rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className="h-full rounded-full transition-all duration-700 ease-out"
+                          style={{
+                            width: `${Math.max(5, job.progress)}%`,
+                            background: "linear-gradient(90deg, #60a5fa 0%, #34d399 100%)",
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {isDone && (
+                      <>
+                        <div className="w-full rounded-full h-1.5 overflow-hidden" style={{ background: "rgba(52,211,153,0.2)" }}>
+                          <div className="h-full w-full rounded-full" style={{ background: "linear-gradient(90deg, #60a5fa 0%, #34d399 100%)" }} />
+                        </div>
+                        <div className="flex items-center justify-between mt-1.5">
+                          <span className="text-[10px] text-emerald-400">Downloaded ✓</span>
+                          <button onClick={() => dismiss(job.job_id)} className="text-white/30 hover:text-white/70 transition">
+                            <X size={10} />
+                          </button>
+                        </div>
+                      </>
+                    )}
+
+                    {isFailed && (
+                      <div className="flex items-center justify-between mt-1">
+                        <span className="text-[10px] text-red-400 truncate">{job.error ?? "Generation failed"}</span>
+                        <button onClick={() => dismiss(job.job_id)} className="text-white/30 hover:text-white/70 transition ml-2 shrink-0">
+                          <X size={10} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         <div className="px-3 py-3 border-t border-white/10">
           {me && (

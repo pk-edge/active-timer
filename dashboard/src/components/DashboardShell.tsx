@@ -55,8 +55,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
           {/* Mobile-only: compact logo */}
           <div className="lg:hidden flex items-center gap-2 shrink-0">
             <EdgeLogo variant="icon" size={26} />
-            <span className="font-semibold text-sm text-gray-900 hidden xs:block">Time Tracker</span>
-          </div>
+           </div>
 
           {/* Desktop: welcome greeting */}
           {me && (
