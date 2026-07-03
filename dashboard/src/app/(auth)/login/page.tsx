@@ -266,8 +266,7 @@ export default function LoginPage() {
           {/* Logo */}
           <div className="flex items-center justify-center gap-3 mb-8">
             <EdgeLogo variant="icon" size={40} />
-            <span className="text-xl font-semibold text-gray-900">Time Tracker</span>
-          </div>
+           </div>
 
           <div className="bg-white border border-gray-200 rounded-2xl p-8 shadow-sm">
             <h1 className="text-lg font-semibold text-gray-900 mb-6">Sign in</h1>
