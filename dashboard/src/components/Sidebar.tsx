@@ -9,7 +9,6 @@ import {
   Cpu, Tag, Globe, ShieldAlert, X, Paperclip,
   CheckCircle2, AlertCircle, FileDown,
 } from "lucide-react";
-import EdgeLogo from "@/components/EdgeLogo";
 import clsx from "clsx";
 import { adminLogout } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
@@ -108,11 +107,13 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
           open ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         )}
       >
-        <div className="h-14 shrink-0 flex items-center gap-3 px-5 border-b border-white/10">
-          <EdgeLogo variant="icon" size={30} />
-          <span className="font-bold text-sm tracking-tight text-white">
-            Edge Beacon
-          </span>
+        <div className="h-14 shrink-0 flex items-center px-5 border-b border-white/10">
+          {/* Full wordmark from public/Edge_beacon.svg — white via CSS filter */}
+          <img
+            src="/Edge_beacon.svg"
+            alt="Edge Beacon"
+            style={{ height: 30, width: "auto", filter: "brightness(0) invert(1)" }}
+          />
           {/* Close button — mobile only */}
           <button
             onClick={onClose}
