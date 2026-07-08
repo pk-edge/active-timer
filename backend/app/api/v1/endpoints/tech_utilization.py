@@ -1,19 +1,21 @@
+import math
 import uuid
 from datetime import date as _date, timedelta as _td
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from app.api.deps import get_db, require
 from app.core.group_tree import descendant_group_ids, devices_for_groups
 from app.core import audit
 from app.core.app_normalizer import normalize_app_name
 from app.core.scoping import visible_device_ids, ALL
+from app.core.RedisCache import cache_get, cache_set, FRESH_ANALYTICS, STALE_ANALYTICS, FRESH_DETAIL, STALE_DETAIL
 from app.db.models import AppCategory, AppCategoryRule, Employee, Group
 from app.schemas.tech import (
-    CategoryOut, CategoryRuleOut, CategoryCreate, CategoryUpdate, RuleCreate,
+    CategoryOut, CategoryRuleOut, CategoryCreate, CategoryUpdate, RuleCreate, CategoriesPageOut,
     CategoryAllocationItem, AppTrendsOut, AppTrendItem, TechSummaryOut,
     AppDetailItem, AdoptionOut,
     WebsiteItem, WebsiteListOut, WebsiteDetailOut, WebsiteDetailTitle,
@@ -124,30 +126,50 @@ def _prev_dates(since_dt: _date, until_dt: _date) -> tuple[_date, _date]:
 
 # ── Category CRUD ─────────────────────────────────────────────────────────────
 
-@router.get("/categories", response_model=List[CategoryOut])
+@router.get("/categories", response_model=CategoriesPageOut)
 async def list_categories(
+    page:      int            = Query(default=1,  ge=1),
+    per_page:  int            = Query(default=10, ge=1, le=200),
+    is_system: Optional[bool] = Query(default=None),
     admin: Employee = Depends(require("categories", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     await _ensure_default_categories(admin.company_id, db)
-    result = await db.execute(
-        select(AppCategory)
-        .where(AppCategory.company_id == admin.company_id, AppCategory.is_deleted == False)  # noqa: E712
-        .order_by(AppCategory.is_system.desc(), AppCategory.name)
-    )
-    cats = result.scalars().all()
 
-    # Fetch ALL rules for this company in one query, then group in memory —
-    # avoids the N+1 (one query per category) that scaled badly with many categories.
-    rules_res = await db.execute(
-        select(AppCategoryRule)
-        .where(AppCategoryRule.company_id == admin.company_id)
-    )
+    base_filter = [
+        AppCategory.company_id == admin.company_id,
+        AppCategory.is_deleted == False,  # noqa: E712
+    ]
+    if is_system is not None:
+        base_filter.append(AppCategory.is_system == is_system)
+
+    total: int = (
+        await db.execute(select(func.count(AppCategory.id)).where(*base_filter))
+    ).scalar_one()
+
+    cats = (
+        await db.execute(
+            select(AppCategory)
+            .where(*base_filter)
+            .order_by(AppCategory.is_system.desc(), AppCategory.name)
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+    ).scalars().all()
+
+    # Fetch rules only for this page's categories — avoids loading the entire
+    # rule table when paginating through a large category list.
+    cat_ids = [c.id for c in cats]
     rules_by_cat: dict = {}
-    for r in rules_res.scalars().all():
-        rules_by_cat.setdefault(r.category_id, []).append(r)
+    if cat_ids:
+        for r in (
+            await db.execute(
+                select(AppCategoryRule).where(AppCategoryRule.category_id.in_(cat_ids))
+            )
+        ).scalars().all():
+            rules_by_cat.setdefault(r.category_id, []).append(r)
 
-    return [
+    items = [
         CategoryOut(
             id=c.id,
             name=c.name,
@@ -162,6 +184,14 @@ async def list_categories(
         )
         for c in cats
     ]
+
+    return CategoriesPageOut(
+        items=items,
+        total=total,
+        page=page,
+        per_page=per_page,
+        total_pages=max(1, math.ceil(total / per_page)),
+    )
 
 
 @router.post("/categories", response_model=CategoryOut, status_code=201)
@@ -322,10 +352,34 @@ async def tech_summary(
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     await _ensure_default_categories(admin.company_id, db)
     sc, sp = await _scope_clause(admin, db)
-    gc, gp = await _group_clause(group_id, db)
+    gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
     clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
 
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _ckey = ("tech:summary", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt))
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
+
+    # Fast path: full-scope admin with no group/employee filter reads from pg cache.
+    if not clause:
+        from app.core import tech_cache
+        cached = await tech_cache.summary_from_cache(db, admin.company_id, since_dt, until_dt)
+        if cached is not None:
+            totals, users, top_cat, top_app = cached
+            _result = TechSummaryOut(
+                total_hours=round((totals.total_seconds or 0) / 3600, 1),
+                total_apps=int(totals.total_apps or 0),
+                total_users=int(users.total_users or 0) if users else 0,
+                top_category=top_cat.category_name if top_cat else None,
+                top_category_color=top_cat.color if top_cat else "#6366f1",
+                top_app=top_app.app_name if top_app else None,
+            )
+            await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+            return _result
+
+    # Fallback: live aggregation (filtered requests or cache miss/stale).
     total_res = await db.execute(text(f"""
         SELECT
             COALESCE(SUM(ae.duration), 0)                    AS total_seconds,
@@ -374,7 +428,7 @@ async def tech_summary(
     """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
     top_app = app_res.fetchone()
 
-    return TechSummaryOut(
+    _result = TechSummaryOut(
         total_hours=round((row.total_seconds or 0) / 3600, 1),
         total_apps=int(row.total_apps or 0),
         total_users=int(row.total_users or 0),
@@ -382,6 +436,8 @@ async def tech_summary(
         top_category_color=top_cat.color if top_cat else "#6366f1",
         top_app=top_app.app_name if top_app else None,
     )
+    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+    return _result
 
 
 @router.get("/utilization/category-allocation", response_model=List[CategoryAllocationItem])
@@ -399,10 +455,47 @@ async def category_allocation(
     prev_since_dt, prev_until_dt = _prev_dates(since_dt, until_dt)
     await _ensure_default_categories(admin.company_id, db)
     sc, sp = await _scope_clause(admin, db)
-    gc, gp = await _group_clause(group_id, db)
+    gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
     clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
 
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _ckey = ("tech:catalloc", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt), compare_days)
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
+
+    # Fast path: full-scope admin with no group/employee filter reads from pg cache.
+    if not clause:
+        from app.core import tech_cache
+        cached = await tech_cache.category_allocation_from_cache(
+            db, admin.company_id, since_dt, until_dt, prev_since_dt, prev_until_dt
+        )
+        if cached is not None:
+            current_rows_raw, prev_rows = cached
+            result = []
+            for cur in current_rows_raw:
+                prev = prev_rows.get(cur.category_name)
+                cur_pct   = float(cur.pct or 0)
+                prev_pct  = float(prev.pct if prev else 0)
+                cur_users = int(cur.users or 0)
+                prev_users = int(prev.users if prev else 0)
+                result.append(CategoryAllocationItem(
+                    category_id=cur.category_id,
+                    category_name=cur.category_name,
+                    color=cur.color,
+                    seconds=int(cur.seconds or 0),
+                    pct=cur_pct,
+                    prev_seconds=int(prev.seconds if prev else 0),
+                    prev_pct=prev_pct,
+                    pct_change=round(cur_pct - prev_pct, 1),
+                    hours=round((cur.seconds or 0) / 3600, 1),
+                    user_change=cur_users - prev_users,
+                ))
+            await cache_set(_ckey, [i.model_dump() for i in result], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+            return result
+
+    # Fallback: live aggregation (filtered requests or cache miss/stale).
     current_res = await db.execute(text(f"""
         WITH categorized AS (
             SELECT
@@ -514,6 +607,7 @@ async def category_allocation(
             hours=round((cur.seconds or 0) / 3600, 1),
             user_change=cur_users - prev_users,
         ))
+    await cache_set(_ckey, [i.model_dump() for i in result], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
     return result
 
 
@@ -531,6 +625,12 @@ async def app_trends(
     prev_since_dt, prev_until_dt = _prev_dates(since_dt, until_dt)
     await _ensure_default_categories(admin.company_id, db)
     clause, sparams = await _scope_clause(admin, db)
+
+    _scope_fp = "all" if not clause else str(admin.id)
+    _ckey = ("tech:apptrends", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt), compare_days, limit)
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
 
     base_params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
                    "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams}
@@ -604,7 +704,9 @@ async def app_trends(
     trending_up   = [i for i in items if i.pct_change > 0][:limit]
     trending_down = sorted([i for i in items if i.pct_change < 0], key=lambda x: x.pct_change)[:limit]
 
-    return AppTrendsOut(trending_up=trending_up, trending_down=trending_down)
+    _result = AppTrendsOut(trending_up=trending_up, trending_down=trending_down)
+    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+    return _result
 
 
 @router.get("/utilization/apps", response_model=List[AppDetailItem])
@@ -622,7 +724,7 @@ async def app_list(
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     await _ensure_default_categories(admin.company_id, db)
     sc, sp = await _scope_clause(admin, db)
-    gc, gp = await _group_clause(group_id, db)
+    gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
     clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
 
@@ -635,6 +737,36 @@ async def app_list(
         except ValueError:
             pass
 
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _ckey = ("tech:applist", str(admin.company_id), _scope_fp, category_id or "", str(since_dt), str(until_dt), limit)
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
+
+    # Fast path: full-scope admin with no group/employee/category filter reads from pg cache.
+    if not clause and not category_id:
+        from app.core import tech_cache
+        cached_rows = await tech_cache.app_list_from_cache(
+            db, admin.company_id, since_dt, until_dt, limit
+        )
+        if cached_rows is not None:
+            _items = [
+                AppDetailItem(
+                    app_name=r.app_name,
+                    category_id=r.category_id,
+                    category_name=r.category_name,
+                    color=r.color,
+                    seconds=int(r.seconds or 0),
+                    hours=round((r.seconds or 0) / 3600, 1),
+                    pct=float(r.pct or 0),
+                    user_count=int(r.user_count or 0),
+                )
+                for r in cached_rows
+            ]
+            await cache_set(_ckey, [i.model_dump() for i in _items], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+            return _items
+
+    # Fallback: live aggregation (filtered requests or cache miss/stale).
     result = await db.execute(text(f"""
         WITH app_data AS (
             SELECT
@@ -663,7 +795,7 @@ async def app_list(
         LIMIT :limit
     """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, "limit": limit, **sparams})
 
-    return [
+    _items = [
         AppDetailItem(
             app_name=r.app_name,
             category_id=r.category_id,
@@ -676,6 +808,8 @@ async def app_list(
         )
         for r in result.fetchall()
     ]
+    await cache_set(_ckey, [i.model_dump() for i in _items], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+    return _items
 
 
 @router.get("/utilization/adoption", response_model=AdoptionOut)
@@ -752,7 +886,41 @@ async def get_uncategorized(
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     await _ensure_default_categories(admin.company_id, db)
     clause, sparams = await _scope_clause(admin, db)
-    params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, "limit": limit, **sparams}
+    cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
+    params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, "limit": limit, **sparams}
+
+    _scope_fp = "all" if not clause else str(admin.id)
+    _ckey = ("tech:uncategorized", cid, _scope_fp, str(since_dt), str(until_dt), limit)
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
+
+    # Fast path: full-scope admins read from the daily aggregate caches — the
+    # live version below is a 30-day two-scan aggregation measured at ~67 s on
+    # a 42M-row events table.
+    if not clause:
+        from app.core import tech_cache
+        cached = await tech_cache.uncategorized_from_cache(db, cid, since_dt, until_dt, limit)
+        if cached is not None:
+            capps, curls = cached
+            _result = UncategorizedOut(
+                apps=[
+                    UncategorizedItem(pattern=r.pattern, kind="app",
+                                      seconds=int(r.seconds or 0),
+                                      user_count=int(r.user_count or 0),
+                                      last_seen=str(r.last_seen) if r.last_seen else None)
+                    for r in capps if r.pattern
+                ],
+                urls=[
+                    UncategorizedItem(pattern=r.pattern, kind="url",
+                                      seconds=int(r.seconds or 0),
+                                      user_count=int(r.user_count or 0),
+                                      last_seen=str(r.last_seen) if r.last_seen else None)
+                    for r in curls if r.pattern
+                ],
+            )
+            await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+            return _result
 
     apps_res = await db.execute(text(f"""
         SELECT
@@ -825,7 +993,9 @@ async def get_uncategorized(
         for r in urls_res.fetchall()
         if r.pattern
     ]
-    return UncategorizedOut(apps=apps, urls=urls)
+    _result = UncategorizedOut(apps=apps, urls=urls)
+    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+    return _result
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -861,7 +1031,10 @@ def _employee_clause(employee_id: Optional[str]) -> tuple[str, dict]:
     return " AND d.employee_id = :emp_id", {"emp_id": employee_id}
 
 
-async def _group_clause(group_id: Optional[str], db: AsyncSession) -> tuple[str, dict]:
+async def _group_clause(group_id: Optional[str], company_id, db: AsyncSession) -> tuple[str, dict]:
+    """Restrict to a group's devices. The group MUST belong to the caller's
+    company — a foreign group id resolves to an empty result, never to another
+    tenant's devices."""
     if not group_id:
         return "", {}
     try:
@@ -869,10 +1042,13 @@ async def _group_clause(group_id: Optional[str], db: AsyncSession) -> tuple[str,
     except ValueError:
         return " AND 1=0", {}
     row = await db.execute(
-        select(Group.company_id).where(Group.id == gid, Group.is_deleted == False)  # noqa: E712
+        select(Group.id).where(
+            Group.id == gid,
+            Group.company_id == company_id,
+            Group.is_deleted == False,  # noqa: E712
+        )
     )
-    company_id = row.scalar_one_or_none()
-    if not company_id:
+    if not row.scalar_one_or_none():
         return " AND 1=0", {}
     expanded = await descendant_group_ids([gid], company_id, db)
     ids = [str(d) for d in await devices_for_groups(expanded, db)]
@@ -898,13 +1074,28 @@ async def website_list(
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     await _ensure_default_categories(admin.company_id, db)
     scope_clause, scope_params = await _scope_clause(admin, db)
-    grp_clause,   grp_params   = await _group_clause(group_id, db)
+    grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
     combined_clause = scope_clause + grp_clause + emp_clause
-    params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, "limit": limit,
+    cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
+    params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, "limit": limit,
               **scope_params, **grp_params, **emp_params}
 
-    res = await db.execute(text(f"""
+    _scope_fp = "all" if not combined_clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _ckey = ("tech:websites", cid, _scope_fp, productivity or "", str(since_dt), str(until_dt), limit)
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
+
+    # Fast path: full-scope admin with no filters reads per-host daily
+    # aggregates instead of window-functioning every url_visit row in range.
+    rows = None
+    if not combined_clause:
+        from app.core import tech_cache
+        rows = await tech_cache.website_list_from_cache(db, cid, since_dt, until_dt, limit)
+
+    if rows is None:
+        res = await db.execute(text(f"""
         WITH url_data AS (
             SELECT
                 REGEXP_REPLACE(LOWER(
@@ -940,8 +1131,8 @@ async def website_list(
         FROM agg a, tot t
         ORDER BY a.total_secs DESC
         LIMIT :limit
-    """), params)
-    rows = res.fetchall()
+        """), params)
+        rows = res.fetchall()
 
     prod_map = await _productivity_map(admin.company_id, db)
 
@@ -968,8 +1159,10 @@ async def website_list(
     total_secs  = sum(i.duration_secs for i in items)
     total_visits = sum(i.visits for i in items)
     user_set = set()
-    return WebsiteListOut(items=items, total_secs=total_secs,
-                          total_visits=total_visits, total_users=len(user_set))
+    _result = WebsiteListOut(items=items, total_secs=total_secs,
+                             total_visits=total_visits, total_users=len(user_set))
+    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+    return _result
 
 
 @router.get("/websites/detail", response_model=WebsiteDetailOut)
@@ -986,11 +1179,17 @@ async def website_detail(
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     scope_clause, scope_params = await _scope_clause(admin, db)
-    grp_clause,   grp_params   = await _group_clause(group_id, db)
+    grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
     combined = scope_clause + grp_clause + emp_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
               "host": host, **scope_params, **grp_params, **emp_params}
+
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _ckey = ("tech:web_detail", str(admin.company_id), _scope_fp, host, tab, str(since_dt), str(until_dt))
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
 
     out = WebsiteDetailOut(host=host)
 
@@ -1097,6 +1296,7 @@ async def website_detail(
             for r in res.fetchall()
         ]
 
+    await cache_set(_ckey, out.model_dump(), fresh_secs=FRESH_DETAIL, stale_secs=STALE_DETAIL)
     return out
 
 
@@ -1117,34 +1317,48 @@ async def app_usage_list(
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     await _ensure_default_categories(admin.company_id, db)
     scope_clause, scope_params = await _scope_clause(admin, db)
-    grp_clause,   grp_params   = await _group_clause(group_id, db)
+    grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
     combined = scope_clause + grp_clause + emp_clause
-    params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
+    cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
+    params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt,
               "limit": limit, **scope_params, **grp_params, **emp_params}
 
-    res = await db.execute(text(f"""
-        WITH agg AS (
-            SELECT normalize_app_name(ae.app_name) AS app_name,
-                SUM(ae.duration) AS total_secs,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-            GROUP BY normalize_app_name(ae.app_name)
-        ),
-        tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM agg)
-        SELECT a.app_name, a.total_secs, a.users,
-               ROUND(100.0 * a.total_secs / t.t, 1) AS pct
-        FROM agg a, tot t
-        ORDER BY a.total_secs DESC
-        LIMIT :limit
-    """), params)
-    rows = res.fetchall()
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _ckey = ("tech:apps", cid, _scope_fp, productivity or "", str(since_dt), str(until_dt), limit)
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
+
+    # Fast path: full-scope admin with no filters reads the per-app daily cache.
+    rows = None
+    if not combined:
+        from app.core import tech_cache
+        rows = await tech_cache.app_usage_from_cache(db, cid, since_dt, until_dt, limit)
+
+    if rows is None:
+        res = await db.execute(text(f"""
+            WITH agg AS (
+                SELECT normalize_app_name(ae.app_name) AS app_name,
+                    SUM(ae.duration) AS total_secs,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {combined}
+                GROUP BY normalize_app_name(ae.app_name)
+            ),
+            tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM agg)
+            SELECT a.app_name, a.total_secs, a.users,
+                   ROUND(100.0 * a.total_secs / t.t, 1) AS pct
+            FROM agg a, tot t
+            ORDER BY a.total_secs DESC
+            LIMIT :limit
+        """), params)
+        rows = res.fetchall()
 
     prod_map = await _productivity_map(admin.company_id, db)
 
@@ -1160,12 +1374,14 @@ async def app_usage_list(
             productivity=prod, category_name=cat_name, color=color,
         ))
 
-    return AppUsageListOut(
+    _result = AppUsageListOut(
         items=items,
         total_secs=sum(i.duration_secs for i in items),
         total_apps=len(items),
         total_users=0,
     )
+    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+    return _result
 
 
 @router.get("/apps/detail", response_model=AppUsageDetailOut)
@@ -1182,11 +1398,17 @@ async def app_usage_detail(
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     scope_clause, scope_params = await _scope_clause(admin, db)
-    grp_clause,   grp_params   = await _group_clause(group_id, db)
+    grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
     combined = scope_clause + grp_clause + emp_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
               "app_name": app_name, **scope_params, **grp_params, **emp_params}
+
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _ckey = ("tech:app_detail", str(admin.company_id), _scope_fp, app_name, tab, str(since_dt), str(until_dt))
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
 
     out = AppUsageDetailOut(app_name=app_name)
 
@@ -1251,6 +1473,7 @@ async def app_usage_detail(
             for r in res.fetchall()
         ]
 
+    await cache_set(_ckey, out.model_dump(), fresh_secs=FRESH_DETAIL, stale_secs=STALE_DETAIL)
     return out
 
 
@@ -1268,10 +1491,40 @@ async def category_usage_list(
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     await _ensure_default_categories(admin.company_id, db)
     scope_clause, scope_params = await _scope_clause(admin, db)
-    grp_clause,   grp_params   = await _group_clause(group_id, db)
+    grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     combined = scope_clause + grp_clause
-    params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
+    cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
+    params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt,
               **scope_params, **grp_params}
+
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}"
+    _ckey = ("tech:cat_usage", cid, _scope_fp, str(since_dt), str(until_dt))
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
+
+    # Fast path: full-scope admin with no group filter reads the per-category
+    # daily cache instead of two aggregation scans over the range.
+    if not combined:
+        from app.core import tech_cache
+        cached_rows = await tech_cache.category_usage_from_cache(db, cid, since_dt, until_dt)
+        if cached_rows is not None:
+            items = [
+                CategoryUsageItem(
+                    cat_id=r.cat_id, name=r.name, color=r.color,
+                    duration_secs=int(r.total_secs or 0),
+                    user_count=int(r.users or 0),
+                    pct=float(r.pct or 0),
+                )
+                for r in cached_rows
+            ]
+            _result = CategoryUsageListOut(
+                items=items,
+                total_secs=sum(i.duration_secs for i in items),
+                total_users=max((i.user_count for i in items), default=0),
+            )
+            await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+            return _result
 
     res = await db.execute(text(f"""
         WITH categorized AS (
@@ -1326,11 +1579,13 @@ async def category_usage_list(
         )
         for r in res.fetchall()
     ]
-    return CategoryUsageListOut(
+    _result = CategoryUsageListOut(
         items=items,
         total_secs=sum(i.duration_secs for i in items),
         total_users=max((i.user_count for i in items), default=0),
     )
+    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
+    return _result
 
 
 @router.get("/category-usage/detail", response_model=CategoryUsageDetailOut)
@@ -1346,10 +1601,16 @@ async def category_usage_detail(
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     scope_clause, scope_params = await _scope_clause(admin, db)
-    grp_clause,   grp_params   = await _group_clause(group_id, db)
+    grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     combined = scope_clause + grp_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
               **scope_params, **grp_params}
+
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}"
+    _ckey = ("tech:cat_detail", str(admin.company_id), _scope_fp, cat_id or "", tab, str(since_dt), str(until_dt))
+    _cached, _ = await cache_get(_ckey)
+    if _cached is not None:
+        return _cached
 
     # Resolve category name + color
     if cat_id:
@@ -1476,4 +1737,5 @@ async def category_usage_detail(
             for r in rows
         ]
 
+    await cache_set(_ckey, out.model_dump(), fresh_secs=FRESH_DETAIL, stale_secs=STALE_DETAIL)
     return out

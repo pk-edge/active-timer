@@ -29,7 +29,7 @@ pipelines:
             - docker build -t $REG/tracker-backend-staging:staging ./backend
             - docker push $REG/tracker-backend-staging:staging
             # dashboard (Next.js — API URL baked at build time)
-            - docker build --build-arg NEXT_PUBLIC_API_URL=https://api.tracker.staging.onedge.co -t $REG/tracker-dashboard-staging:staging ./dashboard
+            - docker build --build-arg NEXT_PUBLIC_API_URL=https://api.beacon.staging.onedge.co -t $REG/tracker-dashboard-staging:staging ./dashboard
             - docker push $REG/tracker-dashboard-staging:staging
       - step:
           name: Deploy to ECS (staging)
@@ -56,7 +56,7 @@ pipelines:
             - eval $(aws ecr get-login --no-include-email --region us-east-1)
             - docker build -t $REG/tracker-backend-prod:prod ./backend
             - docker push $REG/tracker-backend-prod:prod
-            - docker build --build-arg NEXT_PUBLIC_API_URL=https://api.tracker.onedge.co -t $REG/tracker-dashboard-prod:prod ./dashboard
+            - docker build --build-arg NEXT_PUBLIC_API_URL=https://api.beacon.onedge.co -t $REG/tracker-dashboard-prod:prod ./dashboard
             - docker push $REG/tracker-dashboard-prod:prod
       - step:
           name: Deploy to ECS (prod)

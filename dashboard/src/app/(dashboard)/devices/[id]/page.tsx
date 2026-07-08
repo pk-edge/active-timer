@@ -6,7 +6,9 @@ import useSWR from "swr";
 import { format } from "date-fns";
 import { ArrowLeft, Laptop, User } from "lucide-react";
 import { getTimeline, getDailyStats, getDevices, setDeviceHeadless, fmtSeconds } from "@/lib/api";
-import { useAuth } from "@/hooks/useAuth";
+import { useUser } from "@/hooks/useUser";
+import PageLoader from "@/components/PageLoader";
+import { AccessDenied } from "@/components/AccessDenied";
 // Lazy: recharts (~100KB) loads only when this device-detail view renders, not
 // as part of any shared bundle that lighter pages would otherwise pay for.
 const DailyChart = dynamic(() => import("./_components/DailyChart"), {
@@ -28,7 +30,7 @@ import type { TimelineEvent, DailyStat, Device } from "@/types";
 
 export default function DevicePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  useAuth();
+  const { loading, can } = useUser();
   const today = format(new Date(), "yyyy-MM-dd");
   const [selDate, setSelDate] = useState(today);
 
@@ -84,12 +86,15 @@ export default function DevicePage({ params }: { params: Promise<{ id: string }>
       .reduce((sum, e) => sum + e.duration, 0);
   }, [events]);
 
+  if (loading) return <PageLoader />;
+  if (!can("devices", "view")) return <AccessDenied label="Devices" />;
+
   return (
     <div className="flex flex-col h-full min-h-0">
 
       {/* ── Back link ── */}
       <Link
-        href="/"
+        href="/devices"
         className="inline-flex items-center gap-1.5 text-gray-600 text-sm mb-3 hover:text-gray-700 transition w-fit"
       >
         <ArrowLeft size={13} /> All devices

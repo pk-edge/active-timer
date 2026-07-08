@@ -404,7 +404,8 @@ export default function TechUtilizationPage() {
   const [categoryId, setCategoryId] = useState("");
 
   const { data: users }      = useSWR("users-tf", () => import("@/lib/api").then(m => m.getUsers()));
-  const { data: categories } = useSWR<AppCategory[]>("tech-cats-filter", getTechCategories);
+  const { data: catsPage } = useSWR("tech-cats-filter", () => getTechCategories({ per_page: 200 }));
+  const categories: AppCategory[] = catsPage?.items ?? [];
 
   // summary feeds the always-visible stat cards, so it always loads.
   const { data: summary, isLoading: summaryLoading } = useSWR(

@@ -4,7 +4,8 @@ import { format } from "date-fns";
 import { useState, useMemo, useEffect } from "react";
 import useSWR from "swr";
 import dynamic from "next/dynamic";
-import { Monitor, Download, MoreHorizontal, ChevronLeft } from "lucide-react";
+import Link from "next/link";
+import { Monitor, Download, MoreHorizontal, ChevronLeft, ArrowLeft } from "lucide-react";
 import { getAppUsage, getAppUsageDetail } from "@/lib/api";
 
 // Lazy: the per-app usage chart loads recharts only when the "Usage" tab opens.
@@ -150,6 +151,9 @@ export default function AppUsagePage() {
 
   return (
     <div className="flex flex-col h-full min-h-0">
+      <Link href="/tech" className="inline-flex items-center gap-1.5 text-gray-600 text-sm mb-3 hover:text-gray-700 transition w-fit">
+        <ArrowLeft size={13} /> Tech Utilization
+      </Link>
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div>

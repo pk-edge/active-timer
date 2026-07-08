@@ -23,6 +23,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -117,6 +118,83 @@ async def record(
         # Extreme backlog: don't lose the row and don't block — write it inline.
         log.warning("Audit queue full — writing %s inline", action)
         await _write_inline(db, row)
+
+    _stream_publish_nowait(row)
+
+
+# ── Redis Stream side-channel ─────────────────────────────────────────────────
+# Every audit event is ALSO published to the Redis Stream `tt:s:audit`.
+# This is secondary to the asyncio-queue → DB path — stream errors never
+# affect the primary write. Benefits over pub/sub:
+#   • Durability: entries survive process restarts (unlike pub/sub messages).
+#   • Replay: external consumers (monitoring, SIEM) can read past entries.
+#   • Backpressure: capped at 100K entries (approximate MAXLEN).
+# Key format:  tt:s:audit  (same tt: namespace as response-cache keys)
+_STREAM_KEY = "tt:s:audit"
+_STREAM_MAXLEN = 100_000
+
+
+def _stream_publish_nowait(row: dict) -> None:
+    """Schedule a Redis Stream XADD without blocking the caller."""
+    try:
+        from app.core.RedisClient import get_client
+        r = get_client()
+        if r is None:
+            return
+        loop = asyncio.get_running_loop()
+        loop.create_task(_do_xadd(r, row))
+    except RuntimeError:
+        pass  # no event loop (CLI/test) — skip silently
+
+
+async def _do_xadd(r, row: dict) -> None:
+    try:
+        fields: dict[str, str] = {}
+        for k, v in row.items():
+            if v is None:
+                continue
+            if k == "audit_metadata" and isinstance(v, dict):
+                fields[k] = json.dumps(v, ensure_ascii=False)
+            else:
+                fields[k] = str(v)
+        await r.xadd(_STREAM_KEY, fields, maxlen=_STREAM_MAXLEN, approximate=True)
+    except Exception as exc:
+        log.debug("audit stream xadd failed: %s", exc)
+
+
+def record_direct(
+    *,
+    company_id,
+    actor_employee_id,
+    actor_role: str | None,
+    action: str,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Synchronous primitive enqueue — no DB session or ORM actor required.
+
+    Used by the frontend audit-ingest endpoint where all actor fields come from
+    the validated JWT. Drops silently on full queue — never blocks the request path.
+    """
+    row = {
+        "company_id": company_id,
+        "actor_employee_id": actor_employee_id,
+        "actor_role": actor_role,
+        "action": action,
+        "target_type": target_type,
+        "target_id": target_id,
+        "audit_metadata": metadata,
+    }
+    if _queue is None:
+        log.warning("Audit queue not started; dropping '%s' from record_direct", action)
+        return
+    try:
+        _queue.put_nowait(row)
+    except asyncio.QueueFull:
+        log.warning("Audit queue full; dropping frontend event '%s'", action)
+
+    _stream_publish_nowait(row)
 
 
 # ── Background worker ─────────────────────────────────────────────────────────

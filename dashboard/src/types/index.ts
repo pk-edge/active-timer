@@ -247,6 +247,11 @@ export interface OverviewStats {
   trend:                    { date: string; active_seconds: number }[];
 }
 
+export interface HomeWidgets {
+  overview:  OverviewStats;
+  app_usage: AppUsage[];
+}
+
 export interface RealtimeDevice {
   device_id:      string;
   hostname:       string;
@@ -301,6 +306,14 @@ export interface AppCategory {
   is_system:   boolean;
   rule_count:  number;
   rules:       CategoryRule[];
+}
+
+export interface CategoriesPage {
+  items:       AppCategory[];
+  total:       number;
+  page:        number;
+  per_page:    number;
+  total_pages: number;
 }
 
 export interface TechSummary {
@@ -477,4 +490,23 @@ export interface CategoryUsageDetailOut {
   total_secs: number;
   activities: CategoryDetailActivity[];
   users:      CategoryDetailUser[];
+}
+
+// ── Shared Files ──────────────────────────────────────────────────────────────
+
+export interface SharedFile {
+  id:                string;
+  original_filename: string;
+  mime_type:         string | null;
+  file_size_bytes:   number;
+  public_token:      string;
+  created_at:        string;
+  uploaded_by_name:  string | null;
+}
+
+export interface SharedFilesPage {
+  total:  number;
+  offset: number;
+  limit:  number;
+  items:  SharedFile[];
 }

@@ -13,19 +13,27 @@ class ModuleDef(TypedDict):
 
 
 MODULES: list[ModuleDef] = [
-    {"key": "home",        "label": "Home Dashboards", "actions": ["view"]},
-    {"key": "devices",     "label": "Devices",       "actions": ["view", "assign", "archive", "delete"]},
-    {"key": "logs",        "label": "Activity Logs", "actions": ["view"]},
-    {"key": "reports",     "label": "Reports",       "actions": ["view"]},
-    {"key": "users",       "label": "Users",         "actions": ["view", "create", "edit", "delete"]},
-    {"key": "groups",      "label": "Groups",        "actions": ["view", "create", "edit", "delete"]},
-    {"key": "roles",       "label": "Roles",         "actions": ["view", "create", "edit", "delete"]},
-    {"key": "agents",      "label": "Agents",        "actions": ["view", "create", "edit", "delete"]},
-    {"key": "settings",    "label": "Settings",      "actions": ["view", "edit"]},
-    {"key": "audit",       "label": "Audit Log",        "actions": ["view"]},
-    {"key": "tech",        "label": "Technology & AI",  "actions": ["view", "edit"]},
-    {"key": "categories",  "label": "App Categories",   "actions": ["view", "edit"]},
-    {"key": "policy",      "label": "URL Policies",     "actions": ["view", "edit"]},
+    # ── Home group ────────────────────────────────────────────────────────────
+    {"key": "home",       "label": "Home",                   "actions": ["view"]},
+    {"key": "overview",   "label": "Organization Overview",  "actions": ["view"]},
+    {"key": "team",       "label": "Team Management",        "actions": ["view"]},
+    {"key": "activity",   "label": "Activity Dashboard",     "actions": ["view"]},
+    {"key": "categories", "label": "App Categories",         "actions": ["view", "edit"]},
+    # ── Monitoring ────────────────────────────────────────────────────────────
+    {"key": "devices",    "label": "Devices",       "actions": ["view", "assign", "archive", "delete"]},
+    {"key": "logs",       "label": "Activity Logs", "actions": ["view"]},
+    {"key": "reports",    "label": "Reports",       "actions": ["view"]},
+    # ── Technology & AI ───────────────────────────────────────────────────────
+    {"key": "tech",       "label": "Technology & AI",  "actions": ["view", "edit"]},
+    # ── Administration ────────────────────────────────────────────────────────
+    {"key": "users",      "label": "Users",    "actions": ["view", "create", "edit", "delete"]},
+    {"key": "groups",     "label": "Groups",   "actions": ["view", "create", "edit", "delete"]},
+    {"key": "roles",      "label": "Roles",    "actions": ["view", "create", "edit", "delete"]},
+    {"key": "agents",     "label": "Agents",   "actions": ["view", "create", "edit", "delete"]},
+    {"key": "policy",     "label": "URL Policies",  "actions": ["view", "edit"]},
+    {"key": "audit",      "label": "Audit Log",     "actions": ["view"]},
+    {"key": "settings",   "label": "Settings",      "actions": ["view", "edit"]},
+    {"key": "files",      "label": "Shared Files",  "actions": ["view", "create", "delete"]},
 ]
 
 _VALID: set[tuple[str, str]] = {(m["key"], a) for m in MODULES for a in m["actions"]}

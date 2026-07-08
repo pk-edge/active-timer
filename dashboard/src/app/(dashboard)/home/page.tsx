@@ -1,14 +1,13 @@
 "use client";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import {
   Monitor, BarChart2, Users2, DownloadCloud,
   Wifi, Coffee, WifiOff, Clock, Activity as ActivityIcon,
-  AppWindow, ChevronDown, CalendarDays, Search, X,
+  AppWindow, Search, X, ChevronLeft, ChevronRight,
 } from "lucide-react";
-import { format, subDays, startOfMonth, startOfYear, subMonths } from "date-fns";
-import { getOverview, getHomeAppUsage, getMyStats, fmtSeconds, fmtTime } from "@/lib/api";
+import { getHomeWidgets, getMyStats, fmtSeconds, fmtTime } from "@/lib/api";
 import PageLoader from "@/components/PageLoader";
 import PageSkeleton from "@/components/PageSkeleton";
 import GroupPicker from "@/components/GroupPicker";
@@ -18,116 +17,9 @@ import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import { smartMatch } from "@/lib/smartSearch";
 import { AccessDenied } from "@/components/AccessDenied";
 import { StatusDonut, UsagePie } from "@/components/charts";
-import type { OverviewStats, AppUsage, MyStats } from "@/types";
+import type { HomeWidgets, MyStats } from "@/types";
 
-// ── Stat period filter ────────────────────────────────────────────────────────
-
-const TODAY = () => format(new Date(), "yyyy-MM-dd");
-
-const STAT_PRESETS = [
-  { label: "Today",         getSince: () => TODAY(),                                       getUntil: () => TODAY() },
-  { label: "Yesterday",     getSince: () => format(subDays(new Date(), 1), "yyyy-MM-dd"), getUntil: () => format(subDays(new Date(), 1), "yyyy-MM-dd") },
-  { label: "Last 7 Days",   getSince: () => format(subDays(new Date(), 6), "yyyy-MM-dd"), getUntil: () => TODAY() },
-  { label: "Last 30 Days",  getSince: () => format(subDays(new Date(), 29), "yyyy-MM-dd"), getUntil: () => TODAY() },
-  { label: "This Month",    getSince: () => format(startOfMonth(new Date()), "yyyy-MM-dd"), getUntil: () => TODAY() },
-  { label: "Last Month",    getSince: () => format(startOfMonth(subMonths(new Date(), 1)), "yyyy-MM-dd"), getUntil: () => format(new Date(new Date().getFullYear(), new Date().getMonth(), 0), "yyyy-MM-dd") },
-  { label: "This Year",     getSince: () => format(startOfYear(new Date()), "yyyy-MM-dd"), getUntil: () => TODAY() },
-  { label: "Custom",        getSince: () => TODAY(), getUntil: () => TODAY() },
-];
-
-function StatPeriodFilter({
-  dateRange,
-  onRangeChange,
-}: {
-  dateRange: { since: string; until: string };
-  onRangeChange: (range: { since: string; until: string }) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [customMode, setCustomMode] = useState(false);
-  const [localSince, setLocalSince] = useState(dateRange.since);
-  const [localUntil, setLocalUntil] = useState(dateRange.until);
-
-  const activePreset = STAT_PRESETS.find(
-    p => p.label !== "Custom" && p.getSince() === dateRange.since && p.getUntil() === dateRange.until
-  );
-  const displayLabel = activePreset?.label ?? "Custom";
-  const displayRange = dateRange.since === dateRange.until ? dateRange.since : `${dateRange.since} – ${dateRange.until}`;
-
-  function applyPreset(p: typeof STAT_PRESETS[number]) {
-    if (p.label === "Custom") {
-      setLocalSince(dateRange.since);
-      setLocalUntil(dateRange.until);
-      setCustomMode(true);
-      return;
-    }
-    setCustomMode(false);
-    onRangeChange({ since: p.getSince(), until: p.getUntil() });
-    setOpen(false);
-  }
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen(x => !x)}
-        className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 text-sm text-gray-700 hover:border-brand-300 shadow-sm transition"
-      >
-        <CalendarDays size={14} className="text-gray-600 shrink-0" />
-        <span className="font-medium">{displayLabel}</span>
-        <span className="text-gray-600 text-xs hidden sm:inline">{displayRange}</span>
-        <ChevronDown size={12} className={`text-gray-600 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-
-      {open && (
-        <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-full mt-1.5 z-40 bg-white border border-gray-200 rounded-xl shadow-xl w-72">
-            <div className="p-3 border-b border-gray-100">
-              <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Period</p>
-              <div className="grid grid-cols-2 gap-1">
-                {STAT_PRESETS.map(p => (
-                  <button
-                    key={p.label}
-                    onClick={() => applyPreset(p)}
-                    className={`text-left px-3 py-1.5 rounded-lg text-sm transition ${
-                      displayLabel === p.label
-                        ? "bg-brand-50 text-brand-700 font-medium"
-                        : "text-gray-600 hover:bg-gray-50"
-                    }`}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            {(customMode || displayLabel === "Custom") && (
-              <div className="p-3">
-                <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-2">Custom Range</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1">From</label>
-                    <input type="date" value={localSince} max={localUntil}
-                           onChange={e => setLocalSince(e.target.value)}
-                           className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1">To</label>
-                    <input type="date" value={localUntil} min={localSince} max={TODAY()}
-                           onChange={e => setLocalUntil(e.target.value)}
-                           className="w-full border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-300" />
-                  </div>
-                </div>
-                <button onClick={() => { onRangeChange({ since: localSince, until: localUntil }); setOpen(false); }}
-                        className="mt-2 w-full bg-brand-600 text-white text-sm py-1.5 rounded-lg hover:bg-brand-700 transition font-medium">
-                  Apply
-                </button>
-              </div>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
+const FEED_PAGE_SIZE = 50;
 
 const STATUS_STYLE: Record<string, string> = {
   active:   "bg-green-50 text-green-700 border-green-200",
@@ -159,35 +51,39 @@ function StatCard({ label, value, sub, color = "text-gray-900" }: {
 
 function AdminHome() {
   const { can } = useUser();
-  const todayStr = format(new Date(), "yyyy-MM-dd");
 
-  const [dateRange, setDateRange] = useState({ since: todayStr, until: todayStr });
   const [groupId, setGroupId]     = useState("");
   const [empSearch, setEmpSearch] = useState("");
+  const [feedPage, setFeedPage]   = useState(0);
 
-  const isToday = dateRange.since === todayStr && dateRange.until === todayStr;
-  const activeLabel = isToday
-    ? "Active today"
-    : dateRange.since === dateRange.until ? `Active on ${dateRange.since}` : "Active in period";
-  const avgLabel = isToday
-    ? "Avg active / device"
-    : "Avg active / device (period)";
-
-  const { data: stats } = useSWR<OverviewStats>(
-    ["home-overview", dateRange.since, dateRange.until, groupId],
-    () => getOverview(groupId || undefined, 7, dateRange.since, dateRange.until),
-    { refreshInterval: 300_000, dedupingInterval: 10_000 },
+  const { data: widgets } = useSWR<HomeWidgets>(
+    ["home-widgets", groupId],
+    () => getHomeWidgets(groupId || undefined),
+    { refreshInterval: 30_000, dedupingInterval: 5_000 },
   );
+  const stats = widgets?.overview;
+  const apps  = widgets?.app_usage;
 
   const realtime = useRealtimeStream(groupId || undefined);
 
-  // Fire in parallel with stats — both requests start on mount so the pie
-  // chart and stat cards load concurrently with no waterfall.
-  const { data: apps } = useSWR<AppUsage[]>(
-    ["home-apps", groupId],
-    () => getHomeAppUsage(groupId || undefined, 1),
-    { refreshInterval: 300_000, dedupingInterval: 10_000 },
-  );
+  // Track devices seen as active/passive via SSE so active_today updates the
+  // instant a device comes online, without waiting for the next API refresh.
+  const seenActiveTodayRef = useRef<Set<string>>(new Set());
+  const [activeTodayLive, setActiveTodayLive] = useState(0);
+  useEffect(() => {
+    if (realtime.length === 0) return;
+    let added = false;
+    for (const d of realtime) {
+      if ((d.status === "active" || d.status === "passive") && !seenActiveTodayRef.current.has(d.device_id)) {
+        seenActiveTodayRef.current.add(d.device_id);
+        added = true;
+      }
+    }
+    if (added) setActiveTodayLive(seenActiveTodayRef.current.size);
+  }, [realtime]);
+
+  // Take the higher of: SSE-observed devices this session vs. API's historical count.
+  const activeTodayCount = Math.max(activeTodayLive, stats?.active_today ?? 0);
 
   const debouncedEmpSearch = useDebouncedValue(empSearch, 200);
   const filteredRealtime = useMemo(() => {
@@ -195,18 +91,21 @@ function AdminHome() {
     return realtime.filter(d => smartMatch(debouncedEmpSearch, d.employee_name, d.hostname));
   }, [realtime, debouncedEmpSearch]);
 
+  const feedTotalPages = Math.ceil(filteredRealtime.length / FEED_PAGE_SIZE);
+  const safeFeedPage   = Math.min(feedPage, Math.max(0, feedTotalPages - 1));
+  const pagedFeed      = filteredRealtime.slice(safeFeedPage * FEED_PAGE_SIZE, (safeFeedPage + 1) * FEED_PAGE_SIZE);
+
   const s = stats?.status ?? { active: 0, passive: 0, inactive: 0 };
   const avgSecs = stats?.avg_active_seconds_today ?? 0;
   const avgHrs  = (avgSecs / 3600).toFixed(1);
   const avgMins = Math.round(avgSecs / 60);
   const avgDisplay = avgSecs < 3600 ? `${avgMins}m` : `${avgHrs}h`;
 
-  // Online right now = same logic as /v1/devices is_online: any device seen within
-  // the cutoff window, regardless of whether its latest event was lock/idle_start.
-  // Use the live SSE count (active + passive) when available; fall back to overview.
-  const onlineNow = realtime.length > 0
-    ? realtime.filter(d => d.status !== "inactive").length
-    : s.active + s.passive;
+  // Prefer live SSE counts; fall back to stats API when stream hasn't connected yet.
+  const activeNow   = realtime.length > 0 ? realtime.filter(d => d.status === "active").length   : s.active;
+  const passiveNow  = realtime.length > 0 ? realtime.filter(d => d.status === "passive").length  : s.passive;
+  const inactiveNow = realtime.length > 0 ? realtime.filter(d => d.status === "inactive").length : s.inactive;
+  const onlineNow   = activeNow + passiveNow;
 
   const QUICK_ACTIONS = [
     { href: "/devices",  label: "Devices",  icon: Monitor,      module: "devices" },
@@ -232,17 +131,9 @@ function AdminHome() {
         ))}
       </div>
 
-      {/* ── Filters row: period + group + user search ── */}
+      {/* Group filter */}
       <div className="flex flex-wrap items-center gap-2 mb-3">
-        <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide shrink-0">Stats for</p>
-        <StatPeriodFilter
-          dateRange={dateRange}
-          onRangeChange={setDateRange}
-        />
-
-        {/* Group filter — includes subgroups when a parent is selected */}
         <GroupPicker value={groupId} onChange={setGroupId} emptyLabel="All groups" />
-
         {groupId && (
           <button
             onClick={() => setGroupId("")}
@@ -255,11 +146,11 @@ function AdminHome() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <StatCard label="Total devices"   value={stats?.total_devices ?? 0} />
-        <StatCard label={activeLabel}     value={stats?.active_today ?? 0}  color="text-green-600" />
-        <StatCard label="Online right now" value={onlineNow}               color="text-brand-600" />
+        <StatCard label="Active devices"   value={activeTodayCount}          color="text-green-600" />
+        <StatCard label="Enrolled devices" value={stats?.total_devices ?? 0} />
+        <StatCard label="Online right now" value={onlineNow}                 color="text-brand-600" />
         <StatCard
-          label={avgLabel}
+          label="Avg active / device"
           value={avgDisplay}
           sub="working time only"
           color="text-purple-600"
@@ -274,19 +165,19 @@ function AdminHome() {
             <p className="text-sm font-semibold text-gray-800">Live Activity Status</p>
           </div>
           <div className="grid grid-cols-2 gap-4 items-center">
-            <StatusDonut active={s.active} passive={s.passive} inactive={s.inactive} />
+            <StatusDonut active={activeNow} passive={passiveNow} inactive={inactiveNow} />
             <div className="space-y-4">
               <div className="flex items-center gap-3">
                 <Wifi size={18} className="text-green-500" />
-                <div><p className="text-xl font-bold text-gray-900 leading-none">{s.active}</p><p className="text-xs text-gray-600 mt-0.5">Active now</p></div>
+                <div><p className="text-xl font-bold text-gray-900 leading-none">{activeNow}</p><p className="text-xs text-gray-600 mt-0.5">Active now</p></div>
               </div>
               <div className="flex items-center gap-3">
                 <Coffee size={18} className="text-amber-500" />
-                <div><p className="text-xl font-bold text-gray-900 leading-none">{s.passive}</p><p className="text-xs text-gray-600 mt-0.5">Passive now</p></div>
+                <div><p className="text-xl font-bold text-gray-900 leading-none">{passiveNow}</p><p className="text-xs text-gray-600 mt-0.5">Passive now</p></div>
               </div>
               <div className="flex items-center gap-3">
                 <WifiOff size={18} className="text-gray-600" />
-                <div><p className="text-xl font-bold text-gray-900 leading-none">{s.inactive}</p><p className="text-xs text-gray-600 mt-0.5">Inactive now</p></div>
+                <div><p className="text-xl font-bold text-gray-900 leading-none">{inactiveNow}</p><p className="text-xs text-gray-600 mt-0.5">Inactive now</p></div>
               </div>
             </div>
           </div>
@@ -314,12 +205,12 @@ function AdminHome() {
             <input
               type="text"
               value={empSearch}
-              onChange={e => setEmpSearch(e.target.value)}
+              onChange={e => { setEmpSearch(e.target.value); setFeedPage(0); }}
               placeholder="Search user or device…"
               className="w-full pl-7 pr-7 py-1.5 text-xs bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-brand-300 transition"
             />
             {empSearch && (
-              <button onClick={() => setEmpSearch("")} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600">
+              <button onClick={() => { setEmpSearch(""); setFeedPage(0); }} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600">
                 <X size={12} />
               </button>
             )}
@@ -339,7 +230,7 @@ function AdminHome() {
               </tr>
             </thead>
             <tbody>
-              {filteredRealtime.map(d => (
+              {pagedFeed.map(d => (
                 <tr key={d.device_id} className="border-t border-gray-100 hover:bg-gray-50">
                   <td className="px-5 py-3 font-medium text-gray-800">
                     <Link href={`/devices/${d.device_id}`} className="hover:text-brand-600 transition">
@@ -368,6 +259,32 @@ function AdminHome() {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination */}
+        {filteredRealtime.length > FEED_PAGE_SIZE && (
+          <div className="border-t border-gray-100 px-4 py-3 flex items-center justify-between">
+            <span className="text-xs text-gray-600">
+              Showing {safeFeedPage * FEED_PAGE_SIZE + 1}–{Math.min((safeFeedPage + 1) * FEED_PAGE_SIZE, filteredRealtime.length)} of {filteredRealtime.length.toLocaleString()}
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                disabled={safeFeedPage <= 0}
+                onClick={() => setFeedPage(p => Math.max(0, p - 1))}
+                className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <ChevronLeft size={14} />
+              </button>
+              <span className="text-xs text-gray-600 px-2">Page {safeFeedPage + 1} of {feedTotalPages}</span>
+              <button
+                disabled={safeFeedPage >= feedTotalPages - 1}
+                onClick={() => setFeedPage(p => Math.min(feedTotalPages - 1, p + 1))}
+                className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <ChevronRight size={14} />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

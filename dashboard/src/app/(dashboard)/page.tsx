@@ -2,12 +2,12 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useUser } from "@/hooks/useUser";
-import { NAV_GROUPS } from "@/components/Sidebar";
+import PageLoader from "@/components/PageLoader";
 
 // Land on the first page the current user is permitted to see.
 export default function RootPage() {
   const router = useRouter();
-  const { loading, can } = useUser();
+  const { loading } = useUser();
 
   useEffect(() => {
     if (loading) return;
@@ -15,9 +15,7 @@ export default function RootPage() {
     router.replace("/home");
   }, [loading, router]);
 
-  return (
-    <div className="flex items-center justify-center h-full text-gray-600 text-sm">
-      Loading…
-    </div>
-  );
+  // Show the same splash as everywhere else so the auth-check → /home hop is a
+  // single, seamless loader rather than a flash of plain "Loading…" text.
+  return <PageLoader />;
 }

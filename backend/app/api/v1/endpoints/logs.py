@@ -3,10 +3,11 @@ GET /v1/logs — company-wide activity feed for the dashboard Logs page.
 Returns the most recent events across all devices belonging to the admin's company.
 """
 
+import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
@@ -17,6 +18,14 @@ from app.db.models import Employee
 
 router = APIRouter()
 settings = get_settings()
+
+
+def _require_uuid(value: str, param: str) -> str:
+    """400 on malformed ids instead of letting CAST(:x AS uuid) 500 in the DB."""
+    try:
+        return str(_uuid.UUID(value))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid {param}")
 
 
 @router.get("", response_model=list[dict])
@@ -66,10 +75,16 @@ async def get_logs(
     if since is not None:
         ev_clauses.append("ae.timestamp >= to_timestamp(:since)")
         params["since"] = since
+        # Skip-dead-devices prefilter: a device whose last_seen predates the
+        # window start cannot have events in it, so its LATERAL probe would be
+        # a guaranteed-empty index descent. On a 2000-device fleet this drops
+        # most probes for narrow windows.
+        dev_clauses.append("(d.last_seen IS NULL OR d.last_seen >= to_timestamp(:since))")
     else:
         default_since = datetime.now(timezone.utc) - timedelta(hours=48)
         ev_clauses.append("ae.timestamp >= :default_since")
         params["default_since"] = default_since
+        dev_clauses.append("(d.last_seen IS NULL OR d.last_seen >= :default_since)")
 
     if until is not None:
         ev_clauses.append("ae.timestamp < to_timestamp(:until)")
@@ -77,7 +92,7 @@ async def get_logs(
 
     if employee_id:
         dev_clauses.append("d.employee_id = CAST(:employee_id AS uuid)")
-        params["employee_id"] = employee_id
+        params["employee_id"] = _require_uuid(employee_id, "employee_id")
 
     if event_type:
         ev_clauses.append("ae.event_type = :event_type")
@@ -86,7 +101,7 @@ async def get_logs(
     if device_id:
         # Single device → fairness is irrelevant; flat recency feed.
         dev_clauses.append("d.id = CAST(:device_id AS uuid)")
-        params["device_id"] = device_id
+        params["device_id"] = _require_uuid(device_id, "device_id")
         ev_sql = (" AND " + " AND ".join(ev_clauses)) if ev_clauses else ""
         query = text(f"""
             SELECT

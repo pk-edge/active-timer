@@ -43,7 +43,7 @@ export default function OverviewPage() {
   );
 
   if (loading) return <PageLoader />;
-  if (!can("home", "view")) return <AccessDenied label="the Organization Overview" />;
+  if (!can("overview", "view")) return <AccessDenied label="Organization Overview" />;
   // Cold load: show skeleton instead of a flash of zeros.
   // keepPreviousData (global SWR config) serves cached data on re-navigation,
   // so the skeleton only appears on the very first visit.

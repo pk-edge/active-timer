@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 5
     DB_POOL_TIMEOUT: int = 10   # fail fast instead of stacking 30s waits
     DB_POOL_RECYCLE: int = 1800
+    # Session-level cap on any single statement from the HTTP pool (ms).
+    # Protects the small pool from runaway analytics scans; background workers
+    # override per-transaction with SET LOCAL, migrations reset it to 0.
+    DB_STATEMENT_TIMEOUT_MS: int = 120_000
 
     # Dedicated ingest-writer pool (see budget above).
     # With the 30-second COPY strategy, only ONE connection is active at a time
