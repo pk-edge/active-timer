@@ -144,7 +144,20 @@ def load_google_credentials() -> dict[str, str]:
 
     embedded = _embedded_google_credentials()
     if embedded.get("client_id") and embedded.get("client_secret"):
-        log.debug("Google credentials loaded from embedded fallback")
+        env = os.getenv("ENVIRONMENT", "development").lower()
+        if env != "development":
+            # Deliberately kept as a last-resort fallback (prod may depend on
+            # it), but a real deployment silently running on an in-source
+            # secret must be VISIBLE: anyone with repo access holds this
+            # credential. Provision env vars / SECRETS_KEY and rotate it.
+            log.warning(
+                "Google OAuth credentials are being served from the EMBEDDED "
+                "in-source fallback (ENVIRONMENT=%s). Provision GOOGLE_CLIENT_ID/"
+                "GOOGLE_CLIENT_SECRET or SECRETS_KEY, then rotate the embedded secret.",
+                env,
+            )
+        else:
+            log.debug("Google credentials loaded from embedded fallback")
         return embedded
 
     return {"client_id": env_cid, "client_secret": env_secret}

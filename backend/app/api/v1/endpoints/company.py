@@ -24,16 +24,17 @@ DEFAULT_SETTINGS: dict = {
     "track_keyboard":      False,
     "idle_timeout_mins":   5,
     # Notifications
-    "email_alerts":        True,
-    "idle_alert_mins":     30,
-    "offline_alert_mins":  15,
-    "daily_report":        True,
+    "email_alerts":          True,
+    "idle_alert_mins":       30,
+    "offline_alert_enabled": True,
+    "offline_alert_mins":    30,
+    "daily_report":          True,
     # Shared files — max upload size in MB (see endpoints/adminFiles.py)
     "max_file_size_mb":    500,
 }
 
 _BOOL_KEYS = {"track_urls", "track_window_titles", "track_keyboard",
-              "email_alerts", "daily_report"}
+              "email_alerts", "daily_report", "offline_alert_enabled"}
 _INT_KEYS  = {"idle_timeout_mins": (0, 240),
               "idle_alert_mins": (0, 1440),
               "offline_alert_mins": (0, 1440),
@@ -189,6 +190,12 @@ async def update_company_settings(
                         "settings": cleaned or None})
     name, token, headless = company.name, company.enrollment_token, bool(company.agent_headless)
     await db.commit()
+
+    # Agents poll /v1/agent/config against a 30s Redis copy of this row — evict
+    # it so the admin's toggle reaches the fleet on its next poll, not in 30s+poll.
+    from app.core.RedisCache import cache_delete
+    await cache_delete(("agentcfg", str(cid)))
+
     return CompanyInfo(
         name=name,
         enrollment_token=token,

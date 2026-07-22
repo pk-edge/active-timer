@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
 import useSWR from "swr";
-import { Bell, UserCheck, CheckCheck, X, Inbox } from "lucide-react";
+import { Bell, UserCheck, CheckCheck, X, Inbox, WifiOff } from "lucide-react";
 import { getNotifications, markNotificationsRead } from "@/lib/api";
 import type { Notification } from "@/types";
 
@@ -25,20 +25,34 @@ const TYPE_CONFIG: Record<string, { color: string; dot: string; href: string }> 
     dot:   "bg-brand-500",
     href:  "/users?tab=pending",
   },
+  talent_offline: {
+    color: "from-amber-500 to-red-500",
+    dot:   "bg-red-500",
+    href:  "/devices",
+  },
+};
+
+const TYPE_ICON: Record<string, React.ReactNode> = {
+  approval_request: <UserCheck size={20} className="text-white" />,
+  talent_offline:    <WifiOff size={20} className="text-white" />,
 };
 
 function NotifItem({ n, onRead }: { n: Notification; onRead: () => void }) {
   const cfg = TYPE_CONFIG[n.type] ?? { color: "from-gray-400 to-gray-500", dot: "bg-gray-400", href: "/" };
+  const icon = TYPE_ICON[n.type] ?? <UserCheck size={20} className="text-white" />;
+  const href = n.type === "talent_offline" && n.metadata?.device_id
+    ? `/devices/${n.metadata.device_id}`
+    : cfg.href;
 
   return (
     <Link
-      href={cfg.href}
+      href={href}
       onClick={onRead}
       className={`flex items-start gap-3.5 px-4 py-3.5 hover:bg-gray-50/80 transition-colors border-b border-gray-100/80 last:border-0 group ${!n.is_read ? "bg-brand-50/40" : ""}`}
     >
       {/* Avatar */}
       <div className={`relative shrink-0 w-11 h-11 rounded-full bg-gradient-to-br ${cfg.color} flex items-center justify-center shadow-sm`}>
-        <UserCheck size={20} className="text-white" />
+        {icon}
         {!n.is_read && (
           <span className={`absolute -top-0.5 -right-0.5 w-3 h-3 ${cfg.dot} rounded-full border-2 border-white`} />
         )}

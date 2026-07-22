@@ -242,7 +242,8 @@ export async function registerUser(body: { name: string; email: string; password
 
 export const getGroups  = (includeArchived = false) =>
   request<Group[]>(`/v1/groups${includeArchived ? "?include_archived=true" : ""}`);
-export const getGroup   = (id: string) => request<GroupDetail>(`/v1/groups/${id}`);
+export const getGroup = (id: string, includeSubgroups = false) =>
+  request<GroupDetail>(`/v1/groups/${id}${includeSubgroups ? "?include_subgroups=true" : ""}`);
 export const createGroup = (body: { name: string; description?: string; parent_id?: string | null }) =>
   request<Group>("/v1/groups", { method: "POST", body: JSON.stringify(body) });
 export const updateGroup = (id: string, body: { name: string; description?: string; parent_id?: string | null }) =>
@@ -544,6 +545,7 @@ export interface CompanySettings {
   idle_timeout_mins: number;
   email_alerts: boolean;
   idle_alert_mins: number;
+  offline_alert_enabled: boolean;
   offline_alert_mins: number;
   daily_report: boolean;
   max_file_size_mb: number;

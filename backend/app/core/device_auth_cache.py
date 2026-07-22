@@ -116,3 +116,38 @@ device_auth_cache = DeviceAuthCache(
     ttl_secs=_settings.INGEST_AUTH_CACHE_TTL_SECS,
     max_entries=_settings.INGEST_AUTH_CACHE_MAX,
 )
+
+
+def device_ctx_cache_key(device_id: str) -> tuple:
+    """Redis key tuple for the shared device-context cache (see deps.get_device_ctx).
+
+    Keyed by device_id (not token) so a mutation can evict it across ALL
+    replicas with one DEL — an in-process ctx cache can't do that, and the
+    agent-facing promise is 'settings reach the agent on its next ~60s poll'.
+    """
+    return ("devctx", device_id)
+
+
+def device_ctx_tombstone_key(device_id: str) -> tuple:
+    return ("devctx_tomb", device_id)
+
+
+# How long a fresh invalidation blocks re-caching of the device ctx. Closes the
+# race where an in-flight poll read the device row BEFORE the mutation committed
+# and would otherwise cache_set the stale ctx AFTER the invalidation's DEL. Must
+# comfortably exceed any realistic request duration.
+CTX_TOMBSTONE_SECS = 30
+
+
+async def invalidate_device(device_id: str) -> None:
+    """Drop every cached auth/ctx entry for a device — the in-process ingest
+    token cache on THIS replica plus the Redis device-context entry shared by
+    all replicas. Call on archive / delete / re-enroll / reassign / headless
+    changes so a stale context can never outlive the mutation by more than the
+    in-process TTL. The tombstone is written FIRST so there is no window where
+    the entry is gone but an in-flight lookup may re-warm it."""
+    device_auth_cache.invalidate_device(device_id)
+    from app.core.RedisCache import cache_delete, cache_set
+    await cache_set(device_ctx_tombstone_key(device_id), True,
+                    fresh_secs=CTX_TOMBSTONE_SECS, stale_secs=CTX_TOMBSTONE_SECS)
+    await cache_delete(device_ctx_cache_key(device_id))
