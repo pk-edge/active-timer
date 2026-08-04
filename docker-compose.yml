@@ -69,12 +69,13 @@ services:
   # No RDB/AOF — cache + stream data is ephemeral; a restart just forces a
   # cold-cache recompute. The stream survives restart only if a volume is added.
   #
-  # SECURITY: port 16379 is exposed for local redis-cli convenience. Redis
-  # protected-mode catches HTTP probes on this port (the "Possible SECURITY
-  # ATTACK" log is its protection working; the connection is always aborted).
+  # SECURITY: port 16379 is exposed for local redis-cli convenience, so Redis
+  # runs WITH a password (requirepass). NOTE: the previous config used
+  # protected-mode WITHOUT a password, which makes Redis abort every
+  # non-loopback connection — including the backend's — so the response cache,
+  # SSE pub/sub and distributed rate limits were silently disabled in this
+  # stack. With requirepass set, remote connections are allowed but must auth.
   # For staging/prod use a managed endpoint (ElastiCache) and set REDIS_URL.
-  # To add password protection, append: --requirepass "${REDIS_PASSWORD}"
-  # and update REDIS_URL to: redis://:${REDIS_PASSWORD}@redis:6379/0
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -84,6 +85,7 @@ services:
       "--appendonly", "no",
       "--loglevel", "verbose",
       "--protected-mode", "yes",
+      "--requirepass", "${REDIS_PASSWORD:-timetracker_dev_redis}",
     ]
     ports:
       - "16379:6379"   # host port avoids clashing with a local redis on 6379
@@ -93,7 +95,7 @@ services:
         max-size: "10m"
         max-file: "5"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-timetracker_dev_redis}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -115,7 +117,7 @@ services:
       DATABASE_URL:           postgresql+asyncpg://timetracker:${POSTGRES_PASSWORD:-timetracker_dev}@db:5432/timetracker
       # Redis pub/sub for SSE fan-out. Staging/prod MUST override with a managed
       # endpoint (e.g. ElastiCache); rediss:// for TLS. See app/core/config.py.
-      REDIS_URL:              ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL:              ${REDIS_URL:-redis://:${REDIS_PASSWORD:-timetracker_dev_redis}@redis:6379/0}
       # development | staging | production. On staging/production the backend
       # refuses to boot with a default/dev JWT_SECRET (forge-admin-token guard).
       ENVIRONMENT:            ${ENVIRONMENT:-development}

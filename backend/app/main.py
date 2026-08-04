@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, ORJSONResponse
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
@@ -60,6 +60,16 @@ def _assert_secure_config() -> None:
             )
         log.warning("JWT_SECRET is a known dev default — set a strong secret "
                     "before deploying (ENVIRONMENT=development, so allowed here).")
+    if settings.CORS_ORIGINS == ["*"]:
+        # Wildcard + credentials would let ANY site drive authenticated calls
+        # from a victim's browser. Refuse outside local development.
+        if settings.ENVIRONMENT.lower() != "development":
+            raise RuntimeError(
+                f"Refusing to start in ENVIRONMENT={settings.ENVIRONMENT!r}: "
+                "CORS_ORIGINS='*' with credentialed CORS is unsafe. List the "
+                "dashboard origins explicitly (comma-separated) instead."
+            )
+        log.warning("CORS_ORIGINS='*' — every origin is allowed. Development only.")
 
 
 def _log_oauth_status() -> None:
@@ -79,27 +89,64 @@ def _log_oauth_status() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _assert_secure_config()      # refuse to boot a real deployment with a weak secret
-    _log_oauth_status()          # surface missing Google OAuth config at startup
-    await init_db()              # migrations + RBAC seed + bootstrap admin (all idempotent)
-    await ingest_queue.start()   # start async worker pool
+    from app.core import broadcaster, audit, RedisClient
+    _assert_secure_config()          # refuse to boot a real deployment with a weak secret
+    _log_oauth_status()              # surface missing Google OAuth config at startup
+    await init_db()                  # migrations + RBAC seed + bootstrap admin (all idempotent)
+    await RedisClient.startup()      # open Redis cache client (separate pool from pub/sub)
+    await broadcaster.startup()      # open Redis pub/sub + listener BEFORE workers publish
+    await audit.start()              # background audit writer — keeps audit off the request path
+    await ingest_queue.start()       # start 30-second COPY flusher
+    from app.core import report_cache
+    await report_cache.start()       # pre-compute report aggregates every 30 min
+    from app.core import tech_cache
+    await tech_cache.start()         # pre-compute tech utilization aggregates every 30 min
+    from app.core import device_janitor
+    await device_janitor.start()     # auto-archive devices inactive beyond company threshold
     yield
-    await ingest_queue.stop()    # drain + shutdown workers cleanly
+    await device_janitor.stop()      # stop janitor
+    await tech_cache.stop()          # stop tech cache worker
+    await report_cache.stop()        # stop report cache worker
+    await ingest_queue.stop()        # final COPY flush + clean exit
+    await audit.stop()               # flush queued audit rows, then stop the writer
+    await broadcaster.shutdown()     # stop SSE pub/sub listener + close that Redis client
+    await RedisClient.shutdown()     # close cache Redis client last
     from app.db.base import engine, ingest_engine
     await ingest_engine.dispose()
     await engine.dispose()
 
 
 def create_app() -> FastAPI:
+    # API docs off outside development unless explicitly re-enabled — the
+    # schema enumerates every route/parameter for an attacker for free.
+    docs_enabled = settings.API_DOCS_ENABLED
+    if docs_enabled is None:
+        docs_enabled = settings.ENVIRONMENT.lower() == "development"
+
     app = FastAPI(
         title="TimeTracker API",
         version="1.0.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
         lifespan=lifespan,
+        # orjson for every response: serializes large list payloads in fast C so
+        # the single async worker's event loop is not blocked on stdlib json while
+        # other requests wait (the load-induced "request failed / CORS" symptom).
+        default_response_class=ORJSONResponse,
     )
 
     # ── Middleware ────────────────────────────────────────────────────────────
+    # Cancel abandoned GET requests: when a dashboard tab navigates away, the
+    # in-flight query is cancelled instead of finishing for nobody — this keeps
+    # the small HTTP pool light under click-around navigation. Added FIRST so
+    # it wraps innermost (runs closest to the route handlers).
+    from app.core.request_cancel import CancelOnDisconnectMiddleware
+    app.add_middleware(
+        CancelOnDisconnectMiddleware,
+        skip_paths=("/v1/home/stream",),   # SSE manages its own disconnects
+    )
+
     # allow_origin_regex permanently covers every *.onedge.co subdomain so no
     # env var is needed in production.  CORS_ORIGINS still works for local dev
     # and any extra origins passed via env.
@@ -109,9 +156,48 @@ def create_app() -> FastAPI:
         allow_origins=[] if wildcard else settings.CORS_ORIGINS,
         allow_origin_regex=CORS_ORIGIN_REGEX,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        # Scoped to what the dashboard/agent actually send — a wildcard here
+        # needlessly pre-authorizes arbitrary methods/headers for allowed origins.
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Setup-Secret"],
     )
+
+    # Compress large JSON payloads on the wire (device/user/log/report lists are
+    # often 5-20× smaller gzipped). Added AFTER CORS so it sits OUTERMOST and
+    # compresses the final bytes with CORS headers intact. SSE-safe: the
+    # realtime push stream (text/event-stream) is never buffered/compressed.
+    from app.core.gzip_safe import SSESafeGZipMiddleware
+    app.add_middleware(SSESafeGZipMiddleware, minimum_size=600, compresslevel=5)
+
+    # ── Security headers ──────────────────────────────────────────────────────
+    # Pure-ASGI (not BaseHTTPMiddleware) so SSE streaming is never buffered.
+    class _SecurityHeaders:
+        def __init__(self, app):  # noqa: D401
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+
+            async def send_wrapper(message):
+                if message["type"] == "http.response.start":
+                    headers = message.setdefault("headers", [])
+                    headers.extend([
+                        (b"x-content-type-options", b"nosniff"),
+                        (b"x-frame-options", b"DENY"),
+                        (b"referrer-policy", b"no-referrer"),
+                    ])
+                    if scope.get("scheme") == "https":
+                        headers.append((
+                            b"strict-transport-security",
+                            b"max-age=63072000; includeSubDomains",
+                        ))
+                await send(message)
+
+            await self.app(scope, receive, send_wrapper)
+
+    app.add_middleware(_SecurityHeaders)
 
     # ── Global exception handler ──────────────────────────────────────────────
     # A 500 is generated by Starlette's ServerErrorMiddleware, which runs OUTSIDE

@@ -34,18 +34,23 @@ import logging
 import secrets as _secrets
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.core.config import get_settings
+from app.core.rate_limit import DistributedLimiter
 from app.core.security import hash_password_async
-from app.db.models import Company, Employee
+from app.db.models import Company, Employee, Role
 
 log = logging.getLogger("setup")
 router = APIRouter()
+
+# This endpoint can create/replace the admin account — cap attempts per IP so
+# the X-Setup-Secret can't be brute-forced. Legitimate use is one-shot.
+_setup_limiter = DistributedLimiter("setup", max_hits=5, window_secs=15 * 60)
 
 
 class ResetRequest(BaseModel):
@@ -56,9 +61,17 @@ class ResetRequest(BaseModel):
 
 
 async def _admin_count(db: AsyncSession) -> int:
-    """Number of employees that can log into the dashboard as an admin."""
+    """Number of employees that can log into the dashboard as an admin.
+
+    Counts BOTH legacy `role == "admin"` rows and RBAC accounts whose role has
+    all-data scope (Super Admins are created with role="employee" + a role_id).
+    Counting only the legacy column let an RBAC-only deployment report zero
+    admins and silently re-open the unauthenticated first-run bootstrap.
+    """
     result = await db.execute(
-        select(func.count()).select_from(Employee).where(Employee.role == "admin")
+        select(func.count()).select_from(Employee)
+        .outerjoin(Role, Employee.role_id == Role.id)
+        .where(or_(Employee.role == "admin", Role.scope_type == "all"))
     )
     return int(result.scalar_one())
 
@@ -77,6 +90,7 @@ async def setup_status(db: AsyncSession = Depends(get_db)):
 @router.post("/reset-admin")
 async def reset_admin(
     body: ResetRequest,
+    request: Request,
     x_setup_secret: Optional[str] = Header(None, alias="X-Setup-Secret"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -86,6 +100,12 @@ async def reset_admin(
     X-Setup-Secret header is required and matched against SETUP_SECRET only.
     If SETUP_SECRET is unset, the endpoint is disabled (every reset is rejected).
     """
+    ip = request.client.host if request.client else "unknown"
+    if await _setup_limiter.blocked(ip):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many setup attempts. Try again later.")
+    await _setup_limiter.hit(ip)
+
     settings = get_settings()
     existing_admins = await _admin_count(db)
     bootstrap = existing_admins == 0

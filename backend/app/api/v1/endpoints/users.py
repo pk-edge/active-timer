@@ -15,9 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require
 from app.core import audit
+from app.core.AdminAuthCache import admin_auth_cache
 from app.core.config import get_settings
 from app.core.group_tree import descendant_group_ids
 from app.core.ingest_queue import ingest_queue
+from app.core.provisioning import is_talent_role
 from app.core.security import hash_password_async
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
 from app.schemas.rbac import UserIn, UserPatch, UserOut, ApproveRequest
@@ -42,6 +44,7 @@ async def _user_out(emp: Employee, db: AsyncSession) -> UserOut:
         role_id=str(emp.role_id) if emp.role_id else None,
         role_name=emp.role_obj.name if emp.role_obj else (emp.role or None),
         scope_type=emp.role_obj.scope_type if emp.role_obj else None,
+        user_kind="talent" if is_talent_role(emp.role_obj) else "team",
         is_active=emp.is_active,
         is_approved=getattr(emp, "is_approved", True),
         group_ids=await _group_ids(emp.id, db),
@@ -63,7 +66,17 @@ async def _resolve_role(role_id: str | None, company_id, db: AsyncSession) -> Ro
     return role
 
 
-async def _set_group_access(emp_id, company_id, group_ids: list[str], db: AsyncSession) -> None:
+async def _set_group_access(
+    emp_id, company_id, group_ids: list[str], role: Role | None, db: AsyncSession,
+) -> None:
+    """Replace an employee's group-view (Relation Manager) access.
+
+    `role` must be the employee's role AFTER any change made earlier in the same
+    request — every call site already has this in hand, so a role change and a
+    group assignment in one request are checked against the same, final role.
+    Only a groups-scoped role (e.g. Viewer) may hold group access; Talent users
+    are explicitly rejected so they can never become viewers of their own group.
+    """
     await db.execute(delete(EmployeeGroupAccess).where(EmployeeGroupAccess.employee_id == emp_id))
     guids = []
     for gid in dict.fromkeys(group_ids):  # dedupe, preserve order
@@ -73,6 +86,16 @@ async def _set_group_access(emp_id, company_id, group_ids: list[str], db: AsyncS
             continue
     if not guids:
         return
+    if is_talent_role(role):
+        raise HTTPException(
+            status_code=400,
+            detail="Talent users can't be assigned as Relation Managers. Change the user's role first.",
+        )
+    if not role or role.scope_type != "groups":
+        raise HTTPException(
+            status_code=400,
+            detail="Only users with a group-scoped role can be assigned group access.",
+        )
     # Validate every id against the company in one query (was one per group).
     valid = (await db.execute(
         select(Group.id).where(Group.id.in_(guids), Group.company_id == company_id)
@@ -155,6 +178,7 @@ async def list_users(
             role_id=str(e.role_id) if e.role_id else None,
             role_name=e.role_obj.name if e.role_obj else (e.role or None),
             scope_type=e.role_obj.scope_type if e.role_obj else None,
+            user_kind="talent" if is_talent_role(e.role_obj) else "team",
             is_active=e.is_active,
             is_approved=getattr(e, "is_approved", True),
             group_ids=groups_by_emp.get(e.id, []),
@@ -490,9 +514,10 @@ async def create_user(
         db.add(emp)
         await db.flush()
 
-    await _set_group_access(emp.id, user.company_id, body.group_ids, db)
+    await _set_group_access(emp.id, user.company_id, body.group_ids, role, db)
     await audit.record(db, user, "user.create", "user", str(emp.id), {"email": emp.email})
     await db.commit()
+    admin_auth_cache.invalidate_all()   # perms/active/role may have changed — drop cached auth
 
     fresh = await db.execute(
         select(Employee).options(selectinload(Employee.role_obj)).where(Employee.id == emp.id)
@@ -534,6 +559,7 @@ async def update_user(
 ):
     emp = await _get_user(user_id, user.company_id, db)
     changed: dict = {}
+    final_role = emp.role_obj
     if body.name is not None and body.name != emp.name:
         changed["name"] = {"from": emp.name, "to": body.name}
         emp.name = body.name
@@ -543,6 +569,7 @@ async def update_user(
         if new_role_id != emp.role_id:
             changed["role"] = role.name if role else None
         emp.role_id = new_role_id
+        final_role = role
     if body.password:
         changed["password"] = "changed"
         emp.password_hash = await hash_password_async(body.password)
@@ -551,12 +578,16 @@ async def update_user(
         emp.is_active = body.is_active
     if body.group_ids is not None:
         changed["group_ids"] = body.group_ids
-        await _set_group_access(emp.id, user.company_id, body.group_ids, db)
+        await _set_group_access(emp.id, user.company_id, body.group_ids, final_role, db)
     if changed:
         await audit.record(db, user, "user.update", "user", user_id,
                            {"email": emp.email, "changes": changed})
     await db.commit()
+    admin_auth_cache.invalidate_all()   # perms/active/role may have changed — drop cached auth
 
+    # Expire the object so lazy="joined" re-fetches role_obj on next access —
+    # otherwise a role_id change leaves the already-loaded role_obj stale.
+    await db.refresh(emp)
     fresh = await db.execute(
         select(Employee).options(selectinload(Employee.role_obj)).where(Employee.id == emp.id)
     )
@@ -571,8 +602,9 @@ async def set_user_groups(
     db: AsyncSession = Depends(get_db),
 ):
     emp = await _get_user(user_id, user.company_id, db)
-    await _set_group_access(emp.id, user.company_id, group_ids, db)
+    await _set_group_access(emp.id, user.company_id, group_ids, emp.role_obj, db)
     await db.commit()
+    admin_auth_cache.invalidate_all()   # perms/active/role may have changed — drop cached auth
     return await _user_out(emp, db)
 
 
@@ -593,10 +625,11 @@ async def approve_user(
 
     emp.role_id = role.id
     emp.is_approved = True
-    await _set_group_access(emp.id, user.company_id, body.group_ids, db)
+    await _set_group_access(emp.id, user.company_id, body.group_ids, role, db)
     await audit.record(db, user, "user.approve", "user", user_id,
                        {"email": emp.email, "role": role.name})
     await db.commit()
+    admin_auth_cache.invalidate_all()   # perms/active/role may have changed — drop cached auth
 
     # Expire the object so lazy="joined" re-fetches role_obj on next access.
     await db.refresh(emp)
@@ -620,6 +653,7 @@ async def soft_delete_user(
     emp.is_active = False
     await audit.record(db, user, "user.delete", "user", user_id, {"email": emp.email})
     await db.commit()
+    admin_auth_cache.invalidate_all()   # perms/active/role may have changed — drop cached auth
 
 
 @router.post("/{user_id}/deactivate", response_model=UserOut)
@@ -635,6 +669,7 @@ async def deactivate_user(
     emp.is_active = False
     await audit.record(db, user, "user.deactivate", "user", user_id, {"email": emp.email})
     await db.commit()
+    admin_auth_cache.invalidate_all()   # perms/active/role may have changed — drop cached auth
     fresh = await db.execute(
         select(Employee).options(selectinload(Employee.role_obj)).where(Employee.id == emp.id)
     )
@@ -652,6 +687,7 @@ async def activate_user(
     emp.is_active = True
     await audit.record(db, user, "user.activate", "user", user_id, {"email": emp.email})
     await db.commit()
+    admin_auth_cache.invalidate_all()   # perms/active/role may have changed — drop cached auth
     fresh = await db.execute(
         select(Employee).options(selectinload(Employee.role_obj)).where(Employee.id == emp.id)
     )

@@ -376,18 +376,35 @@ function SubgroupCreateModal({ parentGroupId, parentGroupName, onClose, onSaved 
 export default function GroupDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { loading, can } = useUser();
-  const { data: group, mutate } = useSWR<GroupDetail>(["group", id], () => getGroup(id));
+  const [includeSubgroups, setIncludeSubgroups] = useState(false);
+  const { data: group, mutate } = useSWR<GroupDetail>(
+    ["group", id, includeSubgroups], () => getGroup(id, includeSubgroups),
+  );
   const [adding, setAdding] = useState(false);
   const [addMemberGroupId, setAddMemberGroupId] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [showSubgroupModal, setShowSubgroupModal] = useState(false);
   const [busySubgroup, setBusySubgroup] = useState("");
 
+  const memberSections = useMemo(() => {
+    const members = group?.members ?? [];
+    if (!includeSubgroups) return [{ label: "Direct members", members }];
+    const map = new Map<string, typeof members>();
+    for (const m of members) {
+      const label = m.direct ? "Direct members" : (m.path ?? "Other");
+      if (!map.has(label)) map.set(label, []);
+      map.get(label)!.push(m);
+    }
+    return Array.from(map.entries())
+      .sort(([a], [b]) => (a === "Direct members" ? -1 : b === "Direct members" ? 1 : a.localeCompare(b)))
+      .map(([label, sectionMembers]) => ({ label, members: sectionMembers }));
+  }, [group?.members, includeSubgroups]);
+
   if (loading) return <PageLoader />;
   if (!can("groups", "view")) return <AccessDenied label="Groups" />;
 
-  async function removeMember(memberId: string) {
-    try { await removeGroupMember(id, memberId); mutate(); }
+  async function removeMember(member: GroupMember) {
+    try { await removeGroupMember(member.group_id ?? id, member.id); mutate(); }
     catch (e) { alert(String(e instanceof Error ? e.message : e)); }
   }
 
@@ -447,16 +464,16 @@ export default function GroupDetailPage({ params }: { params: Promise<{ id: stri
         </div>
         <div className="flex items-center gap-2">
           {can("groups", "edit") && group && (
-            <>
-              <button onClick={() => setEditing(true)}
-                className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-700">
-                <Pencil size={14} /> Edit
-              </button>
-              <button onClick={() => setAdding(true)}
-                className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-700">
-                <UserPlus size={15} /> Add member
-              </button>
-            </>
+            <button onClick={() => setEditing(true)}
+              className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-700">
+              <Pencil size={14} /> Edit
+            </button>
+          )}
+          {can("groups", "manage_members") && group && (
+            <button onClick={() => setAdding(true)}
+              className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-700">
+              <UserPlus size={15} /> Add member
+            </button>
           )}
         </div>
       </div>
@@ -484,29 +501,35 @@ export default function GroupDetailPage({ params }: { params: Promise<{ id: stri
                     {c.name}
                   </Link>
                   <span className="text-xs text-gray-400 shrink-0">{c.member_count}m · {c.child_count}s</span>
-                  {can("groups", "edit") && (
+                  {(can("groups", "manage_members") || can("groups", "edit")) && (
                     <div className="flex items-center gap-0.5 shrink-0">
-                      <button
-                        onClick={e => { e.preventDefault(); setAddMemberGroupId(c.id); }}
-                        disabled={busySubgroup === c.id}
-                        title="Add member"
-                        className="p-1.5 text-gray-400 hover:text-brand-600 rounded disabled:opacity-40">
-                        <UserPlus size={12} />
-                      </button>
-                      <button
-                        onClick={e => { e.preventDefault(); handleArchiveSubgroup(c.id); }}
-                        disabled={busySubgroup === c.id}
-                        title="Archive"
-                        className="p-1.5 text-gray-400 hover:text-amber-600 rounded disabled:opacity-40">
-                        <Archive size={12} />
-                      </button>
-                      <button
-                        onClick={e => { e.preventDefault(); handleDeleteSubgroup(c.id, c.name); }}
-                        disabled={busySubgroup === c.id}
-                        title="Delete"
-                        className="p-1.5 text-gray-400 hover:text-red-600 rounded disabled:opacity-40">
-                        <Trash2 size={12} />
-                      </button>
+                      {can("groups", "manage_members") && (
+                        <button
+                          onClick={e => { e.preventDefault(); setAddMemberGroupId(c.id); }}
+                          disabled={busySubgroup === c.id}
+                          title="Add member"
+                          className="p-1.5 text-gray-400 hover:text-brand-600 rounded disabled:opacity-40">
+                          <UserPlus size={12} />
+                        </button>
+                      )}
+                      {can("groups", "edit") && (
+                        <>
+                          <button
+                            onClick={e => { e.preventDefault(); handleArchiveSubgroup(c.id); }}
+                            disabled={busySubgroup === c.id}
+                            title="Archive"
+                            className="p-1.5 text-gray-400 hover:text-amber-600 rounded disabled:opacity-40">
+                            <Archive size={12} />
+                          </button>
+                          <button
+                            onClick={e => { e.preventDefault(); handleDeleteSubgroup(c.id, c.name); }}
+                            disabled={busySubgroup === c.id}
+                            title="Delete"
+                            className="p-1.5 text-gray-400 hover:text-red-600 rounded disabled:opacity-40">
+                            <Trash2 size={12} />
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -553,49 +576,68 @@ export default function GroupDetailPage({ params }: { params: Promise<{ id: stri
       )}
 
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
-        <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-100 text-xs font-semibold text-gray-500 uppercase tracking-wide">
-          Direct members
+        <div className="px-4 py-2.5 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Members</span>
+          {!!group?.child_count && (
+            <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={includeSubgroups}
+                onChange={e => setIncludeSubgroups(e.target.checked)}
+                className="accent-[#4a0f70]"
+              />
+              Include subgroups
+            </label>
+          )}
         </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[600px]">
-            <thead>
-              <tr className="bg-gray-50/50 text-gray-500 text-xs">
-                <th className="text-left px-4 py-2.5 font-medium">Member</th>
-                <th className="text-left px-4 py-2.5 font-medium">Type</th>
-                <th className="px-4 py-2.5" />
-              </tr>
-            </thead>
-            <tbody>
-              {group?.members.map(m => (
-                <tr key={m.id} className="border-t border-gray-100 hover:bg-gray-50">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      {m.member_type === "employee" ? <UserIcon size={14} className="text-gray-400" /> : <Monitor size={14} className="text-gray-400" />}
-                      {m.member_type === "employee" && m.employee_id ? (
-                        <Link href={`/users/${m.employee_id}`} className="font-medium text-gray-800 hover:text-brand-600">{m.label}</Link>
-                      ) : m.member_type === "device" && m.device_id ? (
-                        <Link href={`/devices/${m.device_id}`} className="font-medium text-gray-800 hover:text-brand-600">{m.label}</Link>
-                      ) : (
-                        <span className="font-medium text-gray-800">{m.label}</span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 capitalize text-gray-500">{m.member_type}</td>
-                  <td className="px-4 py-3 text-right">
-                    {can("groups", "edit") && (
-                      <button onClick={() => removeMember(m.id)} className="text-gray-400 hover:text-red-600 p-1">
-                        <Trash2 size={15} />
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {group?.members.length === 0 && (
-                <tr><td colSpan={3} className="px-4 py-10 text-center text-gray-500 text-sm">No members yet.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        {(group?.members.length ?? 0) === 0 ? (
+          <div className="px-4 py-10 text-center text-gray-500 text-sm">No members yet.</div>
+        ) : (
+          memberSections.map(section => (
+            <div key={section.label}>
+              <div className="px-4 py-1.5 bg-gray-50/60 text-[11px] font-medium text-gray-500">
+                {section.label} <span className="text-gray-400">· {section.members.length}</span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[600px]">
+                  <thead className="sr-only">
+                    <tr>
+                      <th>Member</th>
+                      <th>Type</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {section.members.map(m => (
+                      <tr key={m.id} className="border-t border-gray-100 hover:bg-gray-50">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2">
+                            {m.member_type === "employee" ? <UserIcon size={14} className="text-gray-400" /> : <Monitor size={14} className="text-gray-400" />}
+                            {m.member_type === "employee" && m.employee_id ? (
+                              <Link href={`/users/${m.employee_id}`} className="font-medium text-gray-800 hover:text-brand-600">{m.label}</Link>
+                            ) : m.member_type === "device" && m.device_id ? (
+                              <Link href={`/devices/${m.device_id}`} className="font-medium text-gray-800 hover:text-brand-600">{m.label}</Link>
+                            ) : (
+                              <span className="font-medium text-gray-800">{m.label}</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 capitalize text-gray-500">{m.member_type}</td>
+                        <td className="px-4 py-3 text-right">
+                          {can("groups", "manage_members") && (
+                            <button onClick={() => removeMember(m)} className="text-gray-400 hover:text-red-600 p-1">
+                              <Trash2 size={15} />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))
+        )}
       </div>
 
       {(adding || addMemberGroupId) && (

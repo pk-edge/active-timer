@@ -403,7 +403,8 @@ export default function TechUtilizationPage() {
   const [employeeId, setEmployeeId] = useState("");
   const [categoryId, setCategoryId] = useState("");
 
-  const { data: users }      = useSWR("users-tf", () => import("@/lib/api").then(m => m.getUsers()));
+  const { data: users }      = useSWR("tech-users-tf", () => import("@/lib/api").then(m => m.getTechFilterUsers()));
+  const { data: groups }     = useSWR("tech-groups-tf", () => import("@/lib/api").then(m => m.getTechFilterGroups()));
   const { data: catsPage } = useSWR("tech-cats-filter", () => getTechCategories({ per_page: 200 }));
   const categories: AppCategory[] = catsPage?.items ?? [];
 
@@ -470,7 +471,7 @@ export default function TechUtilizationPage() {
         {/* Activity Date */}
         <DateRangePicker value={dateRange} onChange={setDateRange} />
         {/* Team / Group */}
-        <GroupPicker value={groupId} onChange={v => { setGroupId(v); setEmployeeId(""); }} />
+        <GroupPicker value={groupId} onChange={v => { setGroupId(v); setEmployeeId(""); }} groups={groups} />
 
         {/* User */}
         <div className="relative">

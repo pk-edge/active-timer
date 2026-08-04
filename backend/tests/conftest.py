@@ -8,6 +8,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Disable the in-process admin-auth cache: tests seed/mutate employees and
+# roles with raw SQL in a never-committed session, which no invalidation hook
+# can observe — a cached auth result would leak across those mutations.
+# Must be set BEFORE the first get_settings() call (i.e. before app imports).
+os.environ.setdefault("ADMIN_AUTH_CACHE_TTL_SECS", "0")
+
 pytest_plugins = ("pytest_asyncio",)
 
 import asyncio

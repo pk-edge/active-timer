@@ -27,7 +27,7 @@ MODULES: list[ModuleDef] = [
     {"key": "tech",       "label": "Technology & AI",  "actions": ["view", "edit"]},
     # ── Administration ────────────────────────────────────────────────────────
     {"key": "users",      "label": "Users",    "actions": ["view", "create", "edit", "delete"]},
-    {"key": "groups",     "label": "Groups",   "actions": ["view", "create", "edit", "delete"]},
+    {"key": "groups",     "label": "Groups",   "actions": ["view", "create", "edit", "delete", "manage_members"]},
     {"key": "roles",      "label": "Roles",    "actions": ["view", "create", "edit", "delete"]},
     {"key": "agents",     "label": "Agents",   "actions": ["view", "create", "edit", "delete"]},
     {"key": "policy",     "label": "URL Policies",  "actions": ["view", "edit"]},

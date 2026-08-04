@@ -58,7 +58,12 @@ def create_admin_token(user_id: str, role: str, company_id: str) -> str:
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+    # require exp: every token we mint carries one, so a token WITHOUT it is
+    # forged/foreign — without this option such a token would validate forever.
+    return jwt.decode(
+        token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM],
+        options={"require": ["exp"]},
+    )
 
 
 def _encode(payload: dict) -> str:

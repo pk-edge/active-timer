@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -55,7 +56,10 @@ async def request_upload_url(
     s3_key = f"screenshots/{device.company_id}/{device.id}/{ss_uuid}.png"
 
     try:
-        url = _s3_client(public=True).generate_presigned_url(
+        # Presigning is CPU-only (local HMAC) but this is a device hot path —
+        # keep it off the event loop like the other S3 calls in the codebase.
+        url = await asyncio.to_thread(
+            _s3_client(public=True).generate_presigned_url,
             "put_object",
             Params={"Bucket": settings.S3_BUCKET, "Key": s3_key, "ContentType": "image/png"},
             ExpiresIn=settings.PRESIGNED_URL_EXPIRY,
@@ -115,22 +119,32 @@ async def list_screenshots(
         .order_by(Screenshot.captured_at.desc())
         .offset(offset).limit(limit)
     )
-    s3 = _s3_client()
-    out = []
-    for ss in result.scalars().all():
-        try:
-            url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": settings.S3_BUCKET, "Key": ss.s3_key},
-                ExpiresIn=3600,
-            )
-        except Exception:
-            url = ""
-        out.append(ScreenshotOut(
+    shots = result.scalars().all()
+
+    def _presign_all(keys: list[str]) -> list[str]:
+        # Up to 200 HMAC signings — one to_thread hop for the whole batch so
+        # the event loop is never blocked by the loop itself.
+        s3 = _s3_client()
+        urls = []
+        for key in keys:
+            try:
+                urls.append(s3.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": settings.S3_BUCKET, "Key": key},
+                    ExpiresIn=3600,
+                ))
+            except Exception:
+                urls.append("")
+        return urls
+
+    urls = await asyncio.to_thread(_presign_all, [ss.s3_key for ss in shots])
+    return [
+        ScreenshotOut(
             id=str(ss.id),
             s3_url=url,
             captured_at=ss.captured_at,
             captured_at_unix=int(ss.captured_at.timestamp()),
             file_size=ss.file_size,
-        ))
-    return out
+        )
+        for ss, url in zip(shots, urls)
+    ]
