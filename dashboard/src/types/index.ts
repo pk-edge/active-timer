@@ -330,6 +330,13 @@ export interface TechSummary {
   top_app:            string | null;
 }
 
+export interface TechFilterUser {
+  id:        string;
+  name:      string;
+  email:     string;
+  is_active: boolean;
+}
+
 export interface CategoryAllocationItem {
   category_id:   string | null;
   category_name: string;

@@ -3,7 +3,7 @@ import type {
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
   OverviewStats, HomeWidgets, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
-  AppCategory, CategoriesPage, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
+  AppCategory, CategoriesPage, TechSummary, TechFilterUser, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
   WebsiteListOut, WebsiteDetailOut,
   AppUsageListOut, AppUsageDetailOut,
@@ -440,6 +440,11 @@ export function techDateParams(since: string, until: string): URLSearchParams {
 }
 
 // ── Tech Utilization ──────────────────────────────────────────────────────────
+
+// Scoped by tech.view alone (not groups.view/users.view) — so the Technology &
+// AI page's own filter dropdowns work for a role that only grants tech access.
+export const getTechFilterGroups = () => request<Group[]>("/v1/tech/filters/groups");
+export const getTechFilterUsers = () => request<TechFilterUser[]>("/v1/tech/filters/users");
 
 export const getTechSummary = (since: string, until: string, group_id?: string, employee_id?: string) => {
   const p = techDateParams(since, until);

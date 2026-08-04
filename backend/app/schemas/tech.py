@@ -50,6 +50,15 @@ class CategoriesPageOut(BaseModel):
     total_pages: int
 
 
+# ── Filter lookups ─────────────────────────────────────────────────────────────
+
+class TechFilterUserOut(BaseModel):
+    id:        str
+    name:      str
+    email:     str
+    is_active: bool
+
+
 # ── Utilization analytics ─────────────────────────────────────────────────────
 
 class CategoryAllocationItem(BaseModel):
