@@ -200,9 +200,13 @@ async def _get_group(group_id: str, user: Employee, db: AsyncSession) -> Group:
     return g
 
 
-async def _members_with_labels(group_id, db: AsyncSession) -> list[MemberOut]:
+async def _members_with_labels(
+    root_group_id, company_id, db: AsyncSession, include_subgroups: bool = False,
+) -> list[MemberOut]:
+    gids = await descendant_group_ids([root_group_id], company_id, db) if include_subgroups else {root_group_id}
+
     rows = await db.execute(
-        select(GroupMember).where(GroupMember.group_id == group_id).order_by(GroupMember.added_at.asc())
+        select(GroupMember).where(GroupMember.group_id.in_(gids)).order_by(GroupMember.added_at.asc())
     )
     members = rows.scalars().all()
     if not members:
@@ -220,6 +224,14 @@ async def _members_with_labels(group_id, db: AsyncSession) -> list[MemberOut]:
         dr = await db.execute(select(Device.id, Device.hostname).where(Device.id.in_(dev_ids)))
         dev_names = {did: host for did, host in dr.all()}
 
+    group_names: dict = {}
+    paths: dict = {}
+    if include_subgroups:
+        grp_rows = await db.execute(select(Group.id, Group.name, Group.parent_id).where(Group.id.in_(gids)))
+        grp_list = [(gid, name, pid) for gid, name, pid in grp_rows.all()]
+        group_names = {gid: name for gid, name, _ in grp_list}
+        paths = build_paths(grp_list)
+
     out: list[MemberOut] = []
     for m in members:
         if m.member_type == "employee" and m.employee_id:
@@ -233,6 +245,10 @@ async def _members_with_labels(group_id, db: AsyncSession) -> list[MemberOut]:
             employee_id=str(m.employee_id) if m.employee_id else None,
             device_id=str(m.device_id) if m.device_id else None,
             label=label,
+            group_id=str(m.group_id) if include_subgroups else None,
+            group_name=group_names.get(m.group_id) if include_subgroups else None,
+            path=paths.get(m.group_id) if include_subgroups else None,
+            direct=(m.group_id == root_group_id) if include_subgroups else None,
         ))
     return out
 
@@ -269,11 +285,12 @@ async def _breadcrumb(g: Group, db: AsyncSession) -> list[GroupChildOut]:
 @router.get("/{group_id}", response_model=GroupDetailOut)
 async def get_group(
     group_id: str,
+    include_subgroups: bool = Query(default=False),
     user: Employee = Depends(require("groups", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     g = await _get_group(group_id, user, db)
-    members = await _members_with_labels(g.id, db)
+    members = await _members_with_labels(g.id, user.company_id, db, include_subgroups=include_subgroups)
 
     # Fetch all non-deleted children (active + archived) so the parent detail page
     # can display and manage archived subgroups without a separate request.
@@ -292,7 +309,7 @@ async def get_group(
         parent_id=str(g.parent_id) if g.parent_id else None,
         path=path,
         is_archived=g.is_archived,
-        member_count=mc_map.get(g.id, len(members)),
+        member_count=mc_map.get(g.id, 0),
         child_count=cc_map.get(g.id, 0),
         created_at=g.created_at.isoformat() if g.created_at else None,
         members=members,
@@ -387,18 +404,19 @@ async def unarchive_group(
 @router.get("/{group_id}/members", response_model=list[MemberOut])
 async def list_members(
     group_id: str,
+    include_subgroups: bool = Query(default=False),
     user: Employee = Depends(require("groups", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     g = await _get_group(group_id, user, db)
-    return await _members_with_labels(g.id, db)
+    return await _members_with_labels(g.id, user.company_id, db, include_subgroups=include_subgroups)
 
 
 @router.post("/{group_id}/members", response_model=MemberOut, status_code=status.HTTP_201_CREATED)
 async def add_member(
     group_id: str,
     body: MemberIn,
-    user: Employee = Depends(require("groups", "edit")),
+    user: Employee = Depends(require("groups", "manage_members")),
     db: AsyncSession = Depends(get_db),
 ):
     g = await _get_group(group_id, user, db)
@@ -447,7 +465,7 @@ async def add_member(
 async def remove_member(
     group_id: str,
     member_id: str,
-    user: Employee = Depends(require("groups", "edit")),
+    user: Employee = Depends(require("groups", "manage_members")),
     db: AsyncSession = Depends(get_db),
 ):
     g = await _get_group(group_id, user, db)

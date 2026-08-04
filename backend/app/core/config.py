@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # revocation latency.
     INGEST_AUTH_CACHE_TTL_SECS: int = 60
     INGEST_AUTH_CACHE_MAX: int = 50_000
+    # In-process cache for the per-request admin auth (user+permissions) query.
+    # Deliberately short: a permission change or deactivation is live within
+    # this window on other replicas (instant on the mutating one, which calls
+    # invalidate_all). 0 disables the cache entirely (used by the test suite,
+    # whose fixtures mutate rows with raw SQL that no invalidation hook sees).
+    ADMIN_AUTH_CACHE_TTL_SECS: float = 15.0
     # Retry-After (seconds) returned when the ingest queue is saturated (503).
     # Matches the agent's SYNC_INTERVAL so it retries on its normal cadence.
     INGEST_RETRY_AFTER_SECS: int = 5
@@ -84,6 +90,10 @@ class Settings(BaseSettings):
     # "development" | "staging" | "production". Anything other than development
     # is treated as a real deployment and enforces secure-secret checks at boot.
     ENVIRONMENT: str = "development"
+
+    # Expose /docs, /redoc and /openapi.json. Default (None) = only in
+    # development; set API_DOCS_ENABLED=true to expose them on a real deployment.
+    API_DOCS_ENABLED: bool | None = None
 
     # ── JWT ───────────────────────────────────────────────────────────────────
     JWT_SECRET: str = "change-me-in-production"

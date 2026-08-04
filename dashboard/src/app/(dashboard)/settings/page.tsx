@@ -28,7 +28,8 @@ const DEFAULT_SETTINGS: CompanySettings = {
   timezone: "UTC", work_start: "09:00", work_end: "18:00",
   track_urls: true, track_window_titles: true, track_keyboard: false,
   idle_timeout_mins: 5,
-  email_alerts: true, idle_alert_mins: 30, offline_alert_mins: 15, daily_report: true,
+  email_alerts: true, idle_alert_mins: 30,
+  offline_alert_enabled: true, offline_alert_mins: 30, daily_report: true,
   max_file_size_mb: 500,
 };
 
@@ -68,15 +69,16 @@ function SettingRow({
   );
 }
 
-function SelectInput({ value, onChange, options }: {
+function SelectInput({ value, onChange, options, disabled }: {
   value: string; onChange: (v: string) => void;
-  options: { label: string; value: string }[];
+  options: { label: string; value: string }[]; disabled?: boolean;
 }) {
   return (
     <select
       value={value}
+      disabled={disabled}
       onChange={e => onChange(e.target.value)}
-      className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
+      className="bg-white border border-gray-300 rounded-lg px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 disabled:opacity-50 disabled:cursor-not-allowed"
     >
       {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>
@@ -481,17 +483,26 @@ export default function SettingsPage() {
               </SettingRow>
 
               <SettingRow
+                label="Alert managers when a talent device goes offline"
+                description="Notifies Relation Managers (for their groups) and Super Admins in-app when a talent's device crosses the threshold below."
+              >
+                <Toggle checked={prefs.offline_alert_enabled} onChange={v => setPref("offline_alert_enabled", v)} disabled={!canEdit} />
+              </SettingRow>
+
+              <SettingRow
                 label="Offline alert threshold"
-                description="Send an alert when a device goes offline for this duration"
+                description="How long a talent device must be offline before managers are alerted"
               >
                 <SelectInput
                   value={String(prefs.offline_alert_mins)}
                   onChange={v => setPref("offline_alert_mins", parseInt(v) || 0)}
+                  disabled={!canEdit || !prefs.offline_alert_enabled}
                   options={[
                     { label: "5 minutes", value: "5" },
                     { label: "15 minutes", value: "15" },
                     { label: "30 minutes", value: "30" },
                     { label: "1 hour", value: "60" },
+                    { label: "2 hours", value: "120" },
                     { label: "Never", value: "0" },
                   ]}
                 />

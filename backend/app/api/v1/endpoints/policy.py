@@ -18,40 +18,72 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from sqlalchemy import text
-from app.api.deps import get_db, require, get_current_admin, get_current_device
+from app.api.deps import DeviceCtx, get_db, get_device_ctx, require, get_current_admin
 from app.core import audit
-from app.db.models import BlockedUrl, Device, Employee
+from app.core.RedisCache import cache_delete, cache_get, cache_set
+from app.db.models import BlockedUrl, Employee
 from app.schemas.policy import BlockedUrlOut, BlockedUrlCreate, BlockedUrlUpdate, AgentPolicyItem
 
 router = APIRouter()
+
+# Agents poll this endpoint, so its steady state must be DB-free: the company's
+# full active rule set is cached in Redis (rule lists are small) and filtered
+# per device in Python — identical payload to the old per-device SQL filter.
+# Mutations evict the key, so 30s is only the cross-replica refresh cadence.
+_RULES_CACHE_SECS = 30
+
+
+def _rules_cache_key(cid: str) -> tuple:
+    return ("policyrules", cid)
+
+
+async def _load_company_rules(db: AsyncSession, cid: str) -> list[dict]:
+    result = await db.execute(
+        select(BlockedUrl).where(
+            BlockedUrl.company_id == cid,
+            BlockedUrl.is_active  == True,   # noqa: E712
+            BlockedUrl.is_deleted == False,  # noqa: E712
+        )
+    )
+    return [
+        {
+            "id": str(r.id),
+            "pattern": r.pattern,
+            "target_type": r.target_type,
+            "device_id": str(r.device_id) if r.device_id else None,
+            "employee_id": str(r.employee_id) if r.employee_id else None,
+        }
+        for r in result.scalars().all()
+    ]
 
 
 # ── Agent endpoint — device JWT ───────────────────────────────────────────────
 
 @router.get("/blocked-urls", response_model=List[AgentPolicyItem])
 async def get_policy_for_device(
-    device: Device = Depends(get_current_device),
-    db: AsyncSession = Depends(get_db),
+    ctx: DeviceCtx = Depends(get_device_ctx),
+    db: AsyncSession = Depends(get_db),   # lazy — no connection touched on cache hits
 ):
     """
     Called by the agent. Returns all active blocked-URL rules that apply to
     this device — either company-wide ('all') or targeted at this specific device
     or its assigned employee.
     """
-    result = await db.execute(
-        select(BlockedUrl).where(
-            BlockedUrl.company_id == device.company_id,
-            BlockedUrl.is_active  == True,
-            BlockedUrl.is_deleted == False,
-        ).where(
-            # all-company OR this device OR this employee
-            (BlockedUrl.target_type == "all") |
-            (BlockedUrl.device_id   == device.id) |
-            (BlockedUrl.employee_id == device.employee_id),
+    rules, _ = await cache_get(_rules_cache_key(ctx.company_id))
+    if rules is None:
+        rules = await _load_company_rules(db, ctx.company_id)
+        await cache_set(_rules_cache_key(ctx.company_id), rules,
+                        fresh_secs=_RULES_CACHE_SECS, stale_secs=_RULES_CACHE_SECS)
+
+    return [
+        AgentPolicyItem(id=r["id"], pattern=r["pattern"], target_type=r["target_type"])
+        for r in rules
+        if (
+            r["target_type"] == "all"
+            or (r["device_id"] and r["device_id"] == ctx.device_id)
+            or (r["employee_id"] and ctx.employee_id and r["employee_id"] == ctx.employee_id)
         )
-    )
-    rules = result.scalars().all()
-    return [AgentPolicyItem(id=str(r.id), pattern=r.pattern, target_type=r.target_type) for r in rules]
+    ]
 
 
 # ── Admin list ────────────────────────────────────────────────────────────────
@@ -145,6 +177,7 @@ async def create_blocked_url(
     await audit.record(db, admin, "policy.create", "policy", None,
                        {"pattern": rule.pattern, "target_type": rule.target_type})
     await db.commit()
+    await cache_delete(_rules_cache_key(str(admin.company_id)))
     await db.refresh(rule)
     return rule
 
@@ -171,6 +204,7 @@ async def update_blocked_url(
     await audit.record(db, admin, "policy.update", "policy", rule_id,
                        {"pattern": rule.pattern})
     await db.commit()
+    await cache_delete(_rules_cache_key(str(admin.company_id)))
     await db.refresh(rule)
     return rule
 
@@ -195,3 +229,4 @@ async def delete_blocked_url(
     await audit.record(db, admin, "policy.delete", "policy", rule_id,
                        {"pattern": rule.pattern})
     await db.commit()
+    await cache_delete(_rules_cache_key(str(admin.company_id)))

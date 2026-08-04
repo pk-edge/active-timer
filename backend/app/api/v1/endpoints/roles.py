@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, get_current_user, require
 from app.core import permissions as perms_catalog
 from app.core import audit
+from app.core.AdminAuthCache import admin_auth_cache
 from app.db.models import Employee, Role, RolePermission
 from app.schemas.rbac import RoleIn, RoleOut, PermissionItem
 
@@ -51,6 +52,45 @@ def _validate_perms(items: list[PermissionItem]) -> None:
             )
 
 
+def _assert_can_grant(user: Employee, body: RoleIn) -> None:
+    """Anti-escalation: you cannot hand out access you do not hold yourself.
+
+    Super Admins hold every permission and all-scope, so they are unaffected.
+    This closes the path where a holder of roles.create/roles.edit grants
+    themselves (via a role) permissions or data scope beyond their own.
+    """
+    caller_scope = getattr(user, "_scope_type", "own")
+    if body.scope_type == "all" and caller_scope != "all":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an all-scope user can assign a role all-data scope",
+        )
+    if body.scope_type == "groups" and caller_scope not in ("all", "groups"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an all- or group-scoped user can assign a role group scope",
+        )
+    held = getattr(user, "_perms", set())
+    missing = [f"{p.module}.{p.action}" for p in body.permissions
+               if (p.module, p.action) not in held]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cannot grant permissions you do not hold: {', '.join(missing)}",
+        )
+
+
+def _assert_can_touch_system_role(user: Employee, role: Role) -> None:
+    """System roles (Super Admin / Viewer / Talent) may only be modified or
+    deleted by an all-scope user — a scoped role-manager must not be able to
+    rewrite or remove the roles that anchor the permission model."""
+    if role.is_system and getattr(user, "_scope_type", "own") != "all":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System roles can only be changed by an all-scope administrator",
+        )
+
+
 @router.post("", response_model=RoleOut, status_code=status.HTTP_201_CREATED)
 async def create_role(
     body: RoleIn,
@@ -60,6 +100,7 @@ async def create_role(
     if body.scope_type not in ("all", "groups", "own"):
         raise HTTPException(status_code=400, detail="Invalid scope_type")
     _validate_perms(body.permissions)
+    _assert_can_grant(user, body)
 
     dup = await db.execute(
         select(Role).where(Role.company_id == user.company_id, Role.name == body.name)
@@ -75,6 +116,7 @@ async def create_role(
         db.add(RolePermission(role_id=role.id, module=p.module, action=p.action))
     await audit.record(db, user, "role.create", "role", str(role.id), {"name": role.name})
     await db.commit()
+    admin_auth_cache.invalidate_all()   # role permissions changed — drop cached auth
     await db.refresh(role, attribute_names=["permissions"])
     return _role_out(role)
 
@@ -111,10 +153,12 @@ async def update_role(
     db: AsyncSession = Depends(get_db),
 ):
     role = await _get_role(role_id, user, db)
-    # Any role is editable, including system roles (Super Admin / Viewer / Talent).
+    # System roles are editable, but only by an all-scope administrator.
+    _assert_can_touch_system_role(user, role)
     if body.scope_type not in ("all", "groups", "own"):
         raise HTTPException(status_code=400, detail="Invalid scope_type")
     _validate_perms(body.permissions)
+    _assert_can_grant(user, body)
 
     role.name = body.name
     role.description = body.description
@@ -131,6 +175,7 @@ async def update_role(
         "permissions": [f"{p.module}.{p.action}" for p in body.permissions],
     })
     await db.commit()
+    admin_auth_cache.invalidate_all()   # role permissions changed — drop cached auth
     await db.refresh(role, attribute_names=["permissions"])
     return _role_out(role)
 
@@ -142,8 +187,9 @@ async def delete_role(
     db: AsyncSession = Depends(get_db),
 ):
     role = await _get_role(role_id, user, db)
-    # No restriction: any role can be deleted, including system roles. Rather than
-    # block when the role is still assigned, clear it from those employees
+    # Deletable by an all-scope administrator only when it's a system role.
+    _assert_can_touch_system_role(user, role)
+    # Rather than block when the role is still assigned, clear it from those employees
     # (role_id → NULL) in the same transaction so no one is left pointing at a
     # deleted role. Cleared users fall back to their legacy `role` perms (admins
     # keep full access) or to no permissions until an admin assigns a new role.
@@ -155,3 +201,4 @@ async def delete_role(
     await audit.record(db, user, "role.delete", "role", role_id,
                        {"name": role.name, "unassigned_users": unassigned})
     await db.commit()
+    admin_auth_cache.invalidate_all()   # role permissions changed — drop cached auth

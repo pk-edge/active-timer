@@ -6,9 +6,9 @@ from sqlalchemy import select, delete
 
 from app.api.deps import get_db, get_current_user
 from app.core import audit
-from app.core.device_auth_cache import device_auth_cache
+from app.core.device_auth_cache import invalidate_device
 from app.core.provisioning import link_or_provision_employee
-from app.core.rate_limit import SlidingWindowLimiter
+from app.core.rate_limit import DistributedLimiter
 from app.core.security import (
     create_device_token, create_admin_token, hash_password_async, verify_password_async,
 )
@@ -19,11 +19,19 @@ from app.schemas.rbac import MeOut, PermissionItem, RegisterRequest, RegisterRes
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-# Brute-force protection for the two unauthenticated credential endpoints.
+# Brute-force protection for the unauthenticated credential endpoints.
+# Redis-backed so the budget is shared across replicas (falls back to
+# per-replica in-process limiting when Redis is unavailable).
 # Counts FAILED logins per (ip, email): 10 failures / 15 min → 429.
-_login_limiter    = SlidingWindowLimiter(max_hits=10, window_secs=15 * 60)
+_login_limiter    = DistributedLimiter("login", max_hits=10, window_secs=15 * 60)
 # Public self-registration: 5 submissions per IP per hour.
-_register_limiter = SlidingWindowLimiter(max_hits=5, window_secs=60 * 60)
+_register_limiter = DistributedLimiter("register", max_hits=5, window_secs=60 * 60)
+# Enrollment-token brute force: counts only FAILED enrollments (invalid token)
+# per IP, so a mass rollout of hundreds of agents behind one NAT is unaffected.
+# The budget is deliberately high: even a batch of misconfigured installers
+# behind one office NAT shouldn't lock out the fixed ones, while 100 guesses /
+# 15 min is still hopeless against a 48-hex-char enrollment token.
+_enroll_limiter   = DistributedLimiter("enroll", max_hits=100, window_secs=15 * 60)
 
 
 def _client_ip(request: Request) -> str:
@@ -31,12 +39,18 @@ def _client_ip(request: Request) -> str:
 
 
 @router.post("/enroll", response_model=EnrollResponse)
-async def enroll_device(body: EnrollRequest, db: AsyncSession = Depends(get_db)):
+async def enroll_device(body: EnrollRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    ip = _client_ip(request)
+    if await _enroll_limiter.blocked(ip):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many failed enrollment attempts. Try again later.")
+
     result = await db.execute(
         select(Company).where(Company.enrollment_token == body.enrollment_token)
     )
     company = result.scalar_one_or_none()
     if not company:
+        await _enroll_limiter.hit(ip)   # only invalid-token attempts count
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid enrollment token")
 
     # Upsert by (company_id, hostname).
@@ -85,7 +99,7 @@ async def enroll_device(body: EnrollRequest, db: AsyncSession = Depends(get_db))
 
     # Re-enrollment rotates jwt_token. Drop any cached auth entry for this device
     # so a rotated-out token can't keep validating from cache until its TTL.
-    device_auth_cache.invalidate_device(str(device.id))
+    await invalidate_device(str(device.id))
 
     log.info("Device enrolled: %s (%s)", body.hostname, device.id)
     return EnrollResponse(device_id=str(device.id), jwt_token=token)
@@ -95,10 +109,10 @@ async def enroll_device(body: EnrollRequest, db: AsyncSession = Depends(get_db))
 async def register(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Public self-registration. Account is pending until an admin approves it."""
     ip = _client_ip(request)
-    if _register_limiter.blocked(ip):
+    if await _register_limiter.blocked(ip):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                             detail="Too many registration attempts. Try again later.")
-    _register_limiter.hit(ip)
+    await _register_limiter.hit(ip)
 
     # Attach to the single company (single-company deployment).
     company_result = await db.execute(select(Company).limit(1))
@@ -160,7 +174,7 @@ async def register(body: RegisterRequest, request: Request, db: AsyncSession = D
 @router.post("/admin/login", response_model=AdminLoginResponse)
 async def admin_login(body: AdminLoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
     limiter_key = f"{_client_ip(request)}:{body.email.lower()}"
-    if _login_limiter.blocked(limiter_key):
+    if await _login_limiter.blocked(limiter_key):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                             detail="Too many failed logins. Try again in a few minutes.")
 
@@ -179,9 +193,9 @@ async def admin_login(body: AdminLoginRequest, request: Request, db: AsyncSessio
         or not employee.password_hash
         or not await verify_password_async(body.password, employee.password_hash)
     ):
-        _login_limiter.hit(limiter_key)   # only failures count toward the block
+        await _login_limiter.hit(limiter_key)   # only failures count toward the block
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    _login_limiter.reset(limiter_key)
+    await _login_limiter.reset(limiter_key)
 
     # Step 2 — approval gate (password was correct but account is still pending).
     if not getattr(employee, "is_approved", True):

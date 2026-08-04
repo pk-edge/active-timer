@@ -107,6 +107,7 @@ export interface User {
   role_id:      string | null;
   role_name:    string | null;
   scope_type:   string | null;
+  user_kind:    "team" | "talent";
   is_active:    boolean;
   is_approved:  boolean;
   group_ids:    string[];
@@ -183,6 +184,10 @@ export interface GroupMember {
   employee_id: string | null;
   device_id:   string | null;
   label:       string;
+  group_id:    string | null;     // populated only when fetched with include_subgroups=true
+  group_name:  string | null;
+  path:        string | null;
+  direct:      boolean | null;
 }
 
 export interface GroupDetail extends Group {
@@ -323,6 +328,13 @@ export interface TechSummary {
   top_category:       string | null;
   top_category_color: string;
   top_app:            string | null;
+}
+
+export interface TechFilterUser {
+  id:        string;
+  name:      string;
+  email:     string;
+  is_active: boolean;
 }
 
 export interface CategoryAllocationItem {
