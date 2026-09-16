@@ -602,6 +602,9 @@ export default function DevicesPage() {
   const canArchive  = can("devices", "archive");
   const canDelete   = can("devices", "delete");
   const canAssign   = can("devices", "assign") && can("users", "view");
+  // Every report here is produced by /v1/reports/*, which the API gates on
+  // reports:view — hide the triggers rather than let them 403.
+  const canReports  = can("reports", "view");
 
   const { addJob, activateJob, failJob } = useReportJobs();
 
@@ -663,6 +666,15 @@ export default function DevicesPage() {
 
     // 2. POST in background — swap temp ID for real one on response
     createReportJob({ type: "device_full", device_id: id, since, until: today })
+      .then(job => activateJob(tempId, job.job_id, job.status === "done" ? job.result ?? undefined : undefined))
+      .catch(e  => failJob(tempId, e instanceof Error ? e.message : String(e)));
+  }
+
+  function handleRosterExport() {
+    const tempId = `tmp-roster-${Date.now()}`;
+    addJob({ job_id: tempId, label: "Registered devices", type: "device_roster", format: "xlsx" });
+
+    createReportJob({ type: "device_roster" })
       .then(job => activateJob(tempId, job.job_id, job.status === "done" ? job.result ?? undefined : undefined))
       .catch(e  => failJob(tempId, e instanceof Error ? e.message : String(e)));
   }
@@ -747,7 +759,7 @@ export default function DevicesPage() {
     selectedIds,
     onToggleSelect: toggleSelect,
     onToggleAll: toggleAll,
-    onExport: handleDeviceExport,
+    onExport: canReports ? handleDeviceExport : undefined,
   };
 
   return (
@@ -760,13 +772,26 @@ export default function DevicesPage() {
         <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">All Devices</h1>
 
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowFleetModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50 transition"
-          >
-            <Download size={14} />
-            Fleet Report
-          </button>
+          {canReports && (
+            <>
+              <button
+                onClick={handleRosterExport}
+                title="Export every registered device — hostname, user, platform and status — to Excel"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-brand-200 bg-brand-50 text-brand-700 hover:border-brand-300 hover:bg-brand-100 transition"
+              >
+                <FileSpreadsheet size={14} />
+                Devices Report
+              </button>
+
+              <button
+                onClick={() => setShowFleetModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-gray-200 bg-white text-gray-700 hover:border-gray-300 hover:bg-gray-50 transition"
+              >
+                <Download size={14} />
+                Fleet Report
+              </button>
+            </>
+          )}
 
           {canArchive && (
             <button

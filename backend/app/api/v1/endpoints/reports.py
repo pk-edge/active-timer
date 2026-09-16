@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -342,16 +342,39 @@ class DeviceFullReportOut(BaseModel):
     top_urls: List[UrlVisitOut]
 
 
+# ── Device roster schemas (registered-device inventory, no activity metrics) ──
+
+class DeviceRosterRowOut(BaseModel):
+    hostname: str
+    platform: str                    # normalized label: Windows / macOS / Linux / Other
+    raw_platform: str                # as reported by the agent: win32 / darwin / …
+    employee_name: Optional[str]
+    status: str                      # online | offline | archived
+    agent_version: Optional[str]
+    enrolled_at: str
+    last_seen: Optional[str]
+
+class DeviceRosterReportOut(BaseModel):
+    generated_at: str
+    total_devices: int
+    online_devices: int
+    offline_devices: int
+    archived_devices: int
+    unassigned_devices: int
+    platform_breakdown: List[PlatformCount]
+    devices: List[DeviceRosterRowOut]
+
+
 # ── Report job queue (Redis-backed background jobs) ───────────────────────────
 
 _JOB_TTL = 1800  # 30 minutes
 
 
 class ReportJobRequest(BaseModel):
-    type: str                   # "device_full" | "fleet"
+    type: str                          # "device_full" | "fleet" | "device_roster"
     device_id: Optional[str] = None
-    since: str                  # YYYY-MM-DD
-    until: str                  # YYYY-MM-DD (inclusive)
+    since: Optional[str] = None        # YYYY-MM-DD — required except for device_roster
+    until: Optional[str] = None        # YYYY-MM-DD (inclusive) — same
 
 
 class ReportJobOut(BaseModel):
@@ -667,6 +690,127 @@ async def _run_fleet_job(
         })
 
 
+# ── Device roster worker ──────────────────────────────────────────────────────
+
+# The agent reports sys.platform, so Windows arrives as 'win32' and macOS as
+# 'darwin'. Anything not listed rolls up into "Other" rather than leaking a raw
+# platform string into the report's grouping.
+_PLATFORM_LABELS = {
+    "win32": "Windows", "windows": "Windows", "cygwin": "Windows",
+    "darwin": "macOS", "macos": "macOS",
+    "linux": "Linux", "linux2": "Linux",
+}
+
+
+def _platform_label(raw: str | None) -> str:
+    return _PLATFORM_LABELS.get((raw or "").strip().lower(), "Other")
+
+
+async def _fetch_roster_rows(db: AsyncSession, company_id: str, device_ids: list[str] | None):
+    """Every registered (non-deleted) device in scope, archived ones included.
+
+    `device_ids=None` means company-wide (scope 'all'); a list restricts to the
+    caller's visible devices as resolved by app/core/scoping.py.
+    """
+    scope = "" if device_ids is None else " AND d.id = ANY(:vids)"
+    params: dict = {"cid": company_id, "cutoff": ONLINE_CUTOFF_SECS}
+    if device_ids is not None:
+        params["vids"] = device_ids
+
+    return (await db.execute(text(f"""
+        SELECT d.hostname,
+               d.platform,
+               d.agent_version,
+               d.enrolled_at,
+               d.last_seen,
+               d.is_archived,
+               COALESCE(
+                   d.is_archived = FALSE
+                   AND d.last_seen >= NOW() - (:cutoff * INTERVAL '1 second'),
+                   FALSE
+               ) AS is_online,
+               e.name AS employee_name
+        FROM   devices d
+        LEFT JOIN employees e ON e.id = d.employee_id
+        WHERE  d.company_id = :cid
+          AND  d.is_deleted = FALSE{scope}
+        ORDER  BY d.is_archived, e.name NULLS LAST, d.hostname
+    """), params)).fetchall()
+
+
+def _roster_result(rows) -> dict:
+    """Shape roster rows into the report payload: inventory + counts, no activity."""
+    devices: list[dict] = []
+    platform_counts: dict[str, int] = {}
+    online = offline = archived = unassigned = 0
+
+    for r in rows:
+        label = _platform_label(r.platform)
+        platform_counts[label] = platform_counts.get(label, 0) + 1
+
+        if r.is_archived:
+            row_status = "archived"
+            archived += 1
+        elif r.is_online:
+            row_status = "online"
+            online += 1
+        else:
+            row_status = "offline"
+            offline += 1
+
+        if not r.employee_name:
+            unassigned += 1
+
+        devices.append({
+            "hostname":      r.hostname,
+            "platform":      label,
+            "raw_platform":  r.platform or "",
+            "employee_name": r.employee_name,
+            "status":        row_status,
+            "agent_version": r.agent_version,
+            "enrolled_at":   r.enrolled_at.isoformat() if r.enrolled_at else "",
+            "last_seen":     r.last_seen.isoformat() if r.last_seen else None,
+        })
+
+    return {
+        "generated_at":       datetime.now(timezone.utc).isoformat(),
+        "total_devices":      len(devices),
+        "online_devices":     online,
+        "offline_devices":    offline,
+        "archived_devices":   archived,
+        "unassigned_devices": unassigned,
+        "platform_breakdown": [
+            {"platform": p, "count": c}
+            for p, c in sorted(platform_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+        "devices": devices,
+    }
+
+
+async def _run_device_roster_job(
+    job_id: str, company_id: str, device_ids: list[str] | None,
+) -> None:
+    """Registered-device inventory snapshot. One cheap query — no activity_events."""
+
+    async def _upd(st: str, prog: int, error: str | None = None, result: dict | None = None):
+        await _job_set(job_id, {
+            "job_id": job_id, "type": "device_roster",
+            "status": st, "progress": prog, "error": error, "result": result,
+        })
+
+    try:
+        await _upd("running", 10)
+        async with AsyncSessionLocal() as db:
+            rows = await _fetch_roster_rows(db, company_id, device_ids)
+        await _upd("done", 100, result=_roster_result(rows))
+
+    except Exception as exc:  # noqa: BLE001
+        await _job_set(job_id, {
+            "job_id": job_id, "type": "device_roster",
+            "status": "failed", "progress": 0, "error": str(exc), "result": None,
+        })
+
+
 # ── Job endpoints ─────────────────────────────────────────────────────────────
 
 @router.post("/jobs", response_model=ReportJobOut, status_code=202)
@@ -679,12 +823,23 @@ async def create_report_job(
     """Queue a report job. Returns job_id immediately; poll GET /jobs/{id} for progress.
     Falls back to running synchronously when Redis is unavailable — the response will
     contain status='done' and the full result already populated."""
-    if req.type not in ("device_full", "fleet"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="type must be 'device_full' or 'fleet'")
+    if req.type not in ("device_full", "fleet", "device_roster"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="type must be 'device_full', 'fleet' or 'device_roster'",
+        )
 
-    _parse_date(req.since, "since")   # validate dates early
-    _parse_date(req.until, "until")
     cid = str(admin.company_id)
+
+    # device_roster is a point-in-time inventory snapshot — it takes no date range.
+    if req.type != "device_roster":
+        if not req.since or not req.until:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"since and until are required for {req.type}",
+            )
+        _parse_date(req.since, "since")   # validate dates early
+        _parse_date(req.until, "until")
 
     device_id: str | None = None
     if req.type == "device_full":
@@ -692,6 +847,13 @@ async def create_report_job(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="device_id required for device_full")
         device = await _get_visible_device(req.device_id, admin, db)
         device_id = str(device.id)
+
+    # Resolve the caller's device visibility here, while the request session and
+    # `admin` are alive — the background worker has neither.
+    roster_ids: list[str] | None = None
+    if req.type == "device_roster":
+        ids = await visible_device_ids(admin, db)
+        roster_ids = None if ids is ALL else [str(i) for i in ids]
 
     job_id = str(uuid.uuid4())
 
@@ -704,6 +866,8 @@ async def create_report_job(
         await _job_set(job_id, initial)
         if req.type == "device_full":
             background_tasks.add_task(_run_device_full_job, job_id, device_id, cid, req.since, req.until)
+        elif req.type == "device_roster":
+            background_tasks.add_task(_run_device_roster_job, job_id, cid, roster_ids)
         else:
             background_tasks.add_task(_run_fleet_job, job_id, cid, req.since, req.until)
         return initial
@@ -711,7 +875,10 @@ async def create_report_job(
     # ── Redis unavailable: run synchronously, return completed job inline ─────
     # Mirrors the background workers but uses the request's db session directly.
     try:
-        if req.type == "device_full":
+        if req.type == "device_roster":
+            result = _roster_result(await _fetch_roster_rows(db, cid, roster_ids))
+
+        elif req.type == "device_full":
             since_dt = date.fromisoformat(req.since)
             until_dt = date.fromisoformat(req.until)
             did = device_id

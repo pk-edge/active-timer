@@ -7,7 +7,7 @@ import {
   Monitor, BarChart2, Settings, LogOut, ScrollText,
   UserCog, FolderKanban, Shield, DownloadCloud, ClipboardList, Home,
   Cpu, Tag, Globe, ShieldAlert, X, Paperclip,
-  CheckCircle2, AlertCircle, FileDown,
+  CheckCircle2, AlertCircle, FileDown, Trash2,
 } from "lucide-react";
 import clsx from "clsx";
 import { adminLogout } from "@/lib/api";
@@ -85,7 +85,7 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
   const path = usePathname();
   const { me, can } = useUser();
   const [confirmSignOut, setConfirmSignOut] = useState(false);
-  const { jobs, dismiss } = useReportJobs();
+  const { jobs, dismiss, reopen } = useReportJobs();
 
   return (
     <>
@@ -167,7 +167,9 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
             <p className="px-1 mb-2 text-[10px] font-semibold uppercase tracking-widest text-white/50 flex items-center gap-1.5">
               <FileDown size={10} /> Downloads
             </p>
-            <div className="space-y-2">
+            {/* Finished entries persist until dismissed, so cap the tray and let
+                it scroll rather than pushing nav items off-screen. */}
+            <div className="space-y-2 max-h-52 overflow-y-auto pr-0.5">
               {jobs.map(job => {
                 const isActive = job.status === "pending" || job.status === "running";
                 const isDone   = job.status === "done";
@@ -208,11 +210,26 @@ export default function Sidebar({ open = false, onClose }: SidebarProps) {
                         <div className="w-full rounded-full h-1.5 overflow-hidden" style={{ background: "rgba(52,211,153,0.2)" }}>
                           <div className="h-full w-full rounded-full" style={{ background: "linear-gradient(90deg, #60a5fa 0%, #34d399 100%)" }} />
                         </div>
-                        <div className="flex items-center justify-between mt-1.5">
-                          <span className="text-[10px] text-emerald-400">Downloaded ✓</span>
-                          <button onClick={() => dismiss(job.job_id)} className="text-white/30 hover:text-white/70 transition">
-                            <X size={10} />
-                          </button>
+                        <div className="flex items-center justify-between gap-2 mt-1.5">
+                          <span className="text-[10px] text-emerald-400 shrink-0">Downloaded ✓</span>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              onClick={() => reopen(job.job_id)}
+                              title="Download this report again"
+                              aria-label={`Open ${job.label} again`}
+                              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-white/70 hover:text-white hover:bg-white/15 transition"
+                            >
+                              <FileDown size={10} /> Open
+                            </button>
+                            <button
+                              onClick={() => dismiss(job.job_id)}
+                              title="Remove from downloads"
+                              aria-label={`Delete ${job.label} from downloads`}
+                              className="rounded-md p-1 text-white/40 hover:text-red-300 hover:bg-white/15 transition"
+                            >
+                              <Trash2 size={10} />
+                            </button>
+                          </div>
                         </div>
                       </>
                     )}
