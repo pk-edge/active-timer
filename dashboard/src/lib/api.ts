@@ -638,6 +638,27 @@ export interface DeviceFullReport {
   top_urls: { url: string; visits: number }[];
 }
 
+/** Registered-device inventory snapshot — no activity metrics, no date range. */
+export interface DeviceRosterReport {
+  generated_at: string;
+  total_devices: number;
+  online_devices: number;
+  offline_devices: number;
+  archived_devices: number;
+  unassigned_devices: number;
+  platform_breakdown: { platform: string; count: number }[];
+  devices: {
+    hostname: string;
+    platform: string;
+    raw_platform: string;
+    employee_name: string | null;
+    status: "online" | "offline" | "archived";
+    agent_version: string | null;
+    enrolled_at: string;
+    last_seen: string | null;
+  }[];
+}
+
 export const getFleetReport = (since: string, until: string) =>
   request<FleetReport>(`/v1/reports/devices/fleet?since=${since}&until=${until}`);
 
@@ -652,14 +673,15 @@ export interface ReportJob {
   status: "pending" | "running" | "done" | "failed";
   progress: number;
   error: string | null;
-  result: FleetReport | DeviceFullReport | null;
+  result: FleetReport | DeviceFullReport | DeviceRosterReport | null;
 }
 
 export const createReportJob = (params: {
-  type: "device_full" | "fleet";
+  type: "device_full" | "fleet" | "device_roster";
   device_id?: string;
-  since: string;
-  until: string;
+  /** Required for device_full and fleet; device_roster is a point-in-time snapshot. */
+  since?: string;
+  until?: string;
 }) =>
   request<ReportJob>("/v1/reports/jobs", {
     method: "POST",
