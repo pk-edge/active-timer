@@ -8,6 +8,7 @@ import type {
   WebsiteListOut, WebsiteDetailOut,
   AppUsageListOut, AppUsageDetailOut,
   CategoryUsageListOut, CategoryUsageDetailOut,
+  ImpersonationCandidate,
 } from "@/types";
 
 export const BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -77,7 +78,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (res.status === 401) {
     if (typeof window !== "undefined") {
+      // An impersonation session can die mid-flight (Exit elsewhere, 30-min
+      // expiry, target deactivated). The admin's own token was never stored —
+      // exit re-mints it server-side — so they genuinely have to sign in again.
+      // Carry a reason across the redirect so /login can explain that instead of
+      // bouncing them with no idea why.
+      const wasImpersonating = sessionStorage.getItem(IMPERSONATION_FLAG) === "1";
+      clearImpersonationFlag();
       localStorage.removeItem("tt_token");
+      if (wasImpersonating) {
+        sessionStorage.setItem(SESSION_ENDED_FLAG, "1");
+      }
       window.location.href = "/login";
     }
     throw new Error("Unauthorized");
@@ -121,6 +132,66 @@ export function isAuthenticated(): boolean {
 
 export function loginWithToken(token: string) {
   localStorage.setItem("tt_token", token);
+}
+
+// ── Super-Admin impersonation ────────────────────────────────────────────────
+//
+// There is ONE token slot. Starting a session overwrites it with the
+// impersonation token and the admin's own token is deliberately NOT kept
+// anywhere — /v1/auth/impersonate/exit re-mints a fresh one server-side after
+// re-verifying the admin. That means nothing privileged sits in the browser
+// next to the session, and it also means a dead impersonation token cannot be
+// recovered from: hence the sign-in-again handling in request() above.
+
+const IMPERSONATION_FLAG  = "tt_impersonating";
+const SESSION_ENDED_FLAG  = "tt_impersonation_ended";
+
+function clearImpersonationFlag() {
+  try { sessionStorage.removeItem(IMPERSONATION_FLAG); } catch { /* private mode */ }
+}
+
+/** True if /login should explain that an impersonation session ended. Reading
+ *  it clears it, so the notice shows once. */
+export function consumeImpersonationEndedNotice(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const v = sessionStorage.getItem(SESSION_ENDED_FLAG) === "1";
+    sessionStorage.removeItem(SESSION_ENDED_FLAG);
+    return v;
+  } catch {
+    return false;
+  }
+}
+
+export const getImpersonatableUsers = (search?: string) =>
+  request<ImpersonationCandidate[]>(
+    `/v1/users/impersonatable${search ? `?search=${encodeURIComponent(search)}` : ""}`,
+  );
+
+export async function startImpersonation(userId: string) {
+  const data = await request<{
+    access_token: string;
+    expires_in: number;
+    target: { id: string; name: string; email: string; role_name: string | null };
+  }>("/v1/auth/impersonate", {
+    method: "POST",
+    body: JSON.stringify({ user_id: userId }),
+  });
+  // Only swap the token once the server has actually issued one — a failed
+  // start must leave the admin's session completely untouched.
+  localStorage.setItem("tt_token", data.access_token);
+  try { sessionStorage.setItem(IMPERSONATION_FLAG, "1"); } catch { /* private mode */ }
+  return data;
+}
+
+export async function exitImpersonation() {
+  const data = await request<{ access_token: string; role: string; name: string }>(
+    "/v1/auth/impersonate/exit",
+    { method: "POST" },
+  );
+  localStorage.setItem("tt_token", data.access_token);
+  clearImpersonationFlag();
+  return data;
 }
 
 export async function setPassword(password: string): Promise<void> {

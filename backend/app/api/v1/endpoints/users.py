@@ -13,16 +13,19 @@ from sqlalchemy import select, func, delete, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, require
+from app.api.deps import get_db, require, require_super_admin, forbid_impersonation
 from app.core import audit
 from app.core.AdminAuthCache import admin_auth_cache
 from app.core.config import get_settings
 from app.core.group_tree import descendant_group_ids
+from app.core.impersonation import is_super_admin, is_impersonating
 from app.core.ingest_queue import ingest_queue
 from app.core.provisioning import is_talent_role
 from app.core.security import hash_password_async
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
-from app.schemas.rbac import UserIn, UserPatch, UserOut, ApproveRequest
+from app.schemas.rbac import (
+    UserIn, UserPatch, UserOut, ApproveRequest, ImpersonationCandidateOut,
+)
 
 router = APIRouter()
 settings = get_settings()
@@ -102,6 +105,58 @@ async def _set_group_access(
     )).scalars().all()
     for guid in valid:
         db.add(EmployeeGroupAccess(employee_id=emp_id, group_id=guid))
+
+
+@router.get("/impersonatable", response_model=list[ImpersonationCandidateOut])
+async def list_impersonatable_users(
+    search: str | None = Query(default=None),
+    limit:  int = Query(default=50, ge=1, le=200),
+    admin: Employee = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Candidates for Super-Admin impersonation.
+
+    A dedicated endpoint rather than a flag on GET /v1/users, for two reasons:
+    that route is gated on `users:view` (which ordinary admins hold, and this
+    list must be invisible to them), and it returns deactivated accounts and has
+    no result cap. Eligibility here mirrors POST /v1/auth/impersonate exactly —
+    same company, active, not deleted, not the caller, and never another Super
+    Admin — so the picker can never offer a target the start endpoint will reject.
+
+    NOTE: this route must stay declared BEFORE `GET /{user_id}` or FastAPI will
+    match "impersonatable" as a user id.
+    """
+    q = (
+        select(Employee).options(selectinload(Employee.role_obj))
+        .where(
+            Employee.company_id  == admin.company_id,
+            Employee.id          != admin.id,
+            Employee.is_deleted  == False,   # noqa: E712
+            Employee.is_active   == True,    # noqa: E712
+            Employee.is_approved == True,    # noqa: E712
+        )
+        .order_by(Employee.name.asc())
+    )
+    if search:
+        like = f"%{search.lower()}%"
+        q = q.where(func.lower(Employee.name).like(like) | func.lower(Employee.email).like(like))
+
+    # Over-fetch modestly so that filtering out Super Admins below can't leave the
+    # caller short of `limit` results.
+    rows = (await db.execute(q.limit(limit * 2))).scalars().all()
+
+    out: list[ImpersonationCandidateOut] = []
+    for emp in rows:
+        if is_super_admin(emp):
+            continue
+        out.append(ImpersonationCandidateOut(
+            id=str(emp.id), name=emp.name, email=emp.email,
+            role_name=emp.role_obj.name if emp.role_obj else emp.role,
+            user_kind="talent" if is_talent_role(emp.role_obj) else "team",
+        ))
+        if len(out) >= limit:
+            break
+    return out
 
 
 @router.get("", response_model=list[UserOut])
@@ -557,6 +612,19 @@ async def update_user(
     user: Employee = Depends(require("users", "edit")),
     db: AsyncSession = Depends(get_db),
 ):
+    # Impersonation must never become account takeover or privilege escalation.
+    # This endpoint can set a password hash and reassign a role, so a session
+    # wearing someone else's identity is barred from both (and from flipping
+    # activation) even when that identity legitimately holds users:edit.
+    if is_impersonating(user):
+        blocked = [f for f in ("password", "role_id", "is_active")
+                   if getattr(body, f) is not None]
+        if blocked:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot change {', '.join(blocked)} while impersonating another user",
+            )
+
     emp = await _get_user(user_id, user.company_id, db)
     changed: dict = {}
     final_role = emp.role_obj

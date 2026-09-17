@@ -16,6 +16,7 @@ from sqlalchemy.orm import joinedload
 
 import hashlib
 
+from app.core import impersonation
 from app.core.AdminAuthCache import admin_auth_cache
 from app.core.RedisCache import cache_get, cache_set
 from app.core.security import decode_token
@@ -209,44 +210,8 @@ def _has_permission(perms: set[tuple[str, str]], module: str, action: str) -> bo
     return (module, action) in perms
 
 
-async def get_current_user(
-    creds: HTTPAuthorizationCredentials = Depends(bearer),
-    db: AsyncSession = Depends(get_db),
-) -> Employee:
-    """Resolve the authenticated dashboard user and attach effective permissions.
-
-    Sets two transient attributes on the returned Employee:
-      _perms      : set[(module, action)] the user is allowed
-      _scope_type : 'all' | 'groups' | 'own'
-    """
-    try:
-        payload = decode_token(creds.credentials)
-        if payload.get("type") != "admin":
-            raise ValueError
-        user_uuid = uuid.UUID(payload["sub"])
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
-
-    # Warm path: the detached user (perms already attached) cached for a short
-    # TTL — a page load fires several parallel calls with the same token, and
-    # this removes their repeated joined SELECT. JWT signature/expiry were
-    # already verified above; user/role mutations call invalidate_all().
-    cached = admin_auth_cache.get(creds.credentials)
-    if cached is not None:
-        return cached
-    seen_epoch = admin_auth_cache.epoch()
-
-    # One joined query instead of three round-trips (employee → role → permissions);
-    # this dependency runs on every authenticated request, so round-trips dominate.
-    result = await db.execute(
-        select(Employee)
-        .options(joinedload(Employee.role_obj).joinedload(Role.permissions))
-        .where(Employee.id == user_uuid, Employee.is_active == True)
-    )
-    user = result.unique().scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
-
+def _attach_effective_perms(user: Employee) -> None:
+    """Attach `_perms` and `_scope_type` to a freshly loaded Employee."""
     if user.role_obj:
         user._scope_type = user.role_obj.scope_type
         # System roles with scope_type="all" (Super Admin) always get full access —
@@ -262,6 +227,100 @@ async def get_current_user(
     else:
         user._perms = set()
         user._scope_type = "own"
+
+
+async def _load_active_employee(db: AsyncSession, user_uuid: uuid.UUID) -> Optional[Employee]:
+    """One joined query instead of three round-trips (employee → role → permissions);
+    this runs on every authenticated request, so round-trips dominate."""
+    result = await db.execute(
+        select(Employee)
+        .options(joinedload(Employee.role_obj).joinedload(Role.permissions))
+        .where(Employee.id == user_uuid, Employee.is_active == True)
+    )
+    return result.unique().scalar_one_or_none()
+
+
+async def _resolve_impersonated_user(
+    payload: dict, target_uuid: uuid.UUID, db: AsyncSession,
+) -> Employee:
+    """Resolve the TARGET of a Super-Admin impersonation session.
+
+    Deliberately bypasses admin_auth_cache. That cache is keyed by the raw token
+    string with a 15s TTL and only supports invalidate_all(), so a token revoked
+    by "Exit" would keep authenticating for up to 15 more seconds on every
+    replica. An impersonated session is rare and human-driven, so paying one
+    query per request to make revocation immediate is the right trade.
+    """
+    jti       = payload.get("jti")
+    act_by    = payload.get("act_by")
+    act_email = payload.get("act_email")
+    if not jti or not act_by:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid impersonation token",
+        )
+
+    # Fails closed: an unreachable Redis means we cannot prove the session is
+    # still live, so we refuse it.
+    if not await impersonation.is_session_active(jti):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Impersonation session has ended",
+        )
+
+    user = await _load_active_employee(db, target_uuid)
+    if not user:
+        # Target was deactivated or deleted mid-session.
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    _attach_effective_perms(user)
+    # Carried into every audit row written during this session (see core/audit.py)
+    # and surfaced on /v1/auth/me so the UI can render the banner.
+    user._impersonator_id    = act_by
+    user._impersonator_email = act_email
+    user._imp_jti            = jti
+    db.expunge(user)
+    return user
+
+
+async def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(bearer),
+    db: AsyncSession = Depends(get_db),
+) -> Employee:
+    """Resolve the authenticated dashboard user and attach effective permissions.
+
+    Sets two transient attributes on the returned Employee:
+      _perms      : set[(module, action)] the user is allowed
+      _scope_type : 'all' | 'groups' | 'own'
+
+    During a Super-Admin impersonation session the returned Employee is the
+    TARGET (so permissions and data scope are genuinely theirs), with the real
+    admin recorded in `_impersonator_id` / `_impersonator_email`.
+    """
+    try:
+        payload = decode_token(creds.credentials)
+        if payload.get("type") != "admin":
+            raise ValueError
+        user_uuid = uuid.UUID(payload["sub"])
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
+
+    if payload.get("imp"):
+        return await _resolve_impersonated_user(payload, user_uuid, db)
+
+    # Warm path: the detached user (perms already attached) cached for a short
+    # TTL — a page load fires several parallel calls with the same token, and
+    # this removes their repeated joined SELECT. JWT signature/expiry were
+    # already verified above; user/role mutations call invalidate_all().
+    cached = admin_auth_cache.get(creds.credentials)
+    if cached is not None:
+        return cached
+    seen_epoch = admin_auth_cache.epoch()
+
+    user = await _load_active_employee(db, user_uuid)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    _attach_effective_perms(user)
 
     # Detach from the session: a later db.rollback() anywhere in the request
     # (e.g. a cache-read helper swallowing an error) expires every attached
@@ -289,3 +348,33 @@ def require(module: str, action: str):
             )
         return user
     return _dep
+
+
+async def require_super_admin(user: Employee = Depends(get_current_user)) -> Employee:
+    """403 unless the caller is a real Super Admin acting as themselves.
+
+    Guards the impersonation endpoints. This is a structural check rather than a
+    grantable permission (see app/core/impersonation.py) — and it also refuses an
+    already-impersonated session, which blocks impersonation chaining even if a
+    Super Admin were somehow made impersonatable.
+
+    The 403 detail is deliberately generic: a non-Super-Admin should not be able
+    to discover that impersonation exists.
+    """
+    if impersonation.is_impersonating(user) or not impersonation.is_super_admin(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not found")
+    return user
+
+
+async def forbid_impersonation(user: Employee = Depends(get_current_user)) -> Employee:
+    """Block an endpoint from running inside an impersonated session.
+
+    Applied to credential/identity endpoints: impersonation is for seeing and
+    operating the app as someone else, never for taking over their account.
+    """
+    if impersonation.is_impersonating(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action is not allowed while impersonating another user",
+        )
+    return user

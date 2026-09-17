@@ -61,6 +61,12 @@ def _row_from(actor, action, target_type, target_id, metadata) -> dict[str, Any]
         "target_type": target_type,
         "target_id": target_id,
         "audit_metadata": metadata,
+        # Stamped for EVERY action taken inside a Super-Admin impersonation
+        # session. `app/api/deps.py` attaches these to the impersonated user, so
+        # every existing audit.record() call site inherits the attribution with
+        # no change of its own.
+        "impersonator_id": getattr(actor, "_impersonator_id", None),
+        "impersonator_email": getattr(actor, "_impersonator_email", None),
     }
 
 

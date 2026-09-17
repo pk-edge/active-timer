@@ -25,6 +25,16 @@ feature lives on one page but calls another module's API, gate it on the module
 that owns the API (report buttons on the Devices page check `reports:view`).
 See "RBAC" in `docs/CODEBASE_GUIDE.md` for the full rule.
 
+**The one deliberate exception: Super-Admin impersonation.** It has NO
+`(module, action)` pair, on purpose. A grantable permission is a permission
+someone can hand out, and "act as any employee" must not be delegable — so it is
+gated structurally instead (`role_obj.scope_type == "all" and role_obj.is_system`,
+via `require_super_admin` in `app/api/deps.py`). Because there is no pair, nothing
+about the feature appears in the Roles UI, and `/v1/auth/me` exposes a
+`can_impersonate` boolean so the dashboard can hide the entry entirely rather
+than render something that 403s. Do not "fix" this by adding a permission pair —
+see `app/core/impersonation.py` for the reasoning.
+
 ## Git versioning — Conventional Commits + Semantic Versioning (REQUIRED)
 
 Every commit in this repo MUST be a Conventional Commit, enforced by a `commit-msg` Husky hook

@@ -82,6 +82,11 @@ export interface Permission { module: string; action: string; }
 
 export interface ModuleDef { key: string; label: string; actions: string[]; }
 
+export interface Impersonator {
+  id:    string;
+  email: string | null;
+}
+
 export interface Me {
   id:          string;
   name:        string;
@@ -89,6 +94,21 @@ export interface Me {
   role_name:   string | null;
   scope_type:  string;
   permissions: Permission[];
+  /** True only for a Super Admin acting as themselves. This is the ONLY signal
+   *  the dashboard gets that impersonation exists — it is false for everyone
+   *  else, so the menu never renders for them. */
+  can_impersonate?: boolean;
+  impersonating?:   boolean;
+  impersonator?:    Impersonator | null;
+}
+
+/** A candidate returned by GET /v1/users/impersonatable. */
+export interface ImpersonationCandidate {
+  id:        string;
+  name:      string;
+  email:     string;
+  role_name: string | null;
+  user_kind: "team" | "talent";
 }
 
 export interface Role {

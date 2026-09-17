@@ -48,6 +48,7 @@ main stack).
 | `backend/app/api/v1/endpoints/` | One file per resource (auth, devices, users, roles, groups, policy, reports, tech_utilization, screenshots, ingest, agentConfig, googleAuth, installers, downloads, notifications, logs, audit, setup, company, adminFiles) |
 | `backend/app/core/security.py` | Password hashing (bcrypt), JWT create/decode (device tokens + admin tokens, separate expiries) |
 | `backend/app/core/permissions.py` | Single-source-of-truth RBAC module/action matrix, drives both API guards and dashboard UI |
+| `backend/app/core/impersonation.py` | Super-Admin impersonation: the structural (un-grantable) eligibility test + the Redis `jti` session registry that makes revocation possible |
 | `backend/app/core/scoping.py` | `visible_device_ids(user, db)` — resolves a user's device visibility (`all` / `own` / `groups`, with group-tree expansion) |
 | `backend/app/core/ingest_queue.py` | In-memory bounded queue + 30s batched Postgres `COPY` flush for agent event ingestion |
 | `backend/app/core/report_cache.py`, `tech_cache.py` | Background workers pre-aggregating company reports / tech-analytics into fast-lookup tables |
@@ -112,6 +113,41 @@ tree). Always filter through this helper rather than re-deriving visibility.
 > the API it calls (a report generated from the Devices page, say) is gated on
 > the module that *owns the API* — the Devices page checks `reports:view`
 > before showing any report trigger.
+
+**Super-Admin impersonation**: a Super Admin can operate the dashboard as any
+active employee in their company. Core logic in `app/core/impersonation.py`;
+endpoints `POST /v1/auth/impersonate`, `POST /v1/auth/impersonate/exit`, and the
+picker feed `GET /v1/users/impersonatable`. Four things make it safe, and all four
+are load-bearing:
+
+1. **Un-delegable gate.** No `(module, action)` pair exists — eligibility is
+   structural (`scope_type == "all" and is_system`) via `require_super_admin`, so
+   it cannot be granted through the Roles UI and is invisible to everyone else.
+   This is the documented exception to the permission-pair rule in `CLAUDE.md`.
+2. **Token.** `create_impersonation_token()` mints `sub=<target>` with
+   `imp/act_by/act_email/jti` and a 30-minute TTL (`IMPERSONATION_TTL_MINUTES`).
+   `type` stays `"admin"` deliberately, so the session flows through the normal
+   `get_current_user` and inherits the target's real permissions and
+   `_scope_type` — there is no parallel auth path.
+3. **Revocation.** This codebase otherwise has no token revocation at all. An
+   `imp` token's `jti` is registered in Redis (`tt:imp:<jti>`) and checked on
+   every request **for `imp` tokens only** — so ordinary auth gains no Redis hop
+   and no new failure mode, while impersonation fails *closed* if Redis is down.
+   `imp` tokens deliberately **bypass `AdminAuthCache`**, whose 15s token-keyed
+   TTL would otherwise keep a revoked session alive. Exit revokes the `jti`, then
+   re-mints a fresh admin token after re-verifying the admin — the admin's
+   original token is never stored client-side.
+4. **Blast radius.** `forbid_impersonation` blocks `/v1/auth/set-password`, and
+   `PATCH /v1/users/{id}` refuses `password`/`role_id`/`is_active` changes mid-
+   session, so impersonation can never become account takeover or an escalation
+   route out of itself. Chaining is blocked by `require_super_admin` refusing an
+   already-impersonated caller.
+
+Audit: `audit_log.impersonator_id`/`impersonator_email` (migration 033) are
+stamped by `audit.record()` for **every** action taken during a session, so all
+existing call sites inherit attribution — the acting identity stays the target
+(that is what happened) while the real driver is recorded and queryable.
+Start/stop emit `user.impersonate.start` / `user.impersonate.stop`.
 
 **Reports & exports**: three report types run through one Redis-backed job
 queue (`POST /v1/reports/jobs`, polled via `GET /v1/reports/jobs/{id}`, all

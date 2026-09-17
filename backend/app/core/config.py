@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_DEVICE_EXPIRE_DAYS: int = 365
     JWT_ADMIN_EXPIRE_HOURS: int = 12
+    # Super-Admin impersonation sessions are deliberately far shorter than a normal
+    # admin session: the token grants another person's identity, so it should expire
+    # on its own well before anyone forgets they left it open.
+    IMPERSONATION_TTL_MINUTES: int = 30
 
     # ── Activity sanity caps ────────────────────────────────────────────────────
     # Hard ceiling on a single window_change slice. The agent emits one slice per

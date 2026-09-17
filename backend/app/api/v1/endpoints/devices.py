@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import joinedload
 
 from app.api.deps import get_db, get_current_admin, require
-from app.core import audit, broadcaster
+from app.core import audit, broadcaster, impersonation
 from app.core.config import get_settings
 from app.core.device_auth_cache import invalidate_device
 from app.core.security import decode_token
@@ -307,6 +307,18 @@ async def stream_device_status(
         user_uuid = uuid.UUID(payload["sub"])
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+    # This endpoint decodes the token itself rather than going through
+    # get_current_user (EventSource can't send headers), so it must repeat the
+    # impersonation-session check — otherwise a revoked impersonation token
+    # could still open a fresh stream.
+    if payload.get("imp"):
+        jti = payload.get("jti")
+        if not jti or not await impersonation.is_session_active(jti):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Impersonation session has ended",
+            )
 
     # Short-lived session for auth only — no Depends(get_db): on a long-lived SSE
     # stream it would hold a pooled connection per open tab → pool exhaustion.
