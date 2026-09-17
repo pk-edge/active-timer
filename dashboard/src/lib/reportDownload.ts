@@ -1,5 +1,5 @@
 "use client";
-import type { FleetReport, DeviceFullReport } from "@/lib/api";
+import type { FleetReport, DeviceFullReport, DeviceRosterReport } from "@/lib/api";
 
 function fmtSecs(s: number): string {
   const h = Math.floor(s / 3600);
@@ -576,4 +576,65 @@ export async function downloadFleetReportExcel(data: FleetReport): Promise<void>
   }
 
   XLSX.writeFile(wb, `fleet-report-${data.since}-${data.until}.xlsx`);
+}
+
+// ── Device Roster — Excel ────────────────────────────────────────────────────
+
+function fmtStamp(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString();
+}
+
+/** Registered-device inventory: who owns what, which OS, current state. */
+export async function downloadDeviceRosterExcel(data: DeviceRosterReport): Promise<void> {
+  const XLSX = await import("xlsx");
+
+  const wb = XLSX.utils.book_new();
+
+  const devicesSheet = XLSX.utils.aoa_to_sheet([
+    ["Hostname", "Assigned User", "Platform", "Reported As", "Status",
+     "Agent Version", "Enrolled", "Last Seen"],
+    ...data.devices.map(d => [
+      d.hostname,
+      d.employee_name ?? "Unassigned",
+      d.platform,
+      d.raw_platform || "—",
+      d.status.charAt(0).toUpperCase() + d.status.slice(1),
+      d.agent_version ?? "—",
+      fmtStamp(d.enrolled_at),
+      fmtStamp(d.last_seen),
+    ]),
+  ]);
+  devicesSheet["!cols"] = [
+    { wch: 26 }, { wch: 24 }, { wch: 12 }, { wch: 13 },
+    { wch: 10 }, { wch: 14 }, { wch: 20 }, { wch: 20 },
+  ];
+  devicesSheet["!autofilter"] = {
+    ref: XLSX.utils.encode_range({
+      s: { r: 0, c: 0 },
+      e: { r: data.devices.length, c: 7 },
+    }),
+  };
+  devicesSheet["!freeze"] = { xSplit: 0, ySplit: 1 };
+  XLSX.utils.book_append_sheet(wb, devicesSheet, "Devices");
+
+  const summarySheet = XLSX.utils.aoa_to_sheet([
+    ["Registered Devices Report"],
+    ["Generated", fmtStamp(data.generated_at)],
+    [],
+    ["Total Registered Devices", data.total_devices],
+    ["Online", data.online_devices],
+    ["Offline", data.offline_devices],
+    ["Archived", data.archived_devices],
+    ["Unassigned (no user)", data.unassigned_devices],
+    [],
+    ["Platform", "Devices"],
+    ...data.platform_breakdown.map(p => [p.platform, p.count]),
+  ]);
+  summarySheet["!cols"] = [{ wch: 28 }, { wch: 14 }];
+  XLSX.utils.book_append_sheet(wb, summarySheet, "Summary");
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `registered-devices-${stamp}.xlsx`);
 }
