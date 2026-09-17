@@ -101,6 +101,17 @@ tree). Always filter through this helper rather than re-deriving visibility.
 (module, action) permission matrix; the dashboard fetches it live via
 `GET /v1/roles/modules` so backend and UI never drift.
 
+**RBAC anti-escalation, both directions**: `roles.py`'s `_assert_can_grant` /
+`_assert_can_touch_system_role` stop a role-manager from *defining* a role with
+more scope/permissions than they hold, or rewriting a system role, unless they
+are themselves all-scope. `users.py`'s `_assert_can_assign_role` is the other
+half — it stops the same caller from sidestepping that by *assigning* an
+already-existing powerful role (including Super Admin) to a user via
+`POST /v1/users`, `PATCH /v1/users/{id}`, or the approve flow. Both halves share
+the same rule (`caller scope_type == "all"` unlocks system/all-scope roles; the
+target role's permissions must be a subset of the caller's own) — a new
+role-assignment surface needs both, not just one.
+
 > **Every feature ships with its permission.** No endpoint or UI affordance
 > lands without being wired into RBAC, in the same change that adds it:
 > 1. the (module, action) pair exists in `app/core/permissions.py` — add the

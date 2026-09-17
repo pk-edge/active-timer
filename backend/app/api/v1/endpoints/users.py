@@ -62,11 +62,59 @@ async def _resolve_role(role_id: str | None, company_id, db: AsyncSession) -> Ro
         rid = uuid.UUID(role_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid role id")
-    r = await db.execute(select(Role).where(Role.id == rid, Role.company_id == company_id))
+    # Permissions eager-loaded: _assert_can_assign_role needs them for the
+    # containment check below, and every caller of this helper assigns the
+    # result to an Employee, so paying one extra join here is cheaper than a
+    # second query at each of the three call sites.
+    r = await db.execute(
+        select(Role).options(selectinload(Role.permissions))
+        .where(Role.id == rid, Role.company_id == company_id)
+    )
     role = r.scalar_one_or_none()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     return role
+
+
+def _assert_can_assign_role(user: Employee, role: Role | None) -> None:
+    """Anti-escalation for assigning an EXISTING role to a user.
+
+    Mirrors roles.py's _assert_can_grant / _assert_can_touch_system_role, which
+    guard the same thing when a role is being CREATED or EDITED. Without this,
+    anyone holding users:create/users:edit could hand a user — including
+    themselves, via a self-service flow, or another account they control — the
+    Super Admin role, or any role whose scope/permissions exceed their own,
+    entirely bypassing the roles.py guards. Unassigning a role (role=None) only
+    ever reduces privilege, so it is always allowed.
+    """
+    if role is None:
+        return
+
+    caller_scope = getattr(user, "_scope_type", "own")
+
+    if role.is_system and caller_scope != "all":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System roles can only be assigned by an all-scope administrator",
+        )
+    if role.scope_type == "all" and caller_scope != "all":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an all-scope user can assign a role with all-data scope",
+        )
+    if role.scope_type == "groups" and caller_scope not in ("all", "groups"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an all- or group-scoped user can assign a role with group scope",
+        )
+
+    held = getattr(user, "_perms", set())
+    missing = [f"{p.module}.{p.action}" for p in role.permissions if (p.module, p.action) not in held]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cannot assign a role granting permissions you do not hold: {', '.join(missing)}",
+        )
 
 
 async def _set_group_access(
@@ -535,6 +583,7 @@ async def create_user(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already exists")
 
     role = await _resolve_role(body.role_id, user.company_id, db)
+    _assert_can_assign_role(user, role)
 
     # If a soft-deleted row exists for this email, resurrect it in place.
     # The DB unique constraint on email prevents inserting a second row.
@@ -633,6 +682,7 @@ async def update_user(
         emp.name = body.name
     if body.role_id is not None:
         role = await _resolve_role(body.role_id, user.company_id, db)
+        _assert_can_assign_role(user, role)
         new_role_id = role.id if role else None
         if new_role_id != emp.role_id:
             changed["role"] = role.name if role else None
@@ -690,6 +740,7 @@ async def approve_user(
     role = await _resolve_role(body.role_id, user.company_id, db)
     if not role:
         raise HTTPException(status_code=400, detail="role_id is required to approve a user")
+    _assert_can_assign_role(user, role)
 
     emp.role_id = role.id
     emp.is_approved = True
