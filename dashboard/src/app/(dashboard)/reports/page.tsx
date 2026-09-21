@@ -1,9 +1,11 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
 import PageSkeleton from "@/components/PageSkeleton";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import dynamic from "next/dynamic";
 import useSWR from "swr";
+import { format, subDays, differenceInCalendarDays } from "date-fns";
+import type { ReportDateRange } from "@/lib/api";
 import {
   getCompanySummary, getTopApps, getDevices, getUsers,
   getDeviceSummary, getDeviceTopApps, fmtSeconds,
@@ -13,6 +15,7 @@ import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { smartSort } from "@/lib/smartSearch";
 import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
 import { AccessDenied } from "@/components/AccessDenied";
+import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
 
 // Lazy: the per-day bar chart pulls in recharts only when it actually renders.
 const DailyActiveBarChart = dynamic(() => import("./_components/DailyActiveBarChart"), {
@@ -25,14 +28,8 @@ const DailyActiveBarChart = dynamic(() => import("./_components/DailyActiveBarCh
     </div>
   ),
 });
-import { Search, X, ChevronDown } from "lucide-react";
+import { Search, X } from "lucide-react";
 import type { CompanyDay, AppUsage, Device, User } from "@/types";
-
-const PERIODS = [
-  { label: "7 days",  value: 7  },
-  { label: "14 days", value: 14 },
-  { label: "30 days", value: 30 },
-];
 
 // Company-wide top-apps caps at 100 server-side (backend/app/api/v1/endpoints/
 // reports.py). Ask for the max so the in-card search box has more than the
@@ -40,12 +37,60 @@ const PERIODS = [
 // to the search box and looks like a false "no match".
 const APP_SEARCH_LIMIT = 100;
 
+/** Cosmetic only — the agent reports raw sys.platform values ("darwin",
+ *  "win32"), which vary in casing across the codebase; normalize just for
+ *  this detail line rather than reaching for a shared util. */
+function platformLabel(p: string): string {
+  const v = p.toLowerCase();
+  if (v === "darwin" || v === "macos") return "macOS";
+  if (v === "win32" || v === "windows") return "Windows";
+  if (v === "linux") return "Linux";
+  return p;
+}
+
+// Formats a DateRange for the header subtitle / stat card — honest about the
+// ACTUAL active range instead of a hardcoded "last N days" that used to be
+// true by construction (days-only) but no longer is once Custom/Last Month/
+// Last Year ranges are possible.
+function describeRange(range: DateRange): string {
+  return range.since === range.until ? range.since : `${range.since} – ${range.until}`;
+}
+
+// Company summary/top-apps are, per this codebase's own architecture notes,
+// two of the heaviest dashboard endpoints — that's WHY a pre-aggregated cache
+// (report_daily_summary / report_top_apps_cache) exists for the plain
+// "N days ending today" shape. That cache has no `until` concept at all, so
+// the backend only consults it when the request is `days`-only (no since/
+// until). Sending since/until unconditionally — including for the default
+// "Last 7 Days" view, which is the single most common load on this page —// would silently give up that fast path on every visit for no reason: the
+// range picker's "ending today" presets (Last 7/30/90 Days, This Month, This
+// Year) are EXACTLY the shape the cache already knows how to serve.
+//
+// So: only actually send since/until when the range does something the
+// `days` model genuinely cannot express — ends before today (Last Month,
+// Last Year, a Custom range with a past end date) or spans more than the
+// backend's 90-day cap on `days`. Everything else still goes through the
+// fast, cacheable path, exactly as it did before this feature existed.
+function reportRangeArg(range: DateRange): { days: number; range?: ReportDateRange } {
+  const today = format(new Date(), "yyyy-MM-dd");
+  const days = differenceInCalendarDays(new Date(range.until), new Date(range.since)) + 1;
+  if (range.until === today && days <= 90) {
+    return { days };
+  }
+  return { days, range };
+}
+
 export default function ReportsPage() {
   const { loading, can } = useUser();
-  const [days, setDays]         = useState(7);
+  const [dateRange, setDateRange] = useState<DateRange>(() => ({
+    since: format(subDays(new Date(), 6), "yyyy-MM-dd"),
+    until: format(new Date(), "yyyy-MM-dd"),
+  }));
+  const rangeDays = differenceInCalendarDays(new Date(dateRange.until), new Date(dateRange.since)) + 1;
   const [deviceId, setDeviceId] = useState("");
   const [appSearch, setAppSearch] = useState("");
   const [talentQuery, setTalentQuery] = useState("");
+  const [deviceQuery, setDeviceQuery] = useState("");
   const debouncedAppSearch = useDebouncedValue(appSearch, 200);
 
   const { data: devices } = useSWR<Device[]>("devices", getDevices);
@@ -113,24 +158,68 @@ export default function ReportsPage() {
   function handleSelectTalent(result: TalentSearchResult) {
     const person = talentPeople.find(p => p.id === result.id);
     if (person && person.deviceIds.length > 0) {
-      // A person with multiple devices lands on their first one; the
-      // existing `<select>` below still lists every device individually, so
-      // switching to a specific one of their other machines stays possible.
+      // A person with multiple devices lands on their first one; the device
+      // search bar below still finds every individual device, so switching
+      // to a specific one of their other machines stays possible.
       setDeviceId(person.deviceIds[0]);
     }
     setTalentQuery("");
   }
 
-  const summaryKey = deviceId ? ["device-summary", deviceId, days] : ["summary", days];
-  const appsKey    = deviceId ? ["device-apps",   deviceId, days]  : ["top-apps", days];
+  // Device search bar — a proper searchable picker (hostname/employee/
+  // platform), in place of the old plain "All users / devices" <select>,
+  // which only offered first-letter browser type-ahead over a concatenated
+  // string. Lists every device individually (including unassigned ones,
+  // which the talent search above deliberately omits), so it's still the
+  // tool for picking a specific machine rather than a person.
+  const debouncedDeviceQuery = useDebouncedValue(deviceQuery, 200);
+  const deviceResults: TalentSearchResult[] = useMemo(
+    () => smartSort(
+      debouncedDeviceQuery, devices ?? [], d => [d.hostname, d.employee_name, d.platform],
+    ).map(d => ({
+      id: d.id,
+      name: d.hostname,
+      email: d.employee_name ?? "Unassigned",
+      detail: platformLabel(d.platform),
+    })),
+    [debouncedDeviceQuery, devices],
+  );
+
+  function handleSelectDevice(result: TalentSearchResult) {
+    setDeviceId(result.id);
+    setDeviceQuery(result.name);
+  }
+
+  // Keep both search boxes' text in sync whenever deviceId changes from
+  // elsewhere (picking a talent above sets deviceId to their first device;
+  // clearing either box clears deviceId directly) — neither box should keep
+  // showing stale text for a filter that's no longer actually applied.
+  useEffect(() => {
+    if (!deviceId) { setDeviceQuery(""); return; }
+    const match = devices?.find(d => d.id === deviceId);
+    if (match) setDeviceQuery(match.hostname);
+  }, [deviceId, devices]);
+
+  const { days: rangeArgDays, range: rangeArg } = reportRangeArg(dateRange);
+
+  const summaryKey = deviceId
+    ? ["device-summary", deviceId, dateRange.since, dateRange.until]
+    : ["summary", dateRange.since, dateRange.until];
+  const appsKey = deviceId
+    ? ["device-apps", deviceId, dateRange.since, dateRange.until]
+    : ["top-apps", dateRange.since, dateRange.until];
 
   const { data: summary, isLoading: summaryLoading } = useSWR<CompanyDay[]>(
     summaryKey,
-    () => deviceId ? getDeviceSummary(deviceId, days) : getCompanySummary(days),
+    () => deviceId
+      ? getDeviceSummary(deviceId, rangeArgDays, rangeArg)
+      : getCompanySummary(rangeArgDays, rangeArg),
   );
   const { data: apps } = useSWR<AppUsage[]>(
     appsKey,
-    () => deviceId ? getDeviceTopApps(deviceId, days) : getTopApps(days, APP_SEARCH_LIMIT),
+    () => deviceId
+      ? getDeviceTopApps(deviceId, rangeArgDays, rangeArg)
+      : getTopApps(rangeArgDays, APP_SEARCH_LIMIT, rangeArg),
   );
 
   const filteredApps = useMemo(() => {
@@ -157,27 +246,15 @@ export default function ReportsPage() {
               {selectedDevice
                 ? `${selectedDevice.hostname}${selectedDevice.employee_name ? ` · ${selectedDevice.employee_name}` : ""}`
                 : "Company-wide"}
-              {" · "}last {days} days
+              {" · "}{describeRange(dateRange)}
             </p>
           </div>
 
-          {/* Period toggle — kept up here, next to the title, so the primary
-              talent search below reads as the page's main filter. */}
-          <div className="flex items-center bg-white border border-gray-300 rounded-lg overflow-hidden">
-            {PERIODS.map(p => (
-              <button
-                key={p.value}
-                onClick={() => setDays(p.value)}
-                className={`px-2.5 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm transition ${
-                  days === p.value
-                    ? "bg-brand-600 text-white font-medium"
-                    : "text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
+          {/* Date range picker — kept up here, next to the title, so the primary
+              talent search below reads as the page's main filter. Supports real
+              calendar ranges (This/Last Month, This/Last Year, Custom), not just
+              a rolling N-days-ending-today window. */}
+          <DateRangePicker value={dateRange} onChange={setDateRange} />
         </div>
 
         <div className="flex flex-wrap items-start gap-2 sm:gap-3">
@@ -194,24 +271,19 @@ export default function ReportsPage() {
             className="w-full sm:w-80"
           />
 
-          {/* Device / User filter — preserved as-is, including "All users /
-              devices" and every individual device, so picking a specific
-              device (e.g. for a talent with more than one) still works. */}
-          <div className="relative">
-            <select
-              value={deviceId}
-              onChange={e => setDeviceId(e.target.value)}
-              className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-1.5 sm:py-2 text-xs sm:text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 cursor-pointer"
-            >
-              <option value="">All users / devices</option>
-              {devices?.map(d => (
-                <option key={d.id} value={d.id}>
-                  {d.employee_name ? `${d.employee_name} (${d.hostname})` : d.hostname}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-          </div>
+          {/* Device search — proper search bar, not a runtime-search dropdown.
+              Lists every device individually (including unassigned ones), so
+              picking a specific machine (e.g. for a talent with more than
+              one) still works. */}
+          <TalentSearchBar
+            value={deviceQuery}
+            onChange={v => { setDeviceQuery(v); if (!v) setDeviceId(""); }}
+            results={deviceResults}
+            onSelect={handleSelectDevice}
+            placeholder="All users / devices — search hostname…"
+            label="Find a device to filter reports"
+            className="w-full sm:w-72"
+          />
         </div>
       </div>
 
@@ -221,7 +293,7 @@ export default function ReportsPage() {
           <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
             <p className="text-xs text-gray-600 mb-0.5">Total active time</p>
             <p className="text-lg sm:text-xl font-semibold text-gray-900 leading-tight">{fmtSeconds(totalActive)}</p>
-            <p className="text-xs text-gray-600 mt-0.5">over {days} days</p>
+            <p className="text-xs text-gray-600 mt-0.5">over {rangeDays} {rangeDays === 1 ? "day" : "days"}</p>
           </div>
           {summary && summary.length > 0 && (
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">

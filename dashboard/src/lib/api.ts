@@ -235,19 +235,40 @@ export const getDailyStats = (deviceId: string, days = 7) =>
 
 // ── Reports ───────────────────────────────────────────────────────────────────
 
-export const getCompanySummary = (days = 7) =>
-  request<CompanyDay[]>(`/v1/reports/company/summary?days=${days}`);
+// Alternate, real-calendar-range way to select a report's window — {since,
+// until} are inclusive yyyy-MM-dd dates (matches DateRangePicker's DateRange
+// shape directly, no unix-timestamp conversion needed here; that's a logs.py
+// thing, not this endpoint family). When given, it REPLACES `days` in the
+// request (the backend rejects since/until alongside a non-default `days`),
+// which is why every function below still takes `days` as its primary/default
+// param for backward compat and only adds `range` on top.
+export interface ReportDateRange { since: string; until: string; }
 
-export const getTopApps = (days = 7, limit?: number) =>
-  request<AppUsage[]>(
-    `/v1/reports/company/top-apps?days=${days}${limit !== undefined ? `&limit=${limit}` : ""}`,
-  );
+function reportRangeParams(days: number, range?: ReportDateRange): URLSearchParams {
+  const p = new URLSearchParams();
+  if (range) {
+    p.set("since", range.since);
+    p.set("until", range.until);
+  } else {
+    p.set("days", String(days));
+  }
+  return p;
+}
 
-export const getDeviceSummary = (deviceId: string, days = 7) =>
-  request<CompanyDay[]>(`/v1/reports/device/${deviceId}/summary?days=${days}`);
+export const getCompanySummary = (days = 7, range?: ReportDateRange) =>
+  request<CompanyDay[]>(`/v1/reports/company/summary?${reportRangeParams(days, range)}`);
 
-export const getDeviceTopApps = (deviceId: string, days = 7) =>
-  request<AppUsage[]>(`/v1/reports/device/${deviceId}/top-apps?days=${days}`);
+export const getTopApps = (days = 7, limit?: number, range?: ReportDateRange) => {
+  const p = reportRangeParams(days, range);
+  if (limit !== undefined) p.set("limit", String(limit));
+  return request<AppUsage[]>(`/v1/reports/company/top-apps?${p}`);
+};
+
+export const getDeviceSummary = (deviceId: string, days = 7, range?: ReportDateRange) =>
+  request<CompanyDay[]>(`/v1/reports/device/${deviceId}/summary?${reportRangeParams(days, range)}`);
+
+export const getDeviceTopApps = (deviceId: string, days = 7, range?: ReportDateRange) =>
+  request<AppUsage[]>(`/v1/reports/device/${deviceId}/top-apps?${reportRangeParams(days, range)}`);
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
 

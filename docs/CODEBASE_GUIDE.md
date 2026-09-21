@@ -175,6 +175,32 @@ finished job stays until dismissed so it can be re-opened from its cached
 result. Roster scope is resolved with `visible_device_ids()` in the request
 handler and passed into the worker, which has no `admin` to re-derive it from.
 
+The four quick-look report endpoints (`GET /company/summary`, `/company/top-apps`,
+`/device/{id}/summary`, `/device/{id}/top-apps` — separate from the job queue
+above) accept EITHER a rolling `days` window (unchanged default, ending "now")
+OR an explicit `since`/`until` inclusive calendar range (real "Last Month" /
+"Last Year" / Custom support, not a `days` trick — `days` alone can never
+express a fixed end date other than today). The two are mutually exclusive:
+since/until must be given together, since must not be after until, and `days`
+must stay at its default (7) when since/until are used — see
+`_validate_range()`/`_window_clause()` in `endpoints/reports.py`. since/until
+skip both `report_cache.summary_from_cache`/`top_apps_from_cache` (those tables
+have no `until` concept, always implicitly ending today) and go straight to a
+live aggregation query; the per-request Redis response-cache key
+(`report:summary`/`report:top_apps`/`report:dev_summary`/`report:dev_top_apps`)
+includes since/until whenever they're used so a since/until query can never be
+served a `days`-keyed cache entry or vice versa. The dashboard's Reports page
+(`dashboard/src/app/(dashboard)/reports/page.tsx`) drives this via the shared
+`DateRangePicker` component, but does NOT always send since/until:
+`reportRangeArg()` sends plain `days` whenever the picked range ends today and
+is ≤90 days (Last 7/30/90 Days, This Month, This Year — the shape the
+pre-aggregated cache already knows how to serve), and only falls back to
+since/until for a range the `days` model genuinely cannot express (Last Month,
+Last Year, a Custom range with a past end date, or >90 days ending today).
+This matters because company summary/top-apps are two of the heaviest
+dashboard endpoints — the fast path exists specifically so the default,
+by-far-most-common view doesn't pay for a live aggregation on every load.
+
 **Background jobs & caching**: the backend runs several always-on background
 tasks started from `main.py`'s `lifespan`: `RedisClient` (cache pool),
 `broadcaster` (SSE pub/sub — must start before workers publish),
