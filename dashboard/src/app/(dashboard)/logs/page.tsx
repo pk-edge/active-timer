@@ -1,8 +1,8 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
-import { useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import useSWR from "swr";
+import useSWR, { preload } from "swr";
 import { format } from "date-fns";
 import {
   Monitor, Globe, Lock, MousePointer,
@@ -10,8 +10,10 @@ import {
 import { getLogs, getDevices, getUsers, fmtTime, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
-import { smartMatch } from "@/lib/smartSearch";
+import { smartSort } from "@/lib/smartSearch";
 import { AccessDenied } from "@/components/AccessDenied";
+import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
+import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
 import type { LogEvent, Device, User } from "@/types";
 
 const EVENT_ICON: Record<string, React.ReactNode> = {
@@ -50,6 +52,7 @@ const EVENT_TYPES = [
   "window_change", "url_visit", "lock", "unlock", "idle_start", "idle_end",
 ];
 
+// Matches the old client-side page size — now a real server-side page.
 const PAGE_SIZE = 50;
 
 function EventBadge({ type }: { type: string }) {
@@ -114,51 +117,159 @@ function LogRow({ e }: { e: LogEvent }) {
   );
 }
 
+/** Local-midnight-of-day → unix seconds, matching the math the backend has
+ *  always been given (single-day math generalized to a range). */
+function dayStartUnix(yyyyMmDd: string): number {
+  return Math.floor(new Date(yyyyMmDd + "T00:00:00").getTime() / 1000);
+}
+
 export default function LogsPage() {
   const { loading, can } = useUser();
   const today = format(new Date(), "yyyy-MM-dd");
-  const [selDate,   setSelDate]   = useState(today);
+
+  // DateRangePicker gives Weekly/Monthly/Quarterly-equivalent presets (Last 7
+  // Days, This Month, Last 90 Days, etc.) plus a custom range — default of
+  // {today, today} reproduces the old single-day-only behavior exactly.
+  const [dateRange, setDateRange] = useState<DateRange>({ since: today, until: today });
   const [selDevice, setSelDevice] = useState("");
   const [selUser,   setSelUser]   = useState("");
   const [selType,   setSelType]   = useState("");
   const [search,    setSearch]    = useState("");
-  const [logsPage,  setLogsPage]  = useState(0);
+  const [talentQuery, setTalentQuery] = useState("");
+  const [offset,    setOffset]    = useState(0);
 
+  function resetToFirstPage() { setOffset(0); }
+
+  // Devices already power the working "Device" filter today (this page only
+  // requires logs:view, and GET /v1/devices needs devices:view — if that were
+  // broken the existing selector would already be empty, so it isn't the bug
+  // here). Users, however, ARE the bug: GET /v1/users needs users:view, which
+  // a logs:view-only role need not hold, and the failed fetch silently
+  // collapsed the "User" dropdown to just "All users". Fetch users only when
+  // permitted, and derive a working talent list from `devices` either way so
+  // the filter and search bar are never empty just because of that permission.
+  const canViewUsers = can("users", "view");
   const { data: devices } = useSWR<Device[]>("devices", getDevices);
-  const { data: users }   = useSWR<User[]>("users-list", () => getUsers());
+  const { data: users }   = useSWR<User[]>(canViewUsers ? "users-list" : null, () => getUsers());
 
-  const logsOpts = (() => {
-    const opts: { since?: number; until?: number; device_id?: string; employee_id?: string; event_type?: string } = {};
-    if (selDate) {
-      opts.since = Math.floor(new Date(selDate + "T00:00:00").getTime() / 1000);
-      opts.until = opts.since + 86400;
+  // One row per PERSON (not per device): group devices by employee_id so a
+  // talent with two machines appears once, enriched with their email when
+  // `users:view` is held. This is what both the "User" select and the new
+  // search bar are built from — it directly fixes "no filter for selected
+  // users" (previously empty for many roles) and "unable to search talent by
+  // device" (previously keyed on device, so similarly-named people collided).
+  const talentPeople = useMemo(() => {
+    const byId = new Map<string, { id: string; name: string; email: string; hostnames: string[] }>();
+    for (const d of devices ?? []) {
+      if (!d.employee_id || !d.employee_name) continue;
+      const existing = byId.get(d.employee_id);
+      if (existing) existing.hostnames.push(d.hostname);
+      else byId.set(d.employee_id, { id: d.employee_id, name: d.employee_name, email: "", hostnames: [d.hostname] });
     }
-    if (selDevice) opts.device_id   = selDevice;
-    if (selUser)   opts.employee_id = selUser;
-    if (selType)   opts.event_type  = selType;
-    return opts;
-  })();
+    for (const u of users ?? []) {
+      const existing = byId.get(u.id);
+      if (existing) existing.email = u.email;
+      // A user with no device can never match a log row (the backend filters
+      // by the DEVICE's assigned employee), so they're intentionally omitted
+      // rather than offered as a dead-end filter option.
+    }
+    return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [devices, users]);
 
-  const { data: logs, isLoading } = useSWR<LogEvent[]>(
-    ["logs", selDate, selDevice, selUser, selType],
-    () => getLogs(logsOpts),
-    { refreshInterval: 15_000 },
+  const debouncedTalentQuery = useDebouncedValue(talentQuery, 200);
+  const talentResults: TalentSearchResult[] = useMemo(
+    () => smartSort(
+      debouncedTalentQuery, talentPeople, p => [p.name, p.email, ...p.hostnames],
+    ).map(p => ({
+      id: p.id,
+      name: p.name,
+      email: p.email || p.hostnames.join(", "),
+      detail: p.email ? p.hostnames.join(", ") : null,
+    })),
+    [debouncedTalentQuery, talentPeople],
   );
 
+  function handleSelectTalent(result: TalentSearchResult) {
+    setSelUser(result.id);
+    setSelDevice("");
+    setTalentQuery(result.name);
+    resetToFirstPage();
+  }
+
+  // Keep the search bar's text in sync when the person is changed/cleared via
+  // the plain <select> instead of the search bar itself.
+  useEffect(() => {
+    if (!selUser) { setTalentQuery(""); return; }
+    const match = talentPeople.find(p => p.id === selUser);
+    if (match) setTalentQuery(match.name);
+  }, [selUser, talentPeople]);
+
+  const since = dayStartUnix(dateRange.since);
+  // Exclusive upper bound: local midnight AFTER the "until" day, so the until
+  // day itself is fully included — same convention the single-day version
+  // used (since + 86400).
+  const until = dayStartUnix(dateRange.until) + 86400;
+
+  // Free-text search (app/window/url/user/hostname) now runs SERVER-SIDE over
+  // the FULL matching date-range/device/user-scoped dataset (see
+  // `backend/app/api/v1/endpoints/logs.py`'s `search` param), not just
+  // whatever rows happen to be on the current page — pagination sits ON TOP
+  // of the search, narrowing the candidate set in SQL first and then paging
+  // through exactly that narrowed set. Debounced so typing doesn't fire a
+  // request per keystroke. The talent search bar above remains the tool for
+  // finding a specific PERSON across the whole range (it sets employee_id).
   const debouncedSearch = useDebouncedValue(search, 200);
-  const filtered = useMemo(() => {
-    if (!logs) return [];
-    if (!debouncedSearch.trim()) return logs;
-    return logs.filter(e =>
-      smartMatch(debouncedSearch, e.app_name, e.window_title, e.url, e.employee_name, e.hostname),
+
+  // Any filter change (including a debounced search term change) starts back
+  // at page 1 — same pattern as every other filter on this page.
+  useEffect(() => {
+    resetToFirstPage();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
+
+  const logsOpts = {
+    since, until,
+    device_id:   selDevice || undefined,
+    employee_id: selUser || undefined,
+    event_type:  selType || undefined,
+    search:      debouncedSearch || undefined,
+    limit:  PAGE_SIZE,
+    offset,
+  };
+
+  const swrKey = ["logs", since, until, selDevice, selUser, selType, debouncedSearch, offset] as const;
+
+  const { data: page, isLoading } = useSWR(
+    swrKey,
+    () => getLogs(logsOpts),
+    { refreshInterval: 15_000, keepPreviousData: true },
+  );
+
+  // The items returned ARE already the filtered set (server-side) — render
+  // them directly, no client-side re-filtering (that would be redundant and
+  // could subtly diverge from the server's build_search() semantics).
+  const items = page?.items ?? [];
+
+  // Background-prefetch the next page once the current one has loaded and
+  // more is available, so clicking "Next" feels instant. The key here MUST
+  // match the main useSWR key shape exactly (same values, same order) except
+  // for the offset, so that when the user clicks Next and `offset` state
+  // updates to `nextOffset`, the main call hits this warm cache instead of
+  // re-fetching.
+  useEffect(() => {
+    if (!page?.has_more) return;
+    const nextOffset = offset + PAGE_SIZE;
+    preload(
+      ["logs", since, until, selDevice, selUser, selType, debouncedSearch, nextOffset],
+      () => getLogs({ ...logsOpts, offset: nextOffset }),
     );
-  }, [logs, debouncedSearch]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, since, until, selDevice, selUser, selType, debouncedSearch, offset]);
 
-  const logsTotalPages = Math.ceil(filtered.length / PAGE_SIZE);
-  const safeLogsPage   = Math.min(logsPage, Math.max(0, logsTotalPages - 1));
-  const pagedLogs      = filtered.slice(safeLogsPage * PAGE_SIZE, (safeLogsPage + 1) * PAGE_SIZE);
-
-  const counts = logs?.reduce<Record<string, number>>((acc, e) => {
+  // Event-type counts reflect this page only (an exact count across the whole
+  // range would need the same unbounded COUNT(*) the backend deliberately
+  // avoids) — labelled as such rather than implying a range-wide total.
+  const counts = items.reduce<Record<string, number>>((acc, e) => {
     acc[e.event_type] = (acc[e.event_type] ?? 0) + 1;
     return acc;
   }, {});
@@ -176,18 +287,28 @@ export default function LogsPage() {
         </div>
       </div>
 
+      {/* Talent search — finds a PERSON across the whole date range */}
+      <div className="shrink-0">
+        <TalentSearchBar
+          value={talentQuery}
+          onChange={v => { setTalentQuery(v); if (!v) { setSelUser(""); resetToFirstPage(); } }}
+          results={talentResults}
+          onSelect={handleSelectTalent}
+          placeholder="Find a talent by name or email…"
+          label="Find a talent"
+          className="max-w-md"
+        />
+      </div>
+
       {/* Filters row */}
       <div className="bg-white border border-gray-200 rounded-xl p-4 mb-5 shadow-sm shrink-0">
         <div className="flex flex-wrap gap-3 items-center">
-          {/* Date */}
+          {/* Date range */}
           <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-600 font-medium">Date</label>
-            <input
-              type="date"
-              value={selDate}
-              max={today}
-              onChange={e => { setSelDate(e.target.value); setLogsPage(0); }}
-              className="bg-white border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
+            <label className="text-xs text-gray-600 font-medium">Date range</label>
+            <DateRangePicker
+              value={dateRange}
+              onChange={r => { setDateRange(r); resetToFirstPage(); }}
             />
           </div>
 
@@ -197,7 +318,7 @@ export default function LogsPage() {
             <div className="relative">
               <select
                 value={selDevice}
-                onChange={e => { setSelDevice(e.target.value); setLogsPage(0); }}
+                onChange={e => { setSelDevice(e.target.value); resetToFirstPage(); }}
                 className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
               >
                 <option value="">All devices</option>
@@ -217,12 +338,12 @@ export default function LogsPage() {
             <div className="relative">
               <select
                 value={selUser}
-                onChange={e => { setSelUser(e.target.value); setSelDevice(""); setLogsPage(0); }}
+                onChange={e => { setSelUser(e.target.value); setSelDevice(""); resetToFirstPage(); }}
                 className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
               >
                 <option value="">All users</option>
-                {users?.map(u => (
-                  <option key={u.id} value={u.id}>{u.name || u.email}</option>
+                {talentPeople.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
               </select>
               <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
@@ -235,7 +356,7 @@ export default function LogsPage() {
             <div className="relative">
               <select
                 value={selType}
-                onChange={e => { setSelType(e.target.value); setLogsPage(0); }}
+                onChange={e => { setSelType(e.target.value); resetToFirstPage(); }}
                 className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
               >
                 <option value="">All types</option>
@@ -247,7 +368,8 @@ export default function LogsPage() {
             </div>
           </div>
 
-          {/* Smart search */}
+          {/* Free-text event search — full date-range/device/user-scoped
+              dataset, server-side, see note above */}
           <div className="flex flex-col gap-1 flex-1 min-w-[200px]">
             <label className="text-xs text-gray-600 font-medium">Search</label>
             <div className="relative">
@@ -256,12 +378,12 @@ export default function LogsPage() {
                 type="text"
                 placeholder="App, window title, URL, user, hostname…"
                 value={search}
-                onChange={e => { setSearch(e.target.value); setLogsPage(0); }}
+                onChange={e => setSearch(e.target.value)}
                 className="w-full pl-9 pr-8 py-2 bg-white border border-gray-300 rounded-lg text-sm text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 transition"
               />
               {search && (
                 <button
-                  onClick={() => { setSearch(""); setLogsPage(0); }}
+                  onClick={() => setSearch("")}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-600"
                 >
                   <X size={13} />
@@ -271,15 +393,15 @@ export default function LogsPage() {
           </div>
         </div>
 
-        {/* Event count summary chips */}
-        {counts && Object.keys(counts).length > 0 && (
+        {/* Event count summary chips — this page only */}
+        {Object.keys(counts).length > 0 && (
           <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t border-gray-100">
             {Object.entries(counts)
               .sort((a, b) => b[1] - a[1])
               .map(([type, count]) => (
                 <button
                   key={type}
-                  onClick={() => { setSelType(selType === type ? "" : type); setLogsPage(0); }}
+                  onClick={() => { setSelType(selType === type ? "" : type); resetToFirstPage(); }}
                   className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition ${
                     selType === type
                       ? EVENT_COLOR[type] ?? "bg-brand-50 text-brand-700 border-brand-200"
@@ -291,7 +413,7 @@ export default function LogsPage() {
                 </button>
               ))}
             <span className="text-xs text-gray-600 ml-auto self-center">
-              {filtered.length}{search ? ` of ${logs?.length}` : ""} event{filtered.length !== 1 ? "s" : ""}
+              {items.length} event{items.length !== 1 ? "s" : ""} on this page
             </span>
           </div>
         )}
@@ -301,10 +423,10 @@ export default function LogsPage() {
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
         {isLoading ? (
           <div className="py-16 text-center text-gray-600 text-sm animate-pulse">Loading activity…</div>
-        ) : !filtered.length ? (
+        ) : !items.length ? (
           <div className="py-16 text-center text-gray-600 text-sm">
             <Search size={32} className="mx-auto mb-3 text-gray-200" />
-            {search ? "No events match your search." : "No activity found for the selected filters."}
+            {debouncedSearch ? "No events match your search." : "No activity found for the selected filters."}
           </div>
         ) : (
           <>
@@ -321,36 +443,36 @@ export default function LogsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {pagedLogs.map(e => <LogRow key={e.id} e={e} />)}
+                  {items.map(e => <LogRow key={e.id} e={e} />)}
                 </tbody>
               </table>
             </div>
 
-            {/* Pagination */}
-            {filtered.length > PAGE_SIZE && (
-              <div className="border-t border-gray-100 px-4 py-3 flex items-center justify-between">
-                <span className="text-xs text-gray-600">
-                  Showing {safeLogsPage * PAGE_SIZE + 1}–{Math.min((safeLogsPage + 1) * PAGE_SIZE, filtered.length)} of {filtered.length.toLocaleString()}
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    disabled={safeLogsPage <= 0}
-                    onClick={() => setLogsPage(p => Math.max(0, p - 1))}
-                    className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    <ChevronLeft size={14} />
-                  </button>
-                  <span className="text-xs text-gray-600 px-2">Page {safeLogsPage + 1} of {logsTotalPages}</span>
-                  <button
-                    disabled={safeLogsPage >= logsTotalPages - 1}
-                    onClick={() => setLogsPage(p => Math.min(logsTotalPages - 1, p + 1))}
-                    className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    <ChevronRight size={14} />
-                  </button>
-                </div>
+            {/* Server-side pagination — no exact total is available (see
+                LogsPage doc comment), so this is Prev/Next with an honest
+                "more available" signal rather than a fabricated page count. */}
+            <div className="border-t border-gray-100 px-4 py-3 flex items-center justify-between">
+              <span className="text-xs text-gray-600">
+                Showing {offset + 1}–{offset + items.length}
+                {page?.has_more ? " · more available" : ""}
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  disabled={offset <= 0}
+                  onClick={() => setOffset(o => Math.max(0, o - PAGE_SIZE))}
+                  className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                <button
+                  disabled={!page?.has_more}
+                  onClick={() => setOffset(o => o + PAGE_SIZE)}
+                  className="p-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <ChevronRight size={14} />
+                </button>
               </div>
-            )}
+            </div>
           </>
         )}
       </div>

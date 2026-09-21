@@ -29,3 +29,31 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     received: int
     skipped:  int
+
+
+# ── GET /v1/logs ──────────────────────────────────────────────────────────────
+
+class LogEventOut(BaseModel):
+    id:             str
+    event_type:     str
+    app_name:       Optional[str] = None
+    window_title:   Optional[str] = None
+    url:            Optional[str] = None
+    duration:       int
+    timestamp:      Optional[str] = None
+    timestamp_unix: int
+    device_id:      str
+    hostname:       str
+    employee_id:    Optional[str] = None
+    employee_name:  Optional[str] = None
+
+
+class LogsPageOut(BaseModel):
+    items:     List[LogEventOut]
+    # No exact total: an unbounded COUNT(*) over activity_events (tens of
+    # millions of rows) on every page load is a cost this endpoint refuses to
+    # pay. `has_more` is derived from a cheap one-row over-fetch instead — see
+    # get_logs()'s docstring for the full reasoning.
+    has_more:  bool
+    offset:    int
+    limit:     int
