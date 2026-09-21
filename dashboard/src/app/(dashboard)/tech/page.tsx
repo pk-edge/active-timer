@@ -17,7 +17,6 @@ import GroupPicker from "@/components/GroupPicker";
 import { format } from "date-fns";
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/AccessDenied";
-import PageSkeleton from "@/components/PageSkeleton";
 import type {
   TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory } from "@/types";
 
@@ -409,10 +408,16 @@ export default function TechUtilizationPage() {
   const categories: AppCategory[] = catsPage?.items ?? [];
 
   // summary feeds the always-visible stat cards, so it always loads.
-  const { data: summary, isLoading: summaryLoading } = useSWR(
+  const { data: summary, isLoading: summaryLoading, isValidating: summaryValidating } = useSWR(
     ["tech-sum",   dateRange.since, dateRange.until, groupId, employeeId],
     () => getTechSummary(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
   );
+  // isValidating is true during background revalidation (stale data is still
+  // shown, per the global keepPreviousData config) — a filter change re-keys
+  // this call, but without this the old stat cards just sit there with no
+  // indication a new fetch is running until they silently swap. Same
+  // "Updating…" convention as Reports/Logs/Website-Usage/App-Usage/Category-Usage.
+  const isRefreshing = summaryValidating && !!summary;
   // Everything below is fetched ONLY for the tab that needs it (key = null when
   // inactive → SWR skips the request). This turns the old 7-request mount burst
   // — which was saturating the single backend worker and producing the CORS/5xx
@@ -437,7 +442,15 @@ export default function TechUtilizationPage() {
 
   if (loading) return <PageLoader />;
   if (!can("tech", "view")) return <AccessDenied label="Technology Utilization" />;
-  if (summaryLoading && !summary) return <PageSkeleton variant="dashboard" />;
+
+  // Cold load only — keepPreviousData means this goes false again the instant
+  // ANY data exists, even for a different filter key, so it never re-fires on
+  // a filter change (isRefreshing above covers that case instead). Deliberately
+  // NOT an early return: the header, filter chips, and tabs render immediately
+  // either way — only the stat cards (the one section that reads `summary`)
+  // show a skeleton. The tab content below has its own independent lazy-load
+  // skeleton (`TabSkeleton`) that doesn't depend on `summary` at all.
+  const summaryColdLoading = summaryLoading && !summary;
 
   const TABS: { key: Tab; label: string }[] = [
     { key: "overview",    label: "Overview"    },
@@ -461,7 +474,12 @@ export default function TechUtilizationPage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
-          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Technology Utilization</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Technology Utilization</h1>
+            {isRefreshing && (
+              <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+            )}
+          </div>
           <p className="text-sm text-gray-600 mt-0.5">Track application usage and category allocation across your organisation</p>
         </div>
       </div>
@@ -504,21 +522,36 @@ export default function TechUtilizationPage() {
         )}
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
-        {statCards.map((s, i) => (
-          <div key={i} className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <div className={`w-8 h-8 rounded-lg ${s.color.split(" ")[0]} flex items-center justify-center`}>
-                <s.icon size={15} className={s.color.split(" ")[1]} />
+      {/* Stat cards — cold-load skeleton uses the identical grid/card shape so
+          nothing shifts once `summary` arrives. */}
+      {summaryColdLoading ? (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5" aria-busy="true" aria-label="Loading stats">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-8 h-8 rounded-lg bg-gray-200 animate-pulse" />
+                <div className="h-3 w-20 bg-gray-200 rounded animate-pulse" />
               </div>
-              <p className="text-xs text-gray-600 font-medium uppercase tracking-wide truncate">{s.label}</p>
+              <div className="h-6 w-16 bg-gray-200 rounded animate-pulse" />
             </div>
-            <p className="text-2xl font-bold text-gray-900 truncate">{s.value}</p>
-            {s.sub && <p className="text-xs text-gray-600 mt-0.5 truncate">Category: {s.sub}</p>}
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+          {statCards.map((s, i) => (
+            <div key={i} className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+              <div className="flex items-center gap-2 mb-2">
+                <div className={`w-8 h-8 rounded-lg ${s.color.split(" ")[0]} flex items-center justify-center`}>
+                  <s.icon size={15} className={s.color.split(" ")[1]} />
+                </div>
+                <p className="text-xs text-gray-600 font-medium uppercase tracking-wide truncate">{s.label}</p>
+              </div>
+              <p className="text-2xl font-bold text-gray-900 truncate">{s.value}</p>
+              {s.sub && <p className="text-xs text-gray-600 mt-0.5 truncate">Category: {s.sub}</p>}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-5">

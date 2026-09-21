@@ -19,6 +19,7 @@ import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, ProdIcon, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
+  ListSkeletonRows, DetailSkeletonRows,
   type DateRange } from "@/components/UsagePageShell";
 import { smartSort } from "@/lib/smartSearch";
 import type { AppUsageItem, AppUsageDetailOut } from "@/types";
@@ -31,10 +32,14 @@ function DetailPanel({
   item, since, until, groupId, employeeId }: { item: AppUsageItem; since: string; until: string; groupId: string; employeeId: string }) {
   const [tab, setTab] = useState("Titles");
 
-  const { data, isLoading } = useSWR<AppUsageDetailOut>(
+  const { data, isLoading, isValidating } = useSWR<AppUsageDetailOut>(
     ["app-detail", item.app_name, tab.toLowerCase(), since, until, groupId, employeeId],
     () => getAppUsageDetail(item.app_name, tab.toLowerCase(), since, until, groupId || undefined, employeeId || undefined),
   );
+  // Cold load only — keepPreviousData means isLoading goes false the instant
+  // any data exists, even for a different tab/filter key. isValidating covers
+  // the background-refetch case (switching tabs, changing filters) instead.
+  const isRefreshing = isValidating && !!data;
 
   return (
     <div className="flex flex-col h-full">
@@ -46,6 +51,9 @@ function DetailPanel({
             <Monitor size={13} style={{ color: item.color }} />
           </div>
           <p className="font-semibold text-gray-900 text-sm truncate flex-1">{item.app_name}</p>
+          {isRefreshing && (
+            <span className="text-xs text-gray-400 animate-pulse shrink-0">Updating…</span>
+          )}
         </div>
         <p className="text-xs text-gray-600">
           {fmtDur(item.duration_secs)} · {item.user_count} {item.user_count === 1 ? "user" : "users"} · {item.pct.toFixed(1)}%
@@ -66,7 +74,7 @@ function DetailPanel({
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {isLoading ? (
-          <p className="text-sm text-gray-600 py-8 text-center">Loading…</p>
+          <DetailSkeletonRows />
         ) : tab === "Titles" ? (
           <>
             {(data?.titles ?? []).length === 0
@@ -214,9 +222,13 @@ export default function AppUsagePage() {
             <div />
           </div>
 
-          <div className="flex-1 overflow-y-auto min-h-0">
+          <div className="flex-1 overflow-y-auto min-h-0" aria-busy={isLoading || undefined}>
             {isLoading ? (
-              <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
+              <ListSkeletonRows
+                gridClassName="grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_120px_60px_32px]"
+                rowClassName="gap-2 px-3 sm:px-4 py-3"
+                columns={["icon", "text", "duration", "pct", "menu"]}
+              />
             ) : filtered.length === 0 ? (
               <p className="text-sm text-gray-600 py-12 text-center">No applications found.</p>
             ) : paged.map(item => (

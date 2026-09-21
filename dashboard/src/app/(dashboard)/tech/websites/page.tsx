@@ -19,6 +19,7 @@ import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, ProdIcon, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
+  ListSkeletonRows, DetailSkeletonRows,
   type DateRange } from "@/components/UsagePageShell";
 import { smartSort } from "@/lib/smartSearch";
 import type { WebsiteItem, WebsiteDetailOut } from "@/types";
@@ -31,10 +32,14 @@ function DetailPanel({
   item, since, until, groupId, employeeId }: { item: WebsiteItem; since: string; until: string; groupId: string; employeeId: string }) {
   const [tab, setTab] = useState("Titles");
 
-  const { data, isLoading } = useSWR<WebsiteDetailOut>(
+  const { data, isLoading, isValidating } = useSWR<WebsiteDetailOut>(
     ["website-detail", item.host, tab.toLowerCase(), since, until, groupId, employeeId],
     () => getWebsiteDetail(item.host, tab.toLowerCase(), since, until, groupId || undefined, employeeId || undefined),
   );
+  // Cold load only — keepPreviousData means isLoading goes false the instant
+  // any data exists, even for a different tab/filter key. isValidating covers
+  // the background-refetch case (switching tabs, changing filters) instead.
+  const isRefreshing = isValidating && !!data;
 
   return (
     <div className="flex flex-col h-full">
@@ -45,6 +50,9 @@ function DetailPanel({
             <Globe size={12} className="text-gray-600" />
           </div>
           <p className="font-semibold text-gray-900 text-sm truncate">{item.host}</p>
+          {isRefreshing && (
+            <span className="text-xs text-gray-400 animate-pulse shrink-0">Updating…</span>
+          )}
           <a href={`https://${item.host}`} target="_blank" rel="noreferrer"
              className="text-gray-600 hover:text-brand-500 ml-auto shrink-0">
             <ExternalLink size={13} />
@@ -63,7 +71,7 @@ function DetailPanel({
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {isLoading ? (
-          <p className="text-sm text-gray-600 py-8 text-center">Loading…</p>
+          <DetailSkeletonRows />
         ) : tab === "Titles" ? (
           <>
             {(data?.titles ?? []).length === 0
@@ -230,9 +238,13 @@ export default function WebsiteUsagePage() {
           </div>
 
           {/* Rows */}
-          <div className="flex-1 overflow-y-auto min-h-0">
+          <div className="flex-1 overflow-y-auto min-h-0" aria-busy={isLoading || undefined}>
             {isLoading ? (
-              <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
+              <ListSkeletonRows
+                gridClassName="grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_110px_60px_32px]"
+                rowClassName="gap-2 px-3 sm:px-4 py-3"
+                columns={["icon", "text", "duration", "pct", "menu"]}
+              />
             ) : filtered.length === 0 ? (
               <p className="text-sm text-gray-600 py-12 text-center">No websites found.</p>
             ) : paged.map(item => (

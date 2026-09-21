@@ -316,6 +316,98 @@ export function DurationRow({
   );
 }
 
+// ── List skeleton rows ────────────────────────────────────────────────────────
+// Cold-load placeholder for the two-panel list views (Website/App/Category
+// Usage). Each page passes its OWN grid template / gap / padding classes so
+// the skeleton rows are pixel-close to the real rows they'll be replaced by —
+// nothing shifts once data arrives. `columns` names each page's own column
+// sequence in order (they differ: websites/apps have a leading productivity
+// icon + trailing menu icon; category usage has a leading color dot and no
+// menu column).
+
+type SkeletonColumn = "icon" | "dot" | "text" | "duration" | "pct" | "menu";
+
+const SKELETON_TEXT_WIDTHS = ["72%", "58%", "66%", "50%", "62%", "78%", "54%", "68%"];
+
+function SkeletonCell({ type, seed }: { type: SkeletonColumn; seed: number }) {
+  switch (type) {
+    case "icon":
+      return <div className="w-4 h-4 rounded-full bg-gray-200 animate-pulse self-center" />;
+    case "dot":
+      return <div className="w-3 h-3 rounded-full bg-gray-200 animate-pulse mt-0.5 shrink-0" />;
+    case "text":
+      return (
+        <div className="min-w-0 self-center">
+          <div
+            className="h-3.5 bg-gray-200 rounded animate-pulse"
+            style={{ width: SKELETON_TEXT_WIDTHS[seed % SKELETON_TEXT_WIDTHS.length] }}
+          />
+          <div className="h-2.5 w-16 bg-gray-100 rounded animate-pulse mt-1.5" />
+        </div>
+      );
+    case "duration":
+      return <div className="h-3.5 w-14 bg-gray-200 rounded animate-pulse self-center" />;
+    case "pct":
+      return <div className="h-3.5 w-9 bg-gray-200 rounded animate-pulse self-center justify-self-end" />;
+    case "menu":
+      return <div className="w-3.5 h-3.5 rounded-full bg-gray-200 animate-pulse self-center" />;
+  }
+}
+
+export function ListSkeletonRows({
+  gridClassName, rowClassName, columns, count = 8,
+}: {
+  /** Same `grid-cols-[...] sm:grid-cols-[...]` string the real rows use. */
+  gridClassName: string;
+  /** Gap + padding classes the real rows use (e.g. "gap-2 px-3 sm:px-4 py-3"). */
+  rowClassName: string;
+  columns: SkeletonColumn[];
+  count?: number;
+}) {
+  return (
+    <>
+      {Array.from({ length: count }).map((_, i) => (
+        <div
+          key={i}
+          className={`grid ${gridClassName} ${rowClassName} border-b border-gray-100`}
+          aria-hidden="true"
+        >
+          {columns.map((col, j) => <SkeletonCell key={j} type={col} seed={i + j} />)}
+        </div>
+      ))}
+    </>
+  );
+}
+
+// ── Detail panel skeleton ─────────────────────────────────────────────────────
+// Generic cold-load placeholder for a DetailPanel's active tab content. Not
+// tailored per-tab-shape (Titles/Subpages/Users/Usage/Activities all differ
+// slightly) — this approximates the most common shape (a DurationRow list)
+// closely enough that the plain "Loading…" text disappears without needing a
+// bespoke skeleton per tab.
+
+export function DetailSkeletonRows({ count = 6 }: { count?: number }) {
+  return (
+    <div className="pt-1" aria-hidden="true">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="py-2.5 border-b border-gray-100 last:border-0">
+          <div className="flex items-center justify-between mb-1.5 gap-2">
+            <div
+              className="h-3.5 bg-gray-200 rounded animate-pulse"
+              style={{ width: SKELETON_TEXT_WIDTHS[i % SKELETON_TEXT_WIDTHS.length] }}
+            />
+            <div className="flex items-center gap-3 shrink-0">
+              <div className="h-3 w-12 bg-gray-200 rounded animate-pulse" />
+              <div className="h-2.5 w-7 bg-gray-100 rounded animate-pulse" />
+            </div>
+          </div>
+          <div className="h-1 w-full bg-gray-100 rounded-full animate-pulse" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ── List pagination ────────────────────────────────────────────────────────────
 // Client-side pager for the two-panel list views. The list is already fetched in
 // one (now today-scoped, small) response, so this is purely a render/scan bound —

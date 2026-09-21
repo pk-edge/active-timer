@@ -12,6 +12,7 @@ import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
+  ListSkeletonRows, DetailSkeletonRows,
   type DateRange } from "@/components/UsagePageShell";
 import { smartSort } from "@/lib/smartSearch";
 import type { CategoryUsageItem, CategoryUsageDetailOut } from "@/types";
@@ -25,10 +26,14 @@ function DetailPanel({
   const [tab, setTab] = useState("Activities");
   const [userSearch, setUserSearch] = useState("");
 
-  const { data, isLoading } = useSWR<CategoryUsageDetailOut>(
+  const { data, isLoading, isValidating } = useSWR<CategoryUsageDetailOut>(
     ["cat-detail", item.cat_id, tab.toLowerCase(), since, until, groupId],
     () => getCategoryUsageDetail(item.cat_id, tab.toLowerCase(), since, until, groupId || undefined),
   );
+  // Cold load only — keepPreviousData means isLoading goes false the instant
+  // any data exists, even for a different tab/filter key. isValidating covers
+  // the background-refetch case (switching tabs, changing filters) instead.
+  const isRefreshing = isValidating && !!data;
 
   const debouncedUserSearch = useDebouncedValue(userSearch, 200);
 
@@ -44,6 +49,9 @@ function DetailPanel({
         <div className="flex items-center gap-2 mb-1">
           <div className="w-3 h-3 rounded-full shrink-0" style={{ background: item.color }} />
           <p className="font-semibold text-gray-900 text-sm flex-1">{item.name}</p>
+          {isRefreshing && (
+            <span className="text-xs text-gray-400 animate-pulse shrink-0">Updating…</span>
+          )}
           <p className="text-xs text-gray-600 shrink-0">
             Total Duration: <span className="font-medium text-gray-700">{fmtDur(item.duration_secs)}</span>
           </p>
@@ -74,7 +82,7 @@ function DetailPanel({
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {isLoading ? (
-          <p className="text-sm text-gray-600 py-8 text-center">Loading…</p>
+          <DetailSkeletonRows />
         ) : tab === "Activities" ? (
           <>
             {(data?.activities ?? []).length === 0
@@ -213,9 +221,13 @@ export default function CategoryUsagePage() {
             <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide text-right">%</p>
           </div>
 
-          <div className="flex-1 overflow-y-auto min-h-0">
+          <div className="flex-1 overflow-y-auto min-h-0" aria-busy={isLoading || undefined}>
             {isLoading ? (
-              <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
+              <ListSkeletonRows
+                gridClassName="grid-cols-[16px_1fr_110px_52px] sm:grid-cols-[16px_1fr_120px_60px]"
+                rowClassName="gap-3 px-4 sm:px-5 py-3.5"
+                columns={["dot", "text", "duration", "pct"]}
+              />
             ) : filtered.length === 0 ? (
               <p className="text-sm text-gray-600 py-12 text-center">No categories found.</p>
             ) : paged.map(item => (

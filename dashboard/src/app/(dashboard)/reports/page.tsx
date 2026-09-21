@@ -1,6 +1,5 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
-import PageSkeleton from "@/components/PageSkeleton";
 import { useState, useMemo, useEffect } from "react";
 import dynamic from "next/dynamic";
 import useSWR from "swr";
@@ -215,7 +214,7 @@ export default function ReportsPage() {
       ? getDeviceSummary(deviceId, rangeArgDays, rangeArg)
       : getCompanySummary(rangeArgDays, rangeArg),
   );
-  const { data: apps, isValidating: appsValidating } = useSWR<AppUsage[]>(
+  const { data: apps, isLoading: appsLoading, isValidating: appsValidating } = useSWR<AppUsage[]>(
     appsKey,
     () => deviceId
       ? getDeviceTopApps(deviceId, rangeArgDays, rangeArg)
@@ -238,7 +237,15 @@ export default function ReportsPage() {
 
   if (loading) return <PageLoader />;
   if (!can("reports", "view")) return <AccessDenied label="Reports" />;
-  if (summaryLoading && !summary) return <PageSkeleton variant="dashboard" cards={2} />;
+
+  // Cold load only — keepPreviousData means these go false again the instant
+  // ANY data exists, even for a different filter, so this never re-fires on a
+  // filter change (isRefreshing above covers that case instead). Deliberately
+  // NOT an early return: the header, date picker, and both search bars render
+  // immediately either way, so the page is interactive before the first
+  // response ever lands instead of being replaced by a full-page placeholder.
+  const summaryColdLoading = summaryLoading && !summary;
+  const appsColdLoading = appsLoading && !apps;
 
   return (
     /* Outer: fills the flex-col main, no overflow — all scroll happens inside */
@@ -300,7 +307,17 @@ export default function ReportsPage() {
       </div>
 
       {/* ── Stat cards — fixed height row, shrinks if no data ── */}
-      {totalActive > 0 && (
+      {summaryColdLoading ? (
+        <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3" aria-busy="true" aria-label="Loading stats">
+          {[0, 1].map(i => (
+            <div key={i} className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
+              <div className="h-3 w-24 bg-gray-200 rounded animate-pulse mb-2" />
+              <div className="h-6 w-20 bg-gray-200 rounded animate-pulse mb-2" />
+              <div className="h-3 w-28 bg-gray-200 rounded animate-pulse" />
+            </div>
+          ))}
+        </div>
+      ) : totalActive > 0 && (
         <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3">
           <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
             <p className="text-xs text-gray-600 mb-0.5">Total active time</p>
@@ -320,7 +337,14 @@ export default function ReportsPage() {
       )}
 
       {/* ── Chart — fixed height, never grows ── */}
-      {summary && (
+      {summaryColdLoading ? (
+        <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 pt-4 pb-3 shadow-sm" aria-busy="true" aria-label="Loading chart">
+          <div className="h-4 w-40 bg-gray-200 rounded animate-pulse mb-3" />
+          {/* Matches DailyActiveBarChart's own h-32/h-40 footprint exactly, so
+              nothing shifts when the real chart mounts in its place. */}
+          <div className="h-32 sm:h-40 bg-gray-50 rounded animate-pulse" />
+        </div>
+      ) : summary && (
         <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 pt-4 pb-3 shadow-sm">
           <p className="text-sm font-semibold text-gray-800 mb-2">Active time per day</p>
           {/* h-32 on mobile (128px), h-40 on sm+ (160px) */}
@@ -329,7 +353,24 @@ export default function ReportsPage() {
       )}
 
       {/* ── Top applications — fills ALL remaining vertical space, own scroller ── */}
-      {apps && apps.length > 0 && (
+      {appsColdLoading ? (
+        <div className="flex-1 min-h-0 flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden" aria-busy="true" aria-label="Loading top applications">
+          <div className="shrink-0 px-4 sm:px-5 pt-4 pb-3 border-b border-gray-100">
+            <div className="h-4 w-32 bg-gray-200 rounded animate-pulse mb-3" />
+            <div className="h-8 w-full bg-gray-100 rounded-lg animate-pulse" />
+          </div>
+          <div className="flex-1 min-h-0 overflow-hidden px-4 sm:px-5 py-3 space-y-3">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-2 sm:gap-3">
+                <div className="h-3 w-5 bg-gray-200 rounded animate-pulse shrink-0" />
+                <div className="h-3 w-28 sm:w-40 bg-gray-200 rounded animate-pulse shrink-0" />
+                <div className="flex-1 h-2 bg-gray-100 rounded-full animate-pulse" />
+                <div className="h-3 w-12 bg-gray-200 rounded animate-pulse shrink-0" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : apps && apps.length > 0 && (
         <div className="flex-1 min-h-0 flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
 
           {/* Card header + search — sticky at top of card, never scrolls */}

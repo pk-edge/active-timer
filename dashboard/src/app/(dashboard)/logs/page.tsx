@@ -459,7 +459,40 @@ export default function LogsPage() {
       {/* Table */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
         {isLoading ? (
-          <div className="py-16 text-center text-gray-600 text-sm animate-pulse">Loading activity…</div>
+          // Real <table>/<thead> markup, not a placeholder block — the header
+          // row is pixel-identical to the loaded state (same cells, same
+          // padding), so nothing shifts once rows arrive. keepPreviousData
+          // means this only fires on a genuine cold load; a filter-triggered
+          // refetch is covered by the "Updating…" label above instead.
+          <div className="overflow-x-auto" aria-busy="true" aria-label="Loading activity">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50 border-b border-gray-200">
+                  <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Time</th>
+                  <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Type</th>
+                  <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide">Activity</th>
+                  <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Duration</th>
+                  <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">User</th>
+                  <th className="py-3 px-4 text-left text-xs font-semibold text-gray-600 uppercase tracking-wide whitespace-nowrap">Device</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: 12 }).map((_, i) => (
+                  <tr key={i} className="border-b border-gray-100 last:border-0">
+                    <td className="py-3 px-4"><div className="h-3 w-16 bg-gray-200 rounded animate-pulse" /></td>
+                    <td className="py-3 px-4"><div className="h-5 w-20 bg-gray-200 rounded-full animate-pulse" /></td>
+                    <td className="py-3 px-4">
+                      <div className="h-3.5 w-40 bg-gray-200 rounded animate-pulse mb-1.5" />
+                      <div className="h-3 w-28 bg-gray-100 rounded animate-pulse" />
+                    </td>
+                    <td className="py-3 px-4"><div className="h-5 w-14 bg-gray-200 rounded-full animate-pulse" /></td>
+                    <td className="py-3 px-4"><div className="h-3 w-24 bg-gray-200 rounded animate-pulse" /></td>
+                    <td className="py-3 px-4"><div className="h-3 w-28 bg-gray-200 rounded animate-pulse" /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : !items.length ? (
           <div className="py-16 text-center text-gray-600 text-sm">
             <Search size={32} className="mx-auto mb-3 text-gray-200" />
