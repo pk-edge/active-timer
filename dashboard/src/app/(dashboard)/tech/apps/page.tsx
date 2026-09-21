@@ -110,10 +110,16 @@ export default function AppUsagePage() {
   const [summaryMode,  setSummaryMode]  = useState(true);
   const [selected,     setSelected]     = useState<AppUsageItem | null>(null);
 
-  const { data, isLoading } = useSWR(
+  const { data, isLoading, isValidating } = useSWR(
     ["app-usage", dateRange.since, dateRange.until, productivity, groupId, employeeId],
     () => getAppUsage(dateRange.since, dateRange.until, productivity || undefined, groupId || undefined, employeeId || undefined),
   );
+  // isValidating is true during background revalidation (stale data is still
+  // shown, per the global keepPreviousData config) — a filter change re-keys
+  // this call, but without this the old list just sits there with no
+  // indication a new fetch is running until it silently swaps. Same
+  // "Updating…" convention as Organization Overview.
+  const isRefreshing = isValidating && !!data;
 
   const debouncedSearch = useDebouncedValue(search, 200);
 
@@ -157,7 +163,12 @@ export default function AppUsagePage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div>
-          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Application Usage</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Application Usage</h1>
+            {isRefreshing && (
+              <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+            )}
+          </div>
           <p className="text-sm text-gray-600 mt-0.5">Desktop app activity from all devices</p>
         </div>
         <div className="flex items-center gap-2">

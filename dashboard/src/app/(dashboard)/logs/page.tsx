@@ -284,11 +284,17 @@ export default function LogsPage() {
 
   const swrKey = ["logs", since, until, selDevice, selUser, selType, debouncedSearch, offset] as const;
 
-  const { data: page, isLoading } = useSWR(
+  const { data: page, isLoading, isValidating } = useSWR(
     swrKey,
     () => getLogs(logsOpts),
     { refreshInterval: 15_000, keepPreviousData: true },
   );
+
+  // isValidating is true during ANY fetch, including the 15s poll and every
+  // filter/date-range/search-triggered refetch — keepPreviousData means the
+  // old rows just sit there with no indication a new fetch is running until
+  // they silently swap. Same "Updating…" convention as Organization Overview.
+  const isRefreshing = isValidating && !!page;
 
   // The items returned ARE already the filtered set (server-side) — render
   // them directly, no client-side re-filtering (that would be redundant and
@@ -327,7 +333,12 @@ export default function LogsPage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3 mb-6 shrink-0">
         <div>
-          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Activity Logs</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Activity Logs</h1>
+            {isRefreshing && (
+              <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+            )}
+          </div>
           <p className="text-gray-600 text-sm mt-0.5">Live feed — refreshes every 15 s</p>
         </div>
       </div>

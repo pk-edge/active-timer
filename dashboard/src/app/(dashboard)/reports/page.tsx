@@ -209,18 +209,25 @@ export default function ReportsPage() {
     ? ["device-apps", deviceId, dateRange.since, dateRange.until]
     : ["top-apps", dateRange.since, dateRange.until];
 
-  const { data: summary, isLoading: summaryLoading } = useSWR<CompanyDay[]>(
+  const { data: summary, isLoading: summaryLoading, isValidating: summaryValidating } = useSWR<CompanyDay[]>(
     summaryKey,
     () => deviceId
       ? getDeviceSummary(deviceId, rangeArgDays, rangeArg)
       : getCompanySummary(rangeArgDays, rangeArg),
   );
-  const { data: apps } = useSWR<AppUsage[]>(
+  const { data: apps, isValidating: appsValidating } = useSWR<AppUsage[]>(
     appsKey,
     () => deviceId
       ? getDeviceTopApps(deviceId, rangeArgDays, rangeArg)
       : getTopApps(rangeArgDays, APP_SEARCH_LIMIT, rangeArg),
   );
+
+  // isValidating is true during background revalidation (stale data is still
+  // shown, per the global keepPreviousData config) — a filter/date-range/
+  // device change re-keys both SWR calls above, but without this the old
+  // numbers just sit there with no indication a new fetch is in flight until
+  // they silently swap. Same "Updating…" convention as Organization Overview.
+  const isRefreshing = (summaryValidating && !!summary) || (appsValidating && !!apps);
 
   const filteredApps = useMemo(() => {
     if (!apps) return [];
@@ -241,7 +248,12 @@ export default function ReportsPage() {
       <div className="shrink-0 flex flex-col gap-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">Reports</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">Reports</h1>
+              {isRefreshing && (
+                <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+              )}
+            </div>
             <p className="text-gray-600 text-xs sm:text-sm mt-0.5">
               {selectedDevice
                 ? `${selectedDevice.hostname}${selectedDevice.employee_name ? ` · ${selectedDevice.employee_name}` : ""}`
