@@ -123,6 +123,17 @@ function dayStartUnix(yyyyMmDd: string): number {
   return Math.floor(new Date(yyyyMmDd + "T00:00:00").getTime() / 1000);
 }
 
+/** Cosmetic only — the agent reports raw sys.platform values ("darwin",
+ *  "win32"), which vary in casing across the codebase; normalize just for
+ *  this detail line rather than reaching for a shared util. */
+function platformLabel(p: string): string {
+  const v = p.toLowerCase();
+  if (v === "darwin" || v === "macos") return "macOS";
+  if (v === "win32" || v === "windows") return "Windows";
+  if (v === "linux") return "Linux";
+  return p;
+}
+
 export default function LogsPage() {
   const { loading, can } = useUser();
   const today = format(new Date(), "yyyy-MM-dd");
@@ -136,6 +147,7 @@ export default function LogsPage() {
   const [selType,   setSelType]   = useState("");
   const [search,    setSearch]    = useState("");
   const [talentQuery, setTalentQuery] = useState("");
+  const [deviceQuery, setDeviceQuery] = useState("");
   const [offset,    setOffset]    = useState(0);
 
   function resetToFirstPage() { setOffset(0); }
@@ -196,13 +208,46 @@ export default function LogsPage() {
     resetToFirstPage();
   }
 
-  // Keep the search bar's text in sync when the person is changed/cleared via
-  // the plain <select> instead of the search bar itself.
+  // Keep the search bar's text in sync whenever selUser changes from
+  // elsewhere — defensive, since nothing else currently sets it besides
+  // handleSelectTalent and this box's own clear-to-empty.
   useEffect(() => {
     if (!selUser) { setTalentQuery(""); return; }
     const match = talentPeople.find(p => p.id === selUser);
     if (match) setTalentQuery(match.name);
   }, [selUser, talentPeople]);
+
+  // Device search bar — a proper searchable picker (hostname/employee/
+  // platform) in place of the old plain <select>, which only offered
+  // first-letter browser type-ahead over a concatenated "employee — hostname"
+  // string. Mirrors the talent search bar's pattern exactly.
+  const debouncedDeviceQuery = useDebouncedValue(deviceQuery, 200);
+  const deviceResults: TalentSearchResult[] = useMemo(
+    () => smartSort(
+      debouncedDeviceQuery, devices ?? [], d => [d.hostname, d.employee_name, d.platform],
+    ).map(d => ({
+      id: d.id,
+      name: d.hostname,
+      email: d.employee_name ?? "Unassigned",
+      detail: platformLabel(d.platform),
+    })),
+    [debouncedDeviceQuery, devices],
+  );
+
+  function handleSelectDevice(result: TalentSearchResult) {
+    setSelDevice(result.id);
+    setDeviceQuery(result.name);
+    resetToFirstPage();
+  }
+
+  // Keep the device box's text in sync whenever selDevice changes from
+  // elsewhere — in particular, selecting a talent above clears selDevice, and
+  // this box must not keep showing a hostname for a filter no longer applied.
+  useEffect(() => {
+    if (!selDevice) { setDeviceQuery(""); return; }
+    const match = devices?.find(d => d.id === selDevice);
+    if (match) setDeviceQuery(match.hostname);
+  }, [selDevice, devices]);
 
   const since = dayStartUnix(dateRange.since);
   // Exclusive upper bound: local midnight AFTER the "until" day, so the until
@@ -312,43 +357,24 @@ export default function LogsPage() {
             />
           </div>
 
-          {/* Device */}
+          {/* Device — proper search bar, not a runtime-search dropdown */}
           <div className="flex flex-col gap-1">
             <label className="text-xs text-gray-600 font-medium">Device</label>
-            <div className="relative">
-              <select
-                value={selDevice}
-                onChange={e => { setSelDevice(e.target.value); resetToFirstPage(); }}
-                className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
-              >
-                <option value="">All devices</option>
-                {devices?.map(d => (
-                  <option key={d.id} value={d.id}>
-                    {d.employee_name ? `${d.employee_name} — ${d.hostname}` : d.hostname}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-            </div>
+            <TalentSearchBar
+              value={deviceQuery}
+              onChange={v => { setDeviceQuery(v); if (!v) { setSelDevice(""); resetToFirstPage(); } }}
+              results={deviceResults}
+              onSelect={handleSelectDevice}
+              placeholder="All devices — search hostname…"
+              label="Find a device"
+              className="w-64 shrink-0"
+            />
           </div>
 
-          {/* User */}
-          <div className="flex flex-col gap-1">
-            <label className="text-xs text-gray-600 font-medium">User</label>
-            <div className="relative">
-              <select
-                value={selUser}
-                onChange={e => { setSelUser(e.target.value); setSelDevice(""); resetToFirstPage(); }}
-                className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400"
-              >
-                <option value="">All users</option>
-                {talentPeople.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
-              <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-            </div>
-          </div>
+          {/* No separate "User" control — the "Find a talent" search bar above
+              already does this job with a proper search bar (see its own
+              onSelect), so a second dropdown for the same filter would just
+              be a redundant, worse (plain-<select>) control. */}
 
           {/* Event type */}
           <div className="flex flex-col gap-1">
