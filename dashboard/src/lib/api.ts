@@ -1,5 +1,5 @@
 import type {
-  Device, TimelineEvent, DailyStat, CompanyDay, AppUsage, LogEvent,
+  Device, TimelineEvent, DailyStat, CompanyDay, AppUsage, LogsPage,
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
   OverviewStats, HomeWidgets, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
@@ -238,8 +238,10 @@ export const getDailyStats = (deviceId: string, days = 7) =>
 export const getCompanySummary = (days = 7) =>
   request<CompanyDay[]>(`/v1/reports/company/summary?days=${days}`);
 
-export const getTopApps = (days = 7) =>
-  request<AppUsage[]>(`/v1/reports/company/top-apps?days=${days}`);
+export const getTopApps = (days = 7, limit?: number) =>
+  request<AppUsage[]>(
+    `/v1/reports/company/top-apps?days=${days}${limit !== undefined ? `&limit=${limit}` : ""}`,
+  );
 
 export const getDeviceSummary = (deviceId: string, days = 7) =>
   request<CompanyDay[]>(`/v1/reports/device/${deviceId}/summary?days=${days}`);
@@ -249,15 +251,21 @@ export const getDeviceTopApps = (deviceId: string, days = 7) =>
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
 
-export const getLogs = (opts?: { since?: number; until?: number; device_id?: string; employee_id?: string; event_type?: string }) => {
+export const getLogs = (opts?: {
+  since?: number; until?: number; device_id?: string; employee_id?: string;
+  event_type?: string; search?: string; limit?: number; offset?: number;
+}) => {
   const params = new URLSearchParams();
-  if (opts?.since !== undefined) params.set("since",        String(opts.since));
-  if (opts?.until !== undefined) params.set("until",        String(opts.until));
-  if (opts?.device_id)           params.set("device_id",    opts.device_id);
-  if (opts?.employee_id)         params.set("employee_id",  opts.employee_id);
-  if (opts?.event_type)          params.set("event_type",   opts.event_type);
+  if (opts?.since !== undefined)  params.set("since",       String(opts.since));
+  if (opts?.until !== undefined)  params.set("until",       String(opts.until));
+  if (opts?.device_id)            params.set("device_id",   opts.device_id);
+  if (opts?.employee_id)          params.set("employee_id", opts.employee_id);
+  if (opts?.event_type)           params.set("event_type",  opts.event_type);
+  if (opts?.search)               params.set("search",      opts.search);
+  if (opts?.limit !== undefined)  params.set("limit",       String(opts.limit));
+  if (opts?.offset !== undefined) params.set("offset",      String(opts.offset));
   const qs = params.toString();
-  return request<LogEvent[]>(`/v1/logs${qs ? `?${qs}` : ""}`);
+  return request<LogsPage>(`/v1/logs${qs ? `?${qs}` : ""}`);
 };
 
 // ── Me / RBAC ───────────────────────────────────────────────────────────────

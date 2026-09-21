@@ -14,11 +14,13 @@ const UsageLineChart = dynamic(() => import("./_components/UsageLineChart"), {
   loading: () => <div className="h-[220px] animate-pulse bg-gray-50 rounded-lg" />,
 });
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, ProdIcon, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
   type DateRange } from "@/components/UsagePageShell";
+import { smartSort } from "@/lib/smartSearch";
 import type { WebsiteItem, WebsiteDetailOut } from "@/types";
 
 const DETAIL_TABS = ["Titles", "Subpages", "Users", "Usage"];
@@ -127,18 +129,16 @@ export default function WebsiteUsagePage() {
     () => getWebsites(dateRange.since, dateRange.until, productivity || undefined, groupId || undefined, employeeId || undefined),
   );
 
+  const debouncedSearch = useDebouncedValue(search, 200);
+
   const filtered = useMemo(() => {
     const items = data?.items ?? [];
-    if (!search.trim()) return items;
-    const q = search.toLowerCase();
-    return items.filter(i =>
-      i.host.toLowerCase().includes(q) || (i.category_name ?? "").toLowerCase().includes(q)
-    );
-  }, [data, search]);
+    return smartSort(debouncedSearch, items, i => [i.host, i.category_name]);
+  }, [data, debouncedSearch]);
 
   // Client-side pagination over the (today-scoped) list — keeps the DOM light.
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [search, dateRange.since, dateRange.until, groupId, employeeId, productivity]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId, productivity]);
   const paged = useMemo(
     () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
     [filtered, page],

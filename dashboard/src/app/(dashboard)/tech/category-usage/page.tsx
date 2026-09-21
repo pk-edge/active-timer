@@ -7,11 +7,13 @@ import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, ChevronLeft } from "lucide-react";
 import { getCategoryUsage, getCategoryUsageDetail } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
   type DateRange } from "@/components/UsagePageShell";
+import { smartSort } from "@/lib/smartSearch";
 import type { CategoryUsageItem, CategoryUsageDetailOut } from "@/types";
 
 const DETAIL_TABS = ["Activities", "Users"];
@@ -28,12 +30,12 @@ function DetailPanel({
     () => getCategoryUsageDetail(item.cat_id, tab.toLowerCase(), since, until, groupId || undefined),
   );
 
+  const debouncedUserSearch = useDebouncedValue(userSearch, 200);
+
   const displayUsers = useMemo(() => {
     const list = data?.users ?? [];
-    if (!userSearch.trim()) return list;
-    const q = userSearch.toLowerCase();
-    return list.filter(u => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
-  }, [data?.users, userSearch]);
+    return smartSort(debouncedUserSearch, list, u => [u.name, u.email]);
+  }, [data?.users, debouncedUserSearch]);
 
   return (
     <div className="flex flex-col h-full">
@@ -114,16 +116,16 @@ export default function CategoryUsagePage() {
     () => getCategoryUsage(dateRange.since, dateRange.until, groupId || undefined),
   );
 
+  const debouncedSearch = useDebouncedValue(search, 200);
+
   const filtered = useMemo(() => {
     const items = data?.items ?? [];
-    if (!search.trim()) return items;
-    const q = search.toLowerCase();
-    return items.filter(i => i.name.toLowerCase().includes(q));
-  }, [data, search]);
+    return smartSort(debouncedSearch, items, i => [i.name]);
+  }, [data, debouncedSearch]);
 
   // Client-side pagination over the (today-scoped) list — keeps the DOM light.
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [search, dateRange.since, dateRange.until, groupId, employeeId]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId]);
   const paged = useMemo(
     () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
     [filtered, page],

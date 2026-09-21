@@ -76,6 +76,16 @@ export interface LogEvent {
   employee_name:  string | null;
 }
 
+/** GET /v1/logs response envelope. No exact total is returned — `has_more` is
+ *  derived server-side from a cheap one-row over-fetch rather than a COUNT(*)
+ *  over activity_events, so the UI can offer Prev/Next but not "page N of M". */
+export interface LogsPage {
+  items:    LogEvent[];
+  has_more: boolean;
+  offset:   number;
+  limit:    number;
+}
+
 // ── RBAC ──────────────────────────────────────────────────────────────────────
 
 export interface Permission { module: string; action: string; }

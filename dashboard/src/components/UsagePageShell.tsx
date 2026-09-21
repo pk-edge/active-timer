@@ -3,17 +3,20 @@
  * Shared two-panel shell for Website Usage, Application Usage, Category Usage.
  * Left: filterable list table. Right: detail panel with tabs.
  */
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, type RefObject } from "react";
 import useSWR from "swr";
 import {
   Search, RefreshCw, Download, ChevronDown, X,
   CheckCircle2, MinusCircle, Circle, BarChart2,
   ChevronLeft, ChevronRight,
 } from "lucide-react";
-import { getUsers, fmtSeconds } from "@/lib/api";
+import { getTechFilterUsers, fmtSeconds } from "@/lib/api";
 import GroupPicker from "@/components/GroupPicker";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
-import type { User } from "@/types";
+import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartSort } from "@/lib/smartSearch";
+import type { TechFilterUser } from "@/types";
 
 export type { DateRange };
 
@@ -58,15 +61,37 @@ interface SearchBarProps {
   placeholder: string;
 }
 
+// Bars currently mounted, in mount order. A page can legitimately render more
+// than one at once (tech/category-usage mounts a list-level bar plus a
+// detail-panel bar when its Users tab is open) — without coordination both
+// would grab the "/" hotkey and fight over focus. Only the most-recently
+// mounted bar (the one the user is more likely acting on) responds.
+const searchBarRegistry: RefObject<HTMLInputElement | null>[] = [];
+
 export function SmartSearchBar({ value, onChange, placeholder }: SearchBarProps) {
   const ref = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    searchBarRegistry.push(ref);
+    return () => {
+      const i = searchBarRegistry.indexOf(ref);
+      if (i !== -1) searchBarRegistry.splice(i, 1);
+    };
+  }, []);
+
+  useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "/" && document.activeElement?.tagName !== "INPUT") {
-        e.preventDefault();
-        ref.current?.focus();
-      }
+      if (e.key !== "/") return;
+      const active = document.activeElement;
+      const tag = active?.tagName;
+      const isEditable =
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        (active instanceof HTMLElement && active.isContentEditable);
+      if (isEditable) return;
+      if (searchBarRegistry[searchBarRegistry.length - 1] !== ref) return;
+      e.preventDefault();
+      ref.current?.focus();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -120,7 +145,47 @@ export function FilterBar({
   showProdFilter = true,
   summaryMode, setSummaryMode,
 }: FilterBarProps) {
-  const { data: users }  = useSWR<User[]>("users-filter", () => getUsers());
+  // `/v1/tech/filters/users` is gated on `tech:view` — the SAME permission
+  // these pages require — unlike `/v1/users` (`users:view`), which silently
+  // 403s for anyone with tech access but not users access and collapses this
+  // filter to nothing (PRD-2960). It's also scoped the same way the pages
+  // themselves are: `[]` for `own`-scoped callers, group-restricted for
+  // `groups`-scoped callers.
+  const { data: users, isLoading: usersLoading } =
+    useSWR<TechFilterUser[]>("tech-filter-users", () => getTechFilterUsers());
+
+  // Raw text in the talent search box. Kept separate from `employeeId` so
+  // typing a new query doesn't blow away the active filter until a talent is
+  // actually selected (or the box is cleared).
+  const [employeeQuery, setEmployeeQuery] = useState("");
+  const debouncedEmployeeQuery = useDebouncedValue(employeeQuery, 200);
+
+  // GroupPicker clears employeeId when a group is chosen — mirror that here
+  // so the search box doesn't keep showing a stale selected name.
+  useEffect(() => {
+    if (!employeeId) setEmployeeQuery("");
+  }, [employeeId]);
+
+  // Defensive: if employeeId is ever set before the user has typed anything
+  // (e.g. a future caller pre-populates the filter), show the matching name
+  // instead of a blank box.
+  useEffect(() => {
+    if (employeeId && employeeQuery === "") {
+      const match = users?.find(u => u.id === employeeId);
+      if (match) setEmployeeQuery(match.name);
+    }
+  }, [employeeId, users, employeeQuery]);
+
+  const activeUsers = useMemo(() => (users ?? []).filter(u => u.is_active), [users]);
+
+  // Email is shown alongside the name in TalentSearchBar's result rows so
+  // talents who share a name (e.g. several "Mohammad"s) are distinguishable —
+  // the core ask in PRD-2960.
+  const employeeResults: TalentSearchResult[] = useMemo(
+    () => smartSort(debouncedEmployeeQuery, activeUsers, u => [u.name, u.email])
+      .map(u => ({ id: u.id, name: u.name, email: u.email })),
+    [debouncedEmployeeQuery, activeUsers],
+  );
 
   return (
     <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -148,17 +213,22 @@ export function FilterBar({
         onChange={v => { setGroupId(v); setEmployeeId(""); }}
       />
 
-      {/* User */}
-      <div className="relative shrink-0">
-        <select value={employeeId} onChange={e => { setEmployeeId(e.target.value); setGroupId(""); }}
-                className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm">
-          <option value="">All Users</option>
-          {(users ?? []).filter(u => u.is_active).map(u => (
-            <option key={u.id} value={u.id}>{u.name}</option>
-          ))}
-        </select>
-        <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-      </div>
+      {/* Talent — search-driven filter (replaces the old bare-name <select>;
+          see PRD-2960). Clearing the box (X / Escape / backspace to empty)
+          restores "All Users" the same way the old blank option did. */}
+      <TalentSearchBar
+        value={employeeQuery}
+        onChange={v => {
+          setEmployeeQuery(v);
+          if (v === "") setEmployeeId("");
+        }}
+        results={employeeResults}
+        onSelect={r => { setEmployeeId(r.id); setEmployeeQuery(r.name); setGroupId(""); }}
+        loading={usersLoading}
+        placeholder="All Users — search by name or email…"
+        label="Filter by talent"
+        className="w-full sm:w-64 shrink-0"
+      />
 
       {/* Productivity */}
       {showProdFilter && setProductivity && (
