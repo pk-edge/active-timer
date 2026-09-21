@@ -21,6 +21,7 @@ from app.core.group_tree import descendant_group_ids
 from app.core.impersonation import is_super_admin, is_impersonating
 from app.core.ingest_queue import ingest_queue
 from app.core.provisioning import is_talent_role
+from app.core.search import build_search
 from app.core.security import hash_password_async
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
 from app.schemas.rbac import (
@@ -183,11 +184,17 @@ async def list_impersonatable_users(
             Employee.is_active   == True,    # noqa: E712
             Employee.is_approved == True,    # noqa: E712
         )
-        .order_by(Employee.name.asc())
     )
-    if search:
-        like = f"%{search.lower()}%"
-        q = q.where(func.lower(Employee.name).like(like) | func.lower(Employee.email).like(like))
+    # Wildcard-safe, accent-insensitive, multi-token search (see
+    # app/core/search.py) — replaces the old raw `%term%` substring match.
+    # When a search is active, rank by relevance first, name as tiebreaker;
+    # otherwise keep the plain alphabetical ordering unchanged.
+    sc = build_search(search, ["employees.name", "employees.email"], prefix="isearch")
+    if sc.where:
+        q = q.where(text(sc.where)).order_by(text(sc.order_by), Employee.name.asc())
+        q = q.params(**sc.params)
+    else:
+        q = q.order_by(Employee.name.asc())
 
     # Over-fetch modestly so that filtering out Super Admins below can't leave the
     # caller short of `limit` results.
@@ -217,15 +224,17 @@ async def list_users(
     q = (
         select(Employee).options(selectinload(Employee.role_obj))
         .where(Employee.company_id == user.company_id, Employee.is_deleted == False)  # noqa: E712
-        .order_by(Employee.created_at.asc())
     )
     if pending:
         q = q.where(Employee.is_approved == False, Employee.is_active == True)  # noqa: E712
     else:
         q = q.where(Employee.is_approved == True)  # noqa: E712
-    if search:
-        like = f"%{search.lower()}%"
-        q = q.where(func.lower(Employee.name).like(like) | func.lower(Employee.email).like(like))
+
+    # Wildcard-safe, accent-insensitive, multi-token search (see
+    # app/core/search.py) — replaces the old raw `%term%` substring match.
+    sc = build_search(search, ["employees.name", "employees.email"], prefix="usearch")
+    if sc.where:
+        q = q.where(text(sc.where))
 
     # Groups-scoped users only see employees who belong to their assigned groups.
     # Pending users have no group memberships yet (they just registered), so skip
@@ -251,6 +260,18 @@ async def list_users(
                 )
             )
         )
+
+    # Relevance ordering when actively searching; otherwise the original,
+    # unchanged registration-order listing. `.params()` must come AFTER every
+    # text() fragment referencing `sc`'s bind names has been attached (both
+    # the WHERE above and the ORDER BY here) — SQLAlchemy's `.params()` only
+    # fills bind values for parameters already present in the statement at
+    # the time it's called, so calling it any earlier would leave the ones
+    # introduced by this order_by clause unbound.
+    if sc.where:
+        q = q.order_by(text(sc.order_by), Employee.created_at.asc()).params(**sc.params)
+    else:
+        q = q.order_by(Employee.created_at.asc())
 
     rows = await db.execute(q)
     employees = rows.scalars().all()

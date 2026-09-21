@@ -48,6 +48,7 @@ main stack).
 | `backend/app/api/v1/endpoints/` | One file per resource (auth, devices, users, roles, groups, policy, reports, tech_utilization, screenshots, ingest, agentConfig, googleAuth, installers, downloads, notifications, logs, audit, setup, company, adminFiles) |
 | `backend/app/core/security.py` | Password hashing (bcrypt), JWT create/decode (device tokens + admin tokens, separate expiries) |
 | `backend/app/core/permissions.py` | Single-source-of-truth RBAC module/action matrix, drives both API guards and dashboard UI |
+| `backend/app/core/search.py` | Shared free-text search helper (LIKE-escaping, tokenized AND/OR matching, pg_trgm/unaccent relevance ranking) — see "Search" below |
 | `backend/app/core/impersonation.py` | Super-Admin impersonation: the structural (un-grantable) eligibility test + the Redis `jti` session registry that makes revocation possible |
 | `backend/app/core/scoping.py` | `visible_device_ids(user, db)` — resolves a user's device visibility (`all` / `own` / `groups`, with group-tree expansion) |
 | `backend/app/core/ingest_queue.py` | In-memory bounded queue + 30s batched Postgres `COPY` flush for agent event ingestion |
@@ -63,7 +64,7 @@ main stack).
 | `backend/app/core/secrets.py` | Encrypted-at-rest Google OAuth credential loading (`SECRETS_KEY` + `secrets/*.enc`, or plain env) |
 | `backend/app/db/models.py` | SQLAlchemy 2.0 async ORM models — see Cross-cutting: multi-tenancy |
 | `backend/app/db/base.py` | Engine/session factories (two isolated pools: HTTP vs. ingest writer), migration bootstrap |
-| `backend/app/db/migrations/` | Versioned, numbered raw-SQL migrations (32 as of this writing) |
+| `backend/app/db/migrations/` | Versioned, numbered raw-SQL migrations (34 as of this writing) |
 | `backend/app/db/seed_rbac.py` | Seeds default roles/permissions |
 | `backend/app/maintenance/idle_backfill.py` | Backfill job for idle-time gaps |
 | `backend/app/scripts/` | Ops scripts: `seedAdmin`, `encryptSecrets`, `generateSecretsKey` |
@@ -198,6 +199,75 @@ boot executes zero DDL once applied. Files needing `CREATE INDEX
 CONCURRENTLY` run on an autocommit connection. The migration statement
 splitter strips comment-only lines before splitting on `;` — never rely on a
 literal `;` surviving inside a SQL comment.
+
+**Search**: every backend free-text search param (`audit.py`'s `search`,
+`users.py`'s `search` on both the list and impersonation-picker routes,
+`adminFiles.py`'s `q`) goes through `app/core/search.py::build_search()` —
+never hand-rolled `f"%{term}%"` ILIKE. It escapes `%`/`_`/backslash
+(`escape_like()`, wildcard-injection-safe), tokenizes the query on whitespace
+(AND across tokens, OR across the caller's columns — capped at 8 tokens),
+folds accents and case via `unaccent(lower(...))`, and produces a 4-tier
+relevance ORDER BY (exact > prefix > word-boundary > `pg_trgm` similarity,
+floored at 0.3) callers append their own tiebreaker to. Backed by migration
+`034_search_trgm.sql` (`pg_trgm` + `unaccent` extensions, GIN trigram indexes
+on `employees(name/email)` and `devices(hostname)` — both extensions are on
+the AWS RDS allowlist; ParadeDB/pg_search BM25 is not, hence trigram-based
+ranking instead). Deliberately mirrors the dashboard's client-side
+`smartMatch()`/`smartScore()`/`smartSort()` (`dashboard/src/lib/smartSearch.ts`)
+semantics so a search behaves the same whether it runs server- or
+client-side — `smartScore(...) > 0` is guaranteed equivalent to
+`smartMatch(...)` by construction (the former short-circuits through the
+latter), so switching a page from boolean filtering to ranked `smartSort`
+never changes *which* rows match, only their order. `TalentSearchBar`
+(`dashboard/src/components/TalentSearchBar.tsx`) is the shared "find a
+person" combobox (keyboard nav, ARIA, two-line name+email/detail rows to
+disambiguate people who share a name) — used on Reports, Activity Logs, and
+(via `UsagePageShell`'s `FilterBar`) Website/App/Category Usage. Each caller
+fetches and ranks its own candidate list (typically with `smartSort`) and
+passes `results` in; the component holds no fetching logic of its own.
+
+`audit.py`'s `search` param is the one exception to the trigram path above:
+it's ranked with a hand-rolled Okapi BM25 (`app/core/search.py::build_bm25_search()`,
+`Bm25Clause`), not `build_search()`. Audit content is document-like (dotted
+action names, actor role, target type/id, a JSON metadata blob) where
+whole-token frequency/IDF is the right relevance model — and unlike people/
+hostname search, audit search does not need substring/typo tolerance, so
+losing that is an acceptable, deliberate tradeoff here (ParadeDB/pg_search's
+real BM25 index type isn't on the AWS RDS allowlist either, hence hand-rolled
+on core tsvector/GIN — see `035_audit_bm25.sql`). Backed by a generated,
+STORED `search_tsv` column on `audit_log` covering ONLY its own local columns
+(`'simple'` config — no stemming, since action names/UUIDs/emails are
+technical tokens) plus a GIN index. Per search request, `build_bm25_search()`
+runs one extra company-scoped aggregate query for N/avgdl/n(t) (audit_log is
+thousands of rows per company, not activity_events-scale, so this is an
+acceptable per-request cost) and recovers per-document term frequency via
+`unnest(tsvector)` (`length(tsvector)` only returns the *distinct* lexeme
+count, not occurrences — verified against live Postgres 16). Deliberately
+does NOT search the joined employee name/email; that stays on the trigram
+path via other endpoints.
+
+**`GET /v1/logs`**: paginated with `offset`/`limit` (not the analytics
+endpoints' `days`-window style), ordered `(timestamp DESC, id DESC)` — the
+`id` tiebreaker is required because many events share a timestamp, so
+ordering by timestamp alone would duplicate or drop rows across pages.
+Returns `{items, has_more, offset, limit}`, never an exact total: an
+unbounded `COUNT(*)` over `activity_events` (tens of millions of rows) on
+every page load isn't a cost this endpoint pays. `has_more` comes from a
+cheap one-row over-fetch instead. `offset` is capped at 20,000 — on the
+fleet-wide (no `device_id`) path it drives `_pagination_per_device`'s
+per-device LATERAL sub-limit (capped at 1,000), so an uncapped `offset` would
+be an uncapped per-device fan-out; deep fleet-wide pagination past that point
+intentionally trades pagination completeness for bounded query cost (see the
+docstring in `logs.py`). Narrowing with `device_id`/`employee_id` switches to
+a flat, uncapped-depth query instead. The optional `search` param (also
+`build_search()`-backed, see "Search" above) is applied server-side BEFORE
+offset/limit pages through the result — not a client-side filter over
+whatever page is already in hand — and, on the fleet-wide path, is folded
+into the per-device LATERAL subquery's own WHERE (not applied after it), so
+an older matching event on a busy device isn't discarded by the per-device
+recency cap before search ever sees it. Only `build_search()`'s WHERE half is
+used; the existing `timestamp DESC, id DESC` ordering is unchanged by
+searching, since this is a chronological feed, not a relevance-ranked search.
 
 **Realtime updates**: dashboard device/status changes fan out via Redis
 pub/sub (`broadcaster.py`) to Server-Sent Events, consumed client-side by
