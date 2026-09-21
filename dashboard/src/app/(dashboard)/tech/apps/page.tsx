@@ -29,12 +29,16 @@ const DETAIL_TABS = ["Titles", "Users", "Usage"];
 // ── Right panel ───────────────────────────────────────────────────────────────
 
 function DetailPanel({
-  item, since, until, groupId, employeeId }: { item: AppUsageItem; since: string; until: string; groupId: string; employeeId: string }) {
+  item, since, until, groupId, employeeId, deviceId }: {
+    item: AppUsageItem; since: string; until: string;
+    groupId: string; employeeId: string; deviceId: string;
+  }) {
   const [tab, setTab] = useState("Titles");
 
   const { data, isLoading, isValidating } = useSWR<AppUsageDetailOut>(
-    ["app-detail", item.app_name, tab.toLowerCase(), since, until, groupId, employeeId],
-    () => getAppUsageDetail(item.app_name, tab.toLowerCase(), since, until, groupId || undefined, employeeId || undefined),
+    ["app-detail", item.app_name, tab.toLowerCase(), since, until, groupId, employeeId, deviceId],
+    () => getAppUsageDetail(item.app_name, tab.toLowerCase(), since, until,
+                            { group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
   // Cold load only — keepPreviousData means isLoading goes false the instant
   // any data exists, even for a different tab/filter key. isValidating covers
@@ -114,13 +118,15 @@ export default function AppUsagePage() {
   const [dateRange, setDateRange] = useState<DateRange>({ since: format(new Date(), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
   const [groupId,      setGroupId]      = useState("");
   const [employeeId,   setEmployeeId]   = useState("");
+  const [deviceId,     setDeviceId]     = useState("");
   const [productivity, setProductivity] = useState("");
   const [summaryMode,  setSummaryMode]  = useState(true);
   const [selected,     setSelected]     = useState<AppUsageItem | null>(null);
 
   const { data, isLoading, isValidating } = useSWR(
-    ["app-usage", dateRange.since, dateRange.until, productivity, groupId, employeeId],
-    () => getAppUsage(dateRange.since, dateRange.until, productivity || undefined, groupId || undefined, employeeId || undefined),
+    ["app-usage", dateRange.since, dateRange.until, productivity, groupId, employeeId, deviceId],
+    () => getAppUsage(dateRange.since, dateRange.until,
+                      { productivity, group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
   // isValidating is true during background revalidation (stale data is still
   // shown, per the global keepPreviousData config) — a filter change re-keys
@@ -138,7 +144,7 @@ export default function AppUsagePage() {
 
   // Client-side pagination over the (today-scoped) list — keeps the DOM light.
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId, productivity]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId, deviceId, productivity]);
   const paged = useMemo(
     () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
     [filtered, page],
@@ -198,6 +204,7 @@ export default function AppUsagePage() {
           dateRange={dateRange} setDateRange={setDateRange}
           groupId={groupId} setGroupId={setGroupId}
           employeeId={employeeId} setEmployeeId={setEmployeeId}
+          deviceId={deviceId} setDeviceId={setDeviceId}
           productivity={productivity} setProductivity={setProductivity}
           summaryMode={summaryMode} setSummaryMode={setSummaryMode}
         />
@@ -264,7 +271,8 @@ export default function AppUsagePage() {
             >
               <ChevronLeft size={16} /> Back to list
             </button>
-            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until} groupId={groupId} employeeId={employeeId} />
+            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until}
+                         groupId={groupId} employeeId={employeeId} deviceId={deviceId} />
           </div>
         )}
       </div>

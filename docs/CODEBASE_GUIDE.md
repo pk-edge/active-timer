@@ -201,6 +201,43 @@ This matters because company summary/top-apps are two of the heaviest
 dashboard endpoints — the fast path exists specifically so the default,
 by-far-most-common view doesn't pay for a live aggregation on every load.
 
+**Technology & AI filters**: the four Tech pages (`/tech`, `/tech/websites`,
+`/tech/apps`, `/tech/category-usage`) narrow on the same four axes — date
+range, group, talent, device — and every filterable endpoint in
+`endpoints/tech_utilization.py` composes them the same way: `_scope_clause`
+(visibility, always on) + `_group_clause` + `_employee_clause` +
+`_device_clause`, concatenated into one `combined` SQL fragment. Three rules
+follow from that shape and all three are load-bearing:
+
+1. **The filter lookups are gated on `tech:view`, not on the module that owns
+   the data.** `/v1/tech/filters/{groups,users,devices}` exist because
+   `/v1/groups`, `/v1/users` and `/v1/devices` need their own `*:view`
+   permissions and would 403 for a tech-only role, silently collapsing the
+   page's own filters to nothing. Their visibility mirrors the pages':
+   `visible_device_ids` for devices, group-tree expansion for the other two.
+2. **A non-empty `combined` disables the `tech_cache` fast paths.** Each
+   endpoint reads its pre-aggregated table only `if not combined` — the cache
+   tables hold company-wide daily rollups with no per-group/user/device
+   dimension, so a filtered request MUST fall through to live aggregation.
+3. **Every filter value belongs in the Redis response-cache `_scope_fp`.**
+   The fingerprint is `f"{admin.id}:{group_id}:{employee_id}:{device_id}"`;
+   omitting one lets an unfiltered response be served to a filtered request.
+   Adding a filter means touching the clause, the params dict, AND the
+   fingerprint.
+
+Tenant safety comes from the queries themselves (`d.company_id = :company_id`
+is in every one) plus `_scope_clause`, so `_device_clause`/`_employee_clause`
+need no ownership lookup — a foreign id intersects to zero rows. `_device_clause`
+and `_group_clause` do validate UUID *shape*, because asyncpg raises rather than
+simply not matching when a non-UUID is bound to a uuid column.
+
+On the dashboard side the three list pages share `FilterBar` in
+`components/UsagePageShell.tsx`; `/tech` renders its own chip row with the same
+controls. Group, talent and device are mutually exclusive — selecting one
+clears the other two, since all three narrow the same device set. The API
+helpers in `lib/api.ts` take a `TechFilters` object rather than trailing
+positionals.
+
 **Background jobs & caching**: the backend runs several always-on background
 tasks started from `main.py`'s `lifespan`: `RedisClient` (cache pool),
 `broadcaster` (SSE pub/sub — must start before workers publish),

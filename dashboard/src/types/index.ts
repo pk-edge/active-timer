@@ -367,6 +367,16 @@ export interface TechFilterUser {
   is_active: boolean;
 }
 
+export interface TechFilterDevice {
+  id:            string;
+  hostname:      string;
+  /** Null for a device not yet assigned to anyone — still listed, because an
+   *  unassigned machine is exactly what the talent filter cannot reach. */
+  employee_name: string | null;
+  platform:      string;
+  is_active:     boolean;
+}
+
 export interface CategoryAllocationItem {
   category_id:   string | null;
   category_name: string;

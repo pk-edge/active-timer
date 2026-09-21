@@ -1,6 +1,6 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import useSWR from "swr";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
@@ -14,11 +14,16 @@ import {
   getAdoptionData, getTechCategories, fmtSeconds } from "@/lib/api";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
 import GroupPicker from "@/components/GroupPicker";
+import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
 import { format } from "date-fns";
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { AccessDenied } from "@/components/AccessDenied";
+import { smartSort } from "@/lib/smartSearch";
+import { platformLabel } from "@/lib/devicePlatform";
 import type {
-  TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory } from "@/types";
+  TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData, AppCategory,
+  TechFilterUser, TechFilterDevice } from "@/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -400,17 +405,58 @@ export default function TechUtilizationPage() {
   const [dateRange,  setDateRange]  = useState<DateRange>({ since: format(new Date(), "yyyy-MM-dd"), until: format(new Date(), "yyyy-MM-dd") });
   const [groupId,    setGroupId]    = useState("");
   const [employeeId, setEmployeeId] = useState("");
+  const [deviceId,   setDeviceId]   = useState("");
   const [categoryId, setCategoryId] = useState("");
 
-  const { data: users }      = useSWR("tech-users-tf", () => import("@/lib/api").then(m => m.getTechFilterUsers()));
-  const { data: groups }     = useSWR("tech-groups-tf", () => import("@/lib/api").then(m => m.getTechFilterGroups()));
+  const { data: users }   = useSWR<TechFilterUser[]>("tech-users-tf", () => import("@/lib/api").then(m => m.getTechFilterUsers()));
+  const { data: groups }  = useSWR("tech-groups-tf", () => import("@/lib/api").then(m => m.getTechFilterGroups()));
+  const { data: devices, isLoading: devicesLoading } =
+    useSWR<TechFilterDevice[]>("tech-devices-tf", () => import("@/lib/api").then(m => m.getTechFilterDevices()));
   const { data: catsPage } = useSWR("tech-cats-filter", () => getTechCategories({ per_page: 200 }));
   const categories: AppCategory[] = catsPage?.items ?? [];
 
+  // Talent + device search bars. Both follow the same pattern as the shared
+  // FilterBar on the other three Tech & AI pages: the raw query text is held
+  // separately from the applied id, so typing doesn't clear an active filter
+  // until something is actually selected (or the box is emptied).
+  const [talentQuery, setTalentQuery] = useState("");
+  const [deviceQuery, setDeviceQuery] = useState("");
+  const debouncedTalentQuery = useDebouncedValue(talentQuery, 200);
+  const debouncedDeviceQuery = useDebouncedValue(deviceQuery, 200);
+
+  useEffect(() => { if (!employeeId) setTalentQuery(""); }, [employeeId]);
+  useEffect(() => { if (!deviceId)   setDeviceQuery(""); }, [deviceId]);
+
+  const talentResults: TalentSearchResult[] = useMemo(
+    () => smartSort(debouncedTalentQuery, (users ?? []).filter(u => u.is_active), u => [u.name, u.email])
+      .map(u => ({ id: u.id, name: u.name, email: u.email })),
+    [debouncedTalentQuery, users],
+  );
+
+  const deviceResults: TalentSearchResult[] = useMemo(
+    () => smartSort(debouncedDeviceQuery, (devices ?? []).filter(d => d.is_active),
+                    d => [d.hostname, d.employee_name ?? "", d.platform])
+      .map(d => ({
+        id: d.id,
+        name: d.hostname,
+        email: d.employee_name ?? "Unassigned",
+        detail: platformLabel(d.platform),
+      })),
+    [debouncedDeviceQuery, devices],
+  );
+
+  // Every tab's query shares one filter object — app-trends and adoption now
+  // accept these too, so all three tabs narrow together instead of two of them
+  // quietly ignoring the chips above them.
+  const techFilters = useMemo(
+    () => ({ group_id: groupId, employee_id: employeeId, device_id: deviceId }),
+    [groupId, employeeId, deviceId],
+  );
+
   // summary feeds the always-visible stat cards, so it always loads.
   const { data: summary, isLoading: summaryLoading, isValidating: summaryValidating } = useSWR(
-    ["tech-sum",   dateRange.since, dateRange.until, groupId, employeeId],
-    () => getTechSummary(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
+    ["tech-sum",   dateRange.since, dateRange.until, groupId, employeeId, deviceId],
+    () => getTechSummary(dateRange.since, dateRange.until, techFilters),
   );
   // isValidating is true during background revalidation (stale data is still
   // shown, per the global keepPreviousData config) — a filter change re-keys
@@ -423,20 +469,20 @@ export default function TechUtilizationPage() {
   // — which was saturating the single backend worker and producing the CORS/5xx
   // errors — into ~4 concurrent requests, and tab data loads on demand.
   const { data: allocation } = useSWR(
-    tab !== "adoption" ? ["tech-alloc", dateRange.since, dateRange.until, groupId, employeeId] : null,
-    () => getCategoryAllocation(dateRange.since, dateRange.until, groupId || undefined, employeeId || undefined),
+    tab !== "adoption" ? ["tech-alloc", dateRange.since, dateRange.until, groupId, employeeId, deviceId] : null,
+    () => getCategoryAllocation(dateRange.since, dateRange.until, techFilters),
   );
   const { data: trends } = useSWR(
-    tab === "top-changes" ? ["tech-trends", dateRange.since, dateRange.until, groupId, employeeId] : null,
-    () => getAppTrends(dateRange.since, dateRange.until, 10),
+    tab === "top-changes" ? ["tech-trends", dateRange.since, dateRange.until, groupId, employeeId, deviceId] : null,
+    () => getAppTrends(dateRange.since, dateRange.until, 10, techFilters),
   );
   const { data: apps } = useSWR(
-    tab === "overview" ? ["tech-apps", dateRange.since, dateRange.until, categoryId, groupId, employeeId] : null,
-    () => getAppList(dateRange.since, dateRange.until, categoryId || undefined, 50, groupId || undefined, employeeId || undefined),
+    tab === "overview" ? ["tech-apps", dateRange.since, dateRange.until, categoryId, groupId, employeeId, deviceId] : null,
+    () => getAppList(dateRange.since, dateRange.until, 50, { ...techFilters, category_id: categoryId }),
   );
   const { data: adoption } = useSWR(
-    tab === "adoption" ? ["tech-adoption", dateRange.since, dateRange.until] : null,
-    () => getAdoptionData(dateRange.since, dateRange.until, 5),
+    tab === "adoption" ? ["tech-adoption", dateRange.since, dateRange.until, groupId, employeeId, deviceId] : null,
+    () => getAdoptionData(dateRange.since, dateRange.until, 5, techFilters),
   );
 
 
@@ -489,20 +535,33 @@ export default function TechUtilizationPage() {
         {/* Activity Date */}
         <DateRangePicker value={dateRange} onChange={setDateRange} />
         {/* Team / Group */}
-        <GroupPicker value={groupId} onChange={v => { setGroupId(v); setEmployeeId(""); }} groups={groups} />
+        <GroupPicker value={groupId} onChange={v => { setGroupId(v); setEmployeeId(""); setDeviceId(""); }} groups={groups} />
 
-        {/* User */}
-        <div className="relative">
-          <select value={employeeId} onChange={e => { setEmployeeId(e.target.value); setGroupId(""); }}
-                  className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-7 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300">
-            <option value="">All Users</option>
-            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-            {((users as any[]) ?? []).filter((u: any) => u.is_active).map((u: any) => (
-              <option key={u.id} value={u.id}>{u.name}</option>
-            ))}
-          </select>
-          <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-        </div>
+        {/* Talent — search bar, matching the other three Tech & AI pages. The
+            plain <select> it replaces listed bare names, so several talents
+            sharing a first name were indistinguishable (PRD-2960). */}
+        <TalentSearchBar
+          value={talentQuery}
+          onChange={v => { setTalentQuery(v); if (v === "") setEmployeeId(""); }}
+          results={talentResults}
+          onSelect={r => { setEmployeeId(r.id); setTalentQuery(r.name); setGroupId(""); setDeviceId(""); }}
+          placeholder="All Users — name or email…"
+          label="Filter by talent"
+          className="w-full sm:w-60 shrink-0"
+        />
+
+        {/* Device — mutually exclusive with group/talent, since all three
+            narrow the same device set. */}
+        <TalentSearchBar
+          value={deviceQuery}
+          onChange={v => { setDeviceQuery(v); if (v === "") setDeviceId(""); }}
+          results={deviceResults}
+          onSelect={r => { setDeviceId(r.id); setDeviceQuery(r.name); setGroupId(""); setEmployeeId(""); }}
+          loading={devicesLoading}
+          placeholder="All Devices — hostname…"
+          label="Filter by device"
+          className="w-full sm:w-60 shrink-0"
+        />
 
         {/* Category filter */}
         <div className="relative">
@@ -514,8 +573,8 @@ export default function TechUtilizationPage() {
           <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
         </div>
 
-        {(groupId || employeeId || categoryId) && (
-          <button onClick={() => { setGroupId(""); setEmployeeId(""); setCategoryId(""); }}
+        {(groupId || employeeId || deviceId || categoryId) && (
+          <button onClick={() => { setGroupId(""); setEmployeeId(""); setDeviceId(""); setCategoryId(""); }}
                   className="text-xs text-gray-600 hover:text-gray-700 underline">
             Clear filters
           </button>

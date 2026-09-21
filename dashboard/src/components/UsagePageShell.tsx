@@ -10,13 +10,14 @@ import {
   CheckCircle2, MinusCircle, Circle, BarChart2,
   ChevronLeft, ChevronRight,
 } from "lucide-react";
-import { getTechFilterUsers, fmtSeconds } from "@/lib/api";
+import { getTechFilterUsers, getTechFilterDevices, fmtSeconds } from "@/lib/api";
 import GroupPicker from "@/components/GroupPicker";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
 import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { smartSort } from "@/lib/smartSearch";
-import type { TechFilterUser } from "@/types";
+import { platformLabel } from "@/lib/devicePlatform";
+import type { TechFilterUser, TechFilterDevice } from "@/types";
 
 export type { DateRange };
 
@@ -131,6 +132,8 @@ interface FilterBarProps {
   setGroupId:      (v: string) => void;
   employeeId:      string;
   setEmployeeId:   (v: string) => void;
+  deviceId:        string;
+  setDeviceId:     (v: string) => void;
   productivity?:   string;
   setProductivity?: (v: string) => void;
   showProdFilter?: boolean;
@@ -141,6 +144,7 @@ interface FilterBarProps {
 export function FilterBar({
   dateRange, setDateRange, groupId, setGroupId,
   employeeId, setEmployeeId,
+  deviceId, setDeviceId,
   productivity = "", setProductivity,
   showProdFilter = true,
   summaryMode, setSummaryMode,
@@ -187,6 +191,44 @@ export function FilterBar({
     [debouncedEmployeeQuery, activeUsers],
   );
 
+  // Device filter. `/v1/tech/filters/devices` is gated on `tech:view` for the
+  // same reason the users lookup above is — `/v1/devices` needs `devices:view`
+  // and would 403 for a tech-only role. It lists UNASSIGNED devices too, which
+  // is the whole reason this can't be folded into the talent filter: a machine
+  // with no owner is unreachable from a person search.
+  const { data: devices, isLoading: devicesLoading } =
+    useSWR<TechFilterDevice[]>("tech-filter-devices", () => getTechFilterDevices());
+
+  const [deviceQuery, setDeviceQuery] = useState("");
+  const debouncedDeviceQuery = useDebouncedValue(deviceQuery, 200);
+
+  // Selecting a group or a talent clears deviceId (see the handlers below) —
+  // mirror that here so the box doesn't keep showing a hostname for a filter
+  // that is no longer applied.
+  useEffect(() => {
+    if (!deviceId) setDeviceQuery("");
+  }, [deviceId]);
+
+  useEffect(() => {
+    if (deviceId && deviceQuery === "") {
+      const match = devices?.find(d => d.id === deviceId);
+      if (match) setDeviceQuery(match.hostname);
+    }
+  }, [deviceId, devices, deviceQuery]);
+
+  const activeDevices = useMemo(() => (devices ?? []).filter(d => d.is_active), [devices]);
+
+  const deviceResults: TalentSearchResult[] = useMemo(
+    () => smartSort(debouncedDeviceQuery, activeDevices, d => [d.hostname, d.employee_name ?? "", d.platform])
+      .map(d => ({
+        id: d.id,
+        name: d.hostname,
+        email: d.employee_name ?? "Unassigned",
+        detail: platformLabel(d.platform),
+      })),
+    [debouncedDeviceQuery, activeDevices],
+  );
+
   return (
     <div className="flex flex-wrap items-center gap-2 mb-4">
       {/* Summary / Detailed toggle */}
@@ -210,7 +252,7 @@ export function FilterBar({
       {/* Team / Group — includes subgroups in filter */}
       <GroupPicker
         value={groupId}
-        onChange={v => { setGroupId(v); setEmployeeId(""); }}
+        onChange={v => { setGroupId(v); setEmployeeId(""); setDeviceId(""); }}
       />
 
       {/* Talent — search-driven filter (replaces the old bare-name <select>;
@@ -223,10 +265,28 @@ export function FilterBar({
           if (v === "") setEmployeeId("");
         }}
         results={employeeResults}
-        onSelect={r => { setEmployeeId(r.id); setEmployeeQuery(r.name); setGroupId(""); }}
+        onSelect={r => { setEmployeeId(r.id); setEmployeeQuery(r.name); setGroupId(""); setDeviceId(""); }}
         loading={usersLoading}
-        placeholder="All Users — search by name or email…"
+        placeholder="All Users — name or email…"
         label="Filter by talent"
+        className="w-full sm:w-64 shrink-0"
+      />
+
+      {/* Device — search-driven, same control as the Activity Logs device
+          picker. Mutually exclusive with group/talent: the three narrow the
+          same device set, so combining them would mostly produce empty
+          results and read as a broken filter rather than an intersection. */}
+      <TalentSearchBar
+        value={deviceQuery}
+        onChange={v => {
+          setDeviceQuery(v);
+          if (v === "") setDeviceId("");
+        }}
+        results={deviceResults}
+        onSelect={r => { setDeviceId(r.id); setDeviceQuery(r.name); setGroupId(""); setEmployeeId(""); }}
+        loading={devicesLoading}
+        placeholder="All Devices — hostname…"
+        label="Filter by device"
         className="w-full sm:w-64 shrink-0"
       />
 

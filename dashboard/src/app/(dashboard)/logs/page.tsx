@@ -11,6 +11,7 @@ import { getLogs, getDevices, getUsers, fmtTime, fmtSeconds } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { smartSort } from "@/lib/smartSearch";
+import { platformLabel } from "@/lib/devicePlatform";
 import { AccessDenied } from "@/components/AccessDenied";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
 import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
@@ -121,17 +122,6 @@ function LogRow({ e }: { e: LogEvent }) {
  *  always been given (single-day math generalized to a range). */
 function dayStartUnix(yyyyMmDd: string): number {
   return Math.floor(new Date(yyyyMmDd + "T00:00:00").getTime() / 1000);
-}
-
-/** Cosmetic only — the agent reports raw sys.platform values ("darwin",
- *  "win32"), which vary in casing across the codebase; normalize just for
- *  this detail line rather than reaching for a shared util. */
-function platformLabel(p: string): string {
-  const v = p.toLowerCase();
-  if (v === "darwin" || v === "macos") return "macOS";
-  if (v === "win32" || v === "windows") return "Windows";
-  if (v === "linux") return "Linux";
-  return p;
 }
 
 export default function LogsPage() {

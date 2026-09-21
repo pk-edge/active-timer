@@ -12,6 +12,7 @@ import {
 import { useUser } from "@/hooks/useUser";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { smartSort } from "@/lib/smartSearch";
+import { platformLabel } from "@/lib/devicePlatform";
 import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
 import { AccessDenied } from "@/components/AccessDenied";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
@@ -35,17 +36,6 @@ import type { CompanyDay, AppUsage, Device, User } from "@/types";
 // top 20 to search over — otherwise anything ranked below #20 is invisible
 // to the search box and looks like a false "no match".
 const APP_SEARCH_LIMIT = 100;
-
-/** Cosmetic only — the agent reports raw sys.platform values ("darwin",
- *  "win32"), which vary in casing across the codebase; normalize just for
- *  this detail line rather than reaching for a shared util. */
-function platformLabel(p: string): string {
-  const v = p.toLowerCase();
-  if (v === "darwin" || v === "macos") return "macOS";
-  if (v === "win32" || v === "windows") return "Windows";
-  if (v === "linux") return "Linux";
-  return p;
-}
 
 // Formats a DateRange for the header subtitle / stat card — honest about the
 // ACTUAL active range instead of a hardcoded "last N days" that used to be

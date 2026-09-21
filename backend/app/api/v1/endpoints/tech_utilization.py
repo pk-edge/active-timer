@@ -13,11 +13,11 @@ from app.core import audit
 from app.core.app_normalizer import normalize_app_name
 from app.core.scoping import visible_device_ids, ALL
 from app.core.RedisCache import cache_get, cache_set, FRESH_ANALYTICS, STALE_ANALYTICS, FRESH_DETAIL, STALE_DETAIL
-from app.db.models import AppCategory, AppCategoryRule, Employee, EmployeeGroupAccess, Group, GroupMember
+from app.db.models import AppCategory, AppCategoryRule, Device, Employee, EmployeeGroupAccess, Group, GroupMember
 from app.schemas.rbac import GroupOut
 from app.schemas.tech import (
     CategoryOut, CategoryRuleOut, CategoryCreate, CategoryUpdate, RuleCreate, CategoriesPageOut,
-    TechFilterUserOut,
+    TechFilterUserOut, TechFilterDeviceOut,
     CategoryAllocationItem, AppTrendsOut, AppTrendItem, TechSummaryOut,
     AppDetailItem, AdoptionOut,
     WebsiteItem, WebsiteListOut, WebsiteDetailOut, WebsiteDetailTitle,
@@ -432,6 +432,48 @@ async def tech_filter_users(
     ]
 
 
+@router.get("/filters/devices", response_model=List[TechFilterDeviceOut])
+async def tech_filter_devices(
+    admin: Employee = Depends(require("tech", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Devices the caller may filter the Tech & AI pages by.
+
+    Unlike groups/users above, this reuses `visible_device_ids` verbatim rather
+    than re-deriving the group tree — device visibility IS what that helper
+    computes, and `_device_clause` below validates against the same set, so the
+    list and the filter can never disagree. `own`-scoped callers do get a list
+    here (their own machines), because someone with several devices still has a
+    meaningful choice to make; that is the one place this differs from
+    `/filters/users`, where "own" leaves nothing to pick between.
+    """
+    ids = await visible_device_ids(admin, db)
+
+    q = (
+        select(Device.id, Device.hostname, Device.platform, Device.is_active, Employee.name)
+        .outerjoin(Employee, Employee.id == Device.employee_id)
+        .where(
+            Device.company_id == admin.company_id,
+            Device.is_deleted == False,   # noqa: E712
+            Device.is_archived == False,  # noqa: E712
+        )
+        .order_by(Device.hostname.asc())
+    )
+    if ids is not ALL:
+        if not ids:
+            return []
+        q = q.where(Device.id.in_(ids))
+
+    rows = await db.execute(q)
+    return [
+        TechFilterDeviceOut(
+            id=str(r.id), hostname=r.hostname, employee_name=r.name,
+            platform=r.platform, is_active=r.is_active,
+        )
+        for r in rows.all()
+    ]
+
+
 # ── Analytics ─────────────────────────────────────────────────────────────────
 
 @router.get("/utilization/summary", response_model=TechSummaryOut)
@@ -441,6 +483,7 @@ async def tech_summary(
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -449,9 +492,10 @@ async def tech_summary(
     sc, sp = await _scope_clause(admin, db)
     gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
-    clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
-    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:summary", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt))
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -543,6 +587,7 @@ async def category_allocation(
     compare_days: int           = Query(default=30, ge=1, le=365),
     group_id:     Optional[str] = Query(default=None),
     employee_id:  Optional[str] = Query(default=None),
+    device_id:    Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -552,9 +597,10 @@ async def category_allocation(
     sc, sp = await _scope_clause(admin, db)
     gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
-    clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
-    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:catalloc", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt), compare_days)
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -713,15 +759,23 @@ async def app_trends(
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     compare_days: int = Query(default=30, ge=1, le=365),
     limit:        int = Query(default=10, ge=1, le=50),
+    group_id:     Optional[str] = Query(default=None),
+    employee_id:  Optional[str] = Query(default=None),
+    device_id:    Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     prev_since_dt, prev_until_dt = _prev_dates(since_dt, until_dt)
     await _ensure_default_categories(admin.company_id, db)
-    clause, sparams = await _scope_clause(admin, db)
+    sc, sp = await _scope_clause(admin, db)
+    gc, gp = await _group_clause(group_id, admin.company_id, db)
+    ec, ep = _employee_clause(employee_id)
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
-    _scope_fp = "all" if not clause else str(admin.id)
+    _scope_fp = ("all" if not clause
+                 else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}")
     _ckey = ("tech:apptrends", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt), compare_days, limit)
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -812,6 +866,7 @@ async def app_list(
     category_id: Optional[str] = Query(default=None),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     limit:       int           = Query(default=50, ge=1, le=200),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
@@ -821,7 +876,8 @@ async def app_list(
     sc, sp = await _scope_clause(admin, db)
     gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
-    clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
     cat_filter = ""
     if category_id:
@@ -832,7 +888,7 @@ async def app_list(
         except ValueError:
             pass
 
-    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:applist", str(admin.company_id), _scope_fp, category_id or "", str(since_dt), str(until_dt), limit)
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -913,11 +969,18 @@ async def app_adoption(
     since_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     top_n: int = Query(default=5, ge=1, le=20),
+    group_id:    Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
-    clause, sparams = await _scope_clause(admin, db)
+    sc, sp = await _scope_clause(admin, db)
+    gc, gp = await _group_clause(group_id, admin.company_id, db)
+    ec, ep = _employee_clause(employee_id)
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
     top_apps_res = await db.execute(text(f"""
         SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS seconds
@@ -1126,6 +1189,25 @@ def _employee_clause(employee_id: Optional[str]) -> tuple[str, dict]:
     return " AND d.employee_id = :emp_id", {"emp_id": employee_id}
 
 
+def _device_clause(device_id: Optional[str]) -> tuple[str, dict]:
+    """Restrict to a single device.
+
+    No tenant lookup is needed the way `_group_clause` needs one: every query
+    this composes into already carries `d.company_id = :company_id`, and
+    `_scope_clause` already narrows to the caller's visible device set, so a
+    foreign or invisible id intersects to zero rows rather than leaking. A
+    malformed id IS handled here, because asyncpg raises on a non-UUID bound to
+    a uuid column instead of simply matching nothing.
+    """
+    if not device_id:
+        return "", {}
+    try:
+        uuid.UUID(device_id)
+    except ValueError:
+        return " AND 1=0", {}
+    return " AND ae.device_id = :dev_id", {"dev_id": device_id}
+
+
 async def _group_clause(group_id: Optional[str], company_id, db: AsyncSession) -> tuple[str, dict]:
     """Restrict to a group's devices. The group MUST belong to the caller's
     company — a foreign group id resolves to an empty result, never to another
@@ -1162,6 +1244,7 @@ async def website_list(
     productivity: Optional[str] = Query(default=None),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     limit:       int           = Query(default=100, ge=1, le=500),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
@@ -1171,12 +1254,13 @@ async def website_list(
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
-    combined_clause = scope_clause + grp_clause + emp_clause
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined_clause = scope_clause + grp_clause + emp_clause + dev_clause
     cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
     params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, "limit": limit,
-              **scope_params, **grp_params, **emp_params}
+              **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined_clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not combined_clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:websites", cid, _scope_fp, productivity or "", str(since_dt), str(until_dt), limit)
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -1269,6 +1353,7 @@ async def website_detail(
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1276,11 +1361,12 @@ async def website_detail(
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
-    combined = scope_clause + grp_clause + emp_clause
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
-              "host": host, **scope_params, **grp_params, **emp_params}
+              "host": host, **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:web_detail", str(admin.company_id), _scope_fp, host, tab, str(since_dt), str(until_dt))
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -1405,6 +1491,7 @@ async def app_usage_list(
     productivity: Optional[str] = Query(default=None),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     limit:       int           = Query(default=100, ge=1, le=500),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
@@ -1414,12 +1501,13 @@ async def app_usage_list(
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
-    combined = scope_clause + grp_clause + emp_clause
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
     cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
     params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt,
-              "limit": limit, **scope_params, **grp_params, **emp_params}
+              "limit": limit, **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:apps", cid, _scope_fp, productivity or "", str(since_dt), str(until_dt), limit)
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -1488,6 +1576,7 @@ async def app_usage_detail(
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1495,11 +1584,12 @@ async def app_usage_detail(
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
-    combined = scope_clause + grp_clause + emp_clause
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
-              "app_name": app_name, **scope_params, **grp_params, **emp_params}
+              "app_name": app_name, **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:app_detail", str(admin.company_id), _scope_fp, app_name, tab, str(since_dt), str(until_dt))
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -1579,7 +1669,9 @@ async def category_usage_list(
     days:     int           = Query(default=30, ge=1, le=365),
     since_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
-    group_id: Optional[str] = Query(default=None),
+    group_id:    Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1587,12 +1679,15 @@ async def category_usage_list(
     await _ensure_default_categories(admin.company_id, db)
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
-    combined = scope_clause + grp_clause
+    emp_clause,   emp_params   = _employee_clause(employee_id)
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
     cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
     params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt,
-              **scope_params, **grp_params}
+              **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}"
+    _scope_fp = ("all" if not combined
+                 else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}")
     _ckey = ("tech:cat_usage", cid, _scope_fp, str(since_dt), str(until_dt))
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
@@ -1690,18 +1785,23 @@ async def category_usage_detail(
     days:     int            = Query(default=30, ge=1, le=365),
     since_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
-    group_id: Optional[str] = Query(default=None),
+    group_id:    Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
-    combined = scope_clause + grp_clause
+    emp_clause,   emp_params   = _employee_clause(employee_id)
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
-              **scope_params, **grp_params}
+              **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}"
+    _scope_fp = ("all" if not combined
+                 else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}")
     _ckey = ("tech:cat_detail", str(admin.company_id), _scope_fp, cat_id or "", tab, str(since_dt), str(until_dt))
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:

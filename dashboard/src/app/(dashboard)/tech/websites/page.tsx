@@ -29,12 +29,16 @@ const DETAIL_TABS = ["Titles", "Subpages", "Users", "Usage"];
 // ── Right panel ───────────────────────────────────────────────────────────────
 
 function DetailPanel({
-  item, since, until, groupId, employeeId }: { item: WebsiteItem; since: string; until: string; groupId: string; employeeId: string }) {
+  item, since, until, groupId, employeeId, deviceId }: {
+    item: WebsiteItem; since: string; until: string;
+    groupId: string; employeeId: string; deviceId: string;
+  }) {
   const [tab, setTab] = useState("Titles");
 
   const { data, isLoading, isValidating } = useSWR<WebsiteDetailOut>(
-    ["website-detail", item.host, tab.toLowerCase(), since, until, groupId, employeeId],
-    () => getWebsiteDetail(item.host, tab.toLowerCase(), since, until, groupId || undefined, employeeId || undefined),
+    ["website-detail", item.host, tab.toLowerCase(), since, until, groupId, employeeId, deviceId],
+    () => getWebsiteDetail(item.host, tab.toLowerCase(), since, until,
+                           { group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
   // Cold load only — keepPreviousData means isLoading goes false the instant
   // any data exists, even for a different tab/filter key. isValidating covers
@@ -128,13 +132,15 @@ export default function WebsiteUsagePage() {
   const [dateRange, setDateRange] = useState<DateRange>({ since: format(new Date(), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
   const [groupId,      setGroupId]      = useState("");
   const [employeeId,   setEmployeeId]   = useState("");
+  const [deviceId,     setDeviceId]     = useState("");
   const [productivity, setProductivity] = useState("");
   const [summaryMode,  setSummaryMode]  = useState(true);
   const [selected,     setSelected]     = useState<WebsiteItem | null>(null);
 
   const { data, isLoading, isValidating } = useSWR(
-    ["websites", dateRange.since, dateRange.until, productivity, groupId, employeeId],
-    () => getWebsites(dateRange.since, dateRange.until, productivity || undefined, groupId || undefined, employeeId || undefined),
+    ["websites", dateRange.since, dateRange.until, productivity, groupId, employeeId, deviceId],
+    () => getWebsites(dateRange.since, dateRange.until,
+                      { productivity, group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
   // isValidating is true during background revalidation (stale data is still
   // shown, per the global keepPreviousData config) — a filter change re-keys
@@ -152,7 +158,7 @@ export default function WebsiteUsagePage() {
 
   // Client-side pagination over the (today-scoped) list — keeps the DOM light.
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId, productivity]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId, deviceId, productivity]);
   const paged = useMemo(
     () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
     [filtered, page],
@@ -212,6 +218,7 @@ export default function WebsiteUsagePage() {
           dateRange={dateRange} setDateRange={setDateRange}
           groupId={groupId} setGroupId={setGroupId}
           employeeId={employeeId} setEmployeeId={setEmployeeId}
+          deviceId={deviceId} setDeviceId={setDeviceId}
           productivity={productivity} setProductivity={setProductivity}
           summaryMode={summaryMode} setSummaryMode={setSummaryMode}
         />
@@ -281,7 +288,8 @@ export default function WebsiteUsagePage() {
             >
               <ChevronLeft size={16} /> Back to list
             </button>
-            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until} groupId={groupId} employeeId={employeeId} />
+            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until}
+                         groupId={groupId} employeeId={employeeId} deviceId={deviceId} />
           </div>
         )}
       </div>

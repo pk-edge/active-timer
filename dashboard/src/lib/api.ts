@@ -3,7 +3,7 @@ import type {
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
   OverviewStats, HomeWidgets, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
-  AppCategory, CategoriesPage, TechSummary, TechFilterUser, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
+  AppCategory, CategoriesPage, TechSummary, TechFilterUser, TechFilterDevice, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
   WebsiteListOut, WebsiteDetailOut,
   AppUsageListOut, AppUsageDetailOut,
@@ -543,40 +543,54 @@ export function techDateParams(since: string, until: string): URLSearchParams {
 
 // Scoped by tech.view alone (not groups.view/users.view) — so the Technology &
 // AI page's own filter dropdowns work for a role that only grants tech access.
+// `/filters/devices` exists for the same reason `/filters/users` does: /v1/devices
+// needs devices:view and would 403 for a tech-only role.
 export const getTechFilterGroups = () => request<Group[]>("/v1/tech/filters/groups");
 export const getTechFilterUsers = () => request<TechFilterUser[]>("/v1/tech/filters/users");
+export const getTechFilterDevices = () => request<TechFilterDevice[]>("/v1/tech/filters/devices");
 
-export const getTechSummary = (since: string, until: string, group_id?: string, employee_id?: string) => {
-  const p = techDateParams(since, until);
-  if (group_id)    p.set("group_id",    group_id);
-  if (employee_id) p.set("employee_id", employee_id);
-  return request<TechSummary>(`/v1/tech/utilization/summary?${p}`);
-};
+/** The filters every Technology & AI page shares. Passed as an object rather
+ *  than trailing positionals — with group/employee/device/productivity all
+ *  optional strings, a positional list was one misplaced argument away from
+ *  silently filtering by the wrong thing. */
+export interface TechFilters {
+  group_id?:     string;
+  employee_id?:  string;
+  device_id?:    string;
+  productivity?: string;
+  category_id?:  string;
+}
 
-export const getCategoryAllocation = (since: string, until: string, group_id?: string, employee_id?: string) => {
+function techParams(since: string, until: string, f: TechFilters = {}): URLSearchParams {
   const p = techDateParams(since, until);
-  if (group_id)    p.set("group_id",    group_id);
-  if (employee_id) p.set("employee_id", employee_id);
-  return request<CategoryAllocationItem[]>(`/v1/tech/utilization/category-allocation?${p}`);
-};
+  if (f.group_id)     p.set("group_id",     f.group_id);
+  if (f.employee_id)  p.set("employee_id",  f.employee_id);
+  if (f.device_id)    p.set("device_id",    f.device_id);
+  if (f.productivity) p.set("productivity", f.productivity);
+  if (f.category_id)  p.set("category_id",  f.category_id);
+  return p;
+}
 
-export const getAppTrends = (since: string, until: string, limit = 10) => {
-  const p = techDateParams(since, until);
+export const getTechSummary = (since: string, until: string, f: TechFilters = {}) =>
+  request<TechSummary>(`/v1/tech/utilization/summary?${techParams(since, until, f)}`);
+
+export const getCategoryAllocation = (since: string, until: string, f: TechFilters = {}) =>
+  request<CategoryAllocationItem[]>(`/v1/tech/utilization/category-allocation?${techParams(since, until, f)}`);
+
+export const getAppTrends = (since: string, until: string, limit = 10, f: TechFilters = {}) => {
+  const p = techParams(since, until, f);
   p.set("limit", String(limit));
   return request<AppTrends>(`/v1/tech/utilization/app-trends?${p}`);
 };
 
-export const getAppList = (since: string, until: string, category_id?: string, limit = 50, group_id?: string, employee_id?: string) => {
-  const p = techDateParams(since, until);
+export const getAppList = (since: string, until: string, limit = 50, f: TechFilters = {}) => {
+  const p = techParams(since, until, f);
   p.set("limit", String(limit));
-  if (category_id) p.set("category_id", category_id);
-  if (group_id)    p.set("group_id",    group_id);
-  if (employee_id) p.set("employee_id", employee_id);
   return request<AppDetailItem[]>(`/v1/tech/utilization/apps?${p}`);
 };
 
-export const getAdoptionData = (since: string, until: string, top_n = 5) => {
-  const p = techDateParams(since, until);
+export const getAdoptionData = (since: string, until: string, top_n = 5, f: TechFilters = {}) => {
+  const p = techParams(since, until, f);
   p.set("top_n", String(top_n));
   return request<AdoptionData>(`/v1/tech/utilization/adoption?${p}`);
 };
@@ -588,53 +602,35 @@ export const getUncategorized = (since: string, until: string) => {
 
 // ── Website Usage ─────────────────────────────────────────────────────────────
 
-export const getWebsites = (since: string, until: string, productivity?: string, group_id?: string, employee_id?: string) => {
-  const p = techDateParams(since, until);
-  if (productivity) p.set("productivity", productivity);
-  if (group_id)     p.set("group_id",     group_id);
-  if (employee_id)  p.set("employee_id",  employee_id);
-  return request<WebsiteListOut>(`/v1/tech/websites?${p}`);
-};
+export const getWebsites = (since: string, until: string, f: TechFilters = {}) =>
+  request<WebsiteListOut>(`/v1/tech/websites?${techParams(since, until, f)}`);
 
-export const getWebsiteDetail = (host: string, tab: string, since: string, until: string, group_id?: string, employee_id?: string) => {
-  const p = techDateParams(since, until);
+export const getWebsiteDetail = (host: string, tab: string, since: string, until: string, f: TechFilters = {}) => {
+  const p = techParams(since, until, f);
   p.set("host", host); p.set("tab", tab);
-  if (group_id)    p.set("group_id",    group_id);
-  if (employee_id) p.set("employee_id", employee_id);
   return request<WebsiteDetailOut>(`/v1/tech/websites/detail?${p}`);
 };
 
 // ── Application Usage ─────────────────────────────────────────────────────────
 
-export const getAppUsage = (since: string, until: string, productivity?: string, group_id?: string, employee_id?: string) => {
-  const p = techDateParams(since, until);
-  if (productivity) p.set("productivity", productivity);
-  if (group_id)     p.set("group_id",     group_id);
-  if (employee_id)  p.set("employee_id",  employee_id);
-  return request<AppUsageListOut>(`/v1/tech/apps?${p}`);
-};
+export const getAppUsage = (since: string, until: string, f: TechFilters = {}) =>
+  request<AppUsageListOut>(`/v1/tech/apps?${techParams(since, until, f)}`);
 
-export const getAppUsageDetail = (app_name: string, tab: string, since: string, until: string, group_id?: string, employee_id?: string) => {
-  const p = techDateParams(since, until);
+export const getAppUsageDetail = (app_name: string, tab: string, since: string, until: string, f: TechFilters = {}) => {
+  const p = techParams(since, until, f);
   p.set("app_name", app_name); p.set("tab", tab);
-  if (group_id)    p.set("group_id",    group_id);
-  if (employee_id) p.set("employee_id", employee_id);
   return request<AppUsageDetailOut>(`/v1/tech/apps/detail?${p}`);
 };
 
 // ── Category Usage ────────────────────────────────────────────────────────────
 
-export const getCategoryUsage = (since: string, until: string, group_id?: string) => {
-  const p = techDateParams(since, until);
-  if (group_id) p.set("group_id", group_id);
-  return request<CategoryUsageListOut>(`/v1/tech/category-usage?${p}`);
-};
+export const getCategoryUsage = (since: string, until: string, f: TechFilters = {}) =>
+  request<CategoryUsageListOut>(`/v1/tech/category-usage?${techParams(since, until, f)}`);
 
-export const getCategoryUsageDetail = (cat_id: string | null, tab: string, since: string, until: string, group_id?: string) => {
-  const p = techDateParams(since, until);
+export const getCategoryUsageDetail = (cat_id: string | null, tab: string, since: string, until: string, f: TechFilters = {}) => {
+  const p = techParams(since, until, f);
   p.set("tab", tab);
-  if (cat_id)   p.set("cat_id", cat_id);
-  if (group_id) p.set("group_id", group_id);
+  if (cat_id) p.set("cat_id", cat_id);
   return request<CategoryUsageDetailOut>(`/v1/tech/category-usage/detail?${p}`);
 };
 
