@@ -132,3 +132,60 @@ async def cache_delete(key: tuple) -> None:
         await r.delete(_build_key(key))
     except Exception as exc:
         log.warning("redis_cache.delete error: %s", exc)
+
+
+# ── Single-flight ─────────────────────────────────────────────────────────────
+# A cold cache key is normally requested by several callers at once: the Tech
+# Utilization page mounts ten SWR calls, and changing a filter re-keys them
+# simultaneously across every open tab. Without a guard each of those recomputes
+# the same multi-second aggregation. SET NX gives us a cross-worker lock (an
+# in-process asyncio.Lock would only collapse duplicates within one worker).
+#
+# The lock is strictly an optimisation: if Redis is down, or the holder dies, or
+# the wait times out, every caller simply computes its own value as before. It
+# must never be able to make a request fail or hang.
+
+LOCK_TTL_SECS  = 30     # holder crash ceiling — must exceed a slow recompute
+LOCK_WAIT_SECS = 5.0    # how long a loser waits for the winner's result
+_LOCK_POLL     = 0.05
+
+
+async def try_acquire(key: tuple, ttl: int = LOCK_TTL_SECS) -> bool:
+    """True if this caller won the right to compute `key`.
+
+    Returns True when Redis is unavailable — with no lock service the safe
+    behaviour is "everyone computes", never "nobody computes".
+    """
+    r = get_client()
+    if r is None:
+        return True
+    try:
+        return bool(await r.set(_PREFIX + "lock:" + _build_key(key), b"1", nx=True, ex=ttl))
+    except Exception as exc:
+        log.warning("redis_cache.lock error: %s", exc)
+        return True
+
+
+async def release(key: tuple) -> None:
+    r = get_client()
+    if r is None:
+        return
+    try:
+        await r.delete(_PREFIX + "lock:" + _build_key(key))
+    except Exception as exc:
+        log.warning("redis_cache.unlock error: %s", exc)
+
+
+async def wait_for(key: tuple, timeout: float = LOCK_WAIT_SECS):
+    """Poll for the lock winner's value. Returns the data, or None on timeout.
+
+    None means "compute it yourself" — a slow path, not an error.
+    """
+    import asyncio
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        await asyncio.sleep(_LOCK_POLL)
+        data, _ = await cache_get(key)
+        if data is not None:
+            return data
+    return None

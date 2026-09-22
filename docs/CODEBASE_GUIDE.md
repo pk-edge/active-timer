@@ -53,6 +53,7 @@ main stack).
 | `backend/app/core/scoping.py` | `visible_device_ids(user, db)` — resolves a user's device visibility (`all` / `own` / `groups`, with group-tree expansion) |
 | `backend/app/core/ingest_queue.py` | In-memory bounded queue + 30s batched Postgres `COPY` flush for agent event ingestion |
 | `backend/app/core/report_cache.py`, `tech_cache.py` | Background workers pre-aggregating company reports / tech-analytics into fast-lookup tables |
+| `backend/app/core/analytics_cache.py` | Stale-while-revalidate + single-flight wrapper over `RedisCache` used by every Tech & AI endpoint |
 | `backend/app/core/RedisClient.py`, `RedisCache.py` | Redis connection pool + stale-while-revalidate response cache (`tt:c:*`) |
 | `backend/app/core/broadcaster.py` | Redis pub/sub SSE fan-out (`devices_updated`) across all backend replicas |
 | `backend/app/core/AdminAuthCache.py` | In-process token→Employee cache for admin auth (short TTL) |
@@ -237,6 +238,50 @@ controls. Group, talent and device are mutually exclusive — selecting one
 clears the other two, since all three narrow the same device set. The API
 helpers in `lib/api.ts` take a `TechFilters` object rather than trailing
 positionals.
+
+**Why a filtered Tech query is fast (036).** Because rule 2 above sends every
+filtered request to a live aggregation, the index that aggregation uses is the
+whole performance story. `activity_events` carries TWO covering indexes on
+purpose, and they are not redundant:
+
+- `idx_events_window_covering (timestamp, device_id, app_name, duration)` —
+  leads with `timestamp`, serves company-wide range scans (cache workers,
+  home widgets, reports).
+- `idx_events_window_device_covering (device_id, timestamp, app_name, duration)`
+  — leads with `device_id`, serves every *filtered* Tech read.
+
+A device-leading predicate cannot use the timestamp-leading index, and before
+036 it fell back to `idx_events_device_ts`, which is not covering: one heap
+fetch per row. Measured on 72M rows — 1 device over 30 days went 5,954 ms →
+92 ms, and 50 devices over 30 days went 171,138 ms → 3,918 ms, because the plan
+became an index-only scan. If you add a column to one of these queries, add it
+to the index too or you silently reintroduce the heap fetches.
+
+Both are partial (`WHERE event_type = 'window_change' AND app_name IS NOT NULL`)
+and `window_change` is ~97.6% of rows, so each one costs an index update on
+essentially every insert. Migration 028's checkpoint-chaining incident is the
+reason that matters — read 028 and 031 before adding a third.
+
+**Analytics response caching** lives in `app/core/analytics_cache.py`
+(`cached_or_compute`), which every Tech endpoint goes through:
+
+- *fresh* → serve; *stale* → serve immediately **and** refresh in a background
+  task on its own `AsyncSessionLocal`; *miss* → compute.
+- A Redis `SET NX` single-flight lock collapses concurrent misses, so the ten
+  SWR calls a Tech page fires on mount compute once, not ten times.
+- `ttl_for_range()` gives a range that ends before `tech_cache.RECENT_DAYS` a
+  30 min / 6 h TTL instead of 2 min / 10 min — those rows are no longer being
+  rescanned, so re-deriving "last month" every ten minutes was waste.
+- The `/filters/*` lookups and `_productivity_map` are cached the same way;
+  the category/rule mutation endpoints call `_evict_prod_map`.
+
+**The constraint that makes this safe:** the `compute` closure must capture
+plain values, never the request-scoped ORM `admin` — the background refresh runs
+on a different session, where touching it raises `MissingGreenlet`. Every Tech
+endpoint hoists `cid, company_uuid = str(admin.company_id), admin.company_id`
+before defining `_compute` for exactly this reason. Failures degrade to
+"compute it yourself": a Redis outage, a dead lock holder, or a refresh that
+raises must never make a request fail, hang, or serve wrong data.
 
 **Background jobs & caching**: the backend runs several always-on background
 tasks started from `main.py`'s `lifespan`: `RedisClient` (cache pool),

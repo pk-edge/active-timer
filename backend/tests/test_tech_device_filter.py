@@ -88,12 +88,20 @@ async def _device(db, company, hostname, employee=None):
     return d
 
 
+# Midday on the current UTC date. Seeding at "now - 1 hour" and querying
+# "today" are the same day for 23 hours out of 24 — and disagree between 00:00
+# and 01:00 UTC, when "an hour ago" is yesterday. Anchoring both ends to one
+# explicit day removes that once-a-day failure window. Nothing here filters on
+# "<= now", so a timestamp later today is still counted.
+SEED_TS = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+
+
 async def _event(db, device, *, app_name, duration, url=None, when=None,
                  event_type="window_change"):
     ev = ActivityEvent(
         device_id=device.id, event_type=event_type, app_name=app_name,
         window_title=app_name, url=url, duration=duration,
-        timestamp=when or (datetime.now(timezone.utc) - timedelta(hours=1)),
+        timestamp=when or SEED_TS,
     )
     db.add(ev)
     await db.flush()
@@ -125,10 +133,10 @@ async def _tech_admin(db, *, scope_type="all"):
 
 
 def _today_params(**extra):
-    """All tech endpoints default to a 30-day rolling window; pin to today so
-    the seeded events (1h ago) are always inside the range."""
-    today = datetime.now(timezone.utc).date().isoformat()
-    return {"since_date": today, "until_date": today, **extra}
+    """Pin the query to the same day `SEED_TS` lands on, so the seeded events are
+    always inside the range regardless of what time the suite runs."""
+    day = SEED_TS.date().isoformat()
+    return {"since_date": day, "until_date": day, **extra}
 
 
 # ── /v1/tech/filters/devices ──────────────────────────────────────────────────
@@ -381,8 +389,12 @@ async def test_cache_key_separates_device_filtered_from_unfiltered(client, db_se
     If device_id were left out of that fingerprint, the first (unfiltered)
     request would poison the entry the device-filtered request reads back.
     Exercised through an in-memory stand-in so the REAL key tuple is built
-    without needing a live Redis."""
-    from app.api.v1.endpoints import tech_utilization as tu
+    without needing a live Redis.
+
+    The seam is `analytics_cache`, not the endpoint module: the endpoints now go
+    through `cached_or_compute`, which holds its own references to cache_get /
+    cache_set."""
+    from app.core import analytics_cache as ac
 
     store: dict = {}
 
@@ -393,8 +405,16 @@ async def test_cache_key_separates_device_filtered_from_unfiltered(client, db_se
     async def fake_set(key, data, **kwargs):
         store[key] = data
 
-    monkeypatch.setattr(tu, "cache_get", fake_get)
-    monkeypatch.setattr(tu, "cache_set", fake_set)
+    async def no_lock(key, ttl=30):
+        return True
+
+    async def noop(key):
+        return None
+
+    monkeypatch.setattr(ac, "cache_get", fake_get)
+    monkeypatch.setattr(ac, "cache_set", fake_set)
+    monkeypatch.setattr(ac, "try_acquire", no_lock)
+    monkeypatch.setattr(ac, "release", noop)
 
     company, admin, dev_a, dev_b = await _two_device_company(db_session)
     headers = _headers(admin, company)
