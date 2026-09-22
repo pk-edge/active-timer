@@ -14,7 +14,7 @@ from sqlalchemy.orm import joinedload
 from app.api.deps import get_db, get_current_admin, require
 from app.core import audit, broadcaster
 from app.core.config import get_settings
-from app.core.device_auth_cache import device_auth_cache
+from app.core.device_auth_cache import invalidate_device
 from app.core.security import decode_token
 from app.core.scoping import visible_device_ids, ALL
 from app.db.models import Device, ActivityEvent, Employee, Company
@@ -140,6 +140,9 @@ async def assign_device(
         {"employee_id": str(employee.id) if employee else None, "source": "portal"},
     )
     await db.commit()
+    # The device-ctx cache holds employee_id (used by policy targeting) — evict
+    # so the reassignment reaches the agent's next poll, not after the TTL.
+    await invalidate_device(str(device.id))
 
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
     return DeviceOut(
@@ -170,6 +173,9 @@ async def set_device_headless(
     await audit.record(db, admin, "device.headless", "device", str(device.id),
                        {"override": body.override})
     await db.commit()
+    # The device-ctx cache holds headless_override — evict so /agent/config
+    # serves the new value on the agent's next poll.
+    await invalidate_device(str(device.id))
 
     company_headless = bool((await db.execute(
         select(Company.agent_headless).where(Company.id == admin.company_id)
@@ -214,7 +220,7 @@ async def archive_device(
     await db.commit()
     # Drop any cached ingest-auth entry so the archived device stops ingesting now,
     # not after the cache TTL.
-    device_auth_cache.invalidate_device(str(device.id))
+    await invalidate_device(str(device.id))
 
     return DeviceOut(
         id=str(device.id),
@@ -276,7 +282,7 @@ async def delete_device(
     await audit.record(db, admin, "device.deleted", "device", str(device.id), {"source": "portal"})
     await db.commit()
     # Drop any cached ingest-auth entry so the deleted device stops ingesting now.
-    device_auth_cache.invalidate_device(str(device.id))
+    await invalidate_device(str(device.id))
 
 
 @router.get("/stream")

@@ -14,7 +14,6 @@ repeated runs never pollute the database.
 Run inside the backend container with the compose Postgres up:
     docker compose run --rm --no-deps backend python -m pytest tests -v
 """
-import asyncio
 import uuid
 from datetime import datetime, timezone
 
@@ -191,15 +190,15 @@ async def test_04_ingest_pipeline(client):
         assert out["received"] == N_WINDOW + len(URL_HOSTS) * 2
         assert out["skipped"] == 1
 
-        # Workers flush in batches — poll until everything landed.
+        # Force the batch write instead of waiting on the real 30s timer
+        # (FLUSH_INTERVAL in ingest_queue.py) — this test verifies the flush
+        # WRITES correctly, not that it fires on a timer.
+        await ingest_queue._flush_now(label="test")
+
         expected = out["received"]
-        for _ in range(40):
-            r = await client.get(f"/v1/devices/{CTX['device_id']}/timeline?limit=100",
-                                 headers=_admin_h())
-            if r.status_code == 200 and len(r.json()) >= expected:
-                break
-            await asyncio.sleep(0.25)
-        assert len(r.json()) >= expected, "queued events never reached the DB"
+        r = await client.get(f"/v1/devices/{CTX['device_id']}/timeline?limit=100",
+                             headers=_admin_h())
+        assert r.status_code == 200 and len(r.json()) >= expected, "queued events never reached the DB"
     finally:
         await ingest_queue.stop()
 
@@ -500,7 +499,7 @@ async def test_09_roles_crud(client):
 async def test_10_tech_analytics(client):
     r = await client.get("/v1/tech/categories", headers=_admin_h())
     assert r.status_code == 200
-    cats = r.json()
+    cats = r.json()["items"]
     assert sum(1 for c in cats if c["is_system"]) >= 7  # defaults auto-seeded
 
     system_cat = next(c for c in cats if c["is_system"])

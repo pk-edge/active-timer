@@ -13,9 +13,11 @@ from app.core import audit
 from app.core.app_normalizer import normalize_app_name
 from app.core.scoping import visible_device_ids, ALL
 from app.core.RedisCache import cache_get, cache_set, FRESH_ANALYTICS, STALE_ANALYTICS, FRESH_DETAIL, STALE_DETAIL
-from app.db.models import AppCategory, AppCategoryRule, Employee, Group
+from app.db.models import AppCategory, AppCategoryRule, Employee, EmployeeGroupAccess, Group, GroupMember
+from app.schemas.rbac import GroupOut
 from app.schemas.tech import (
     CategoryOut, CategoryRuleOut, CategoryCreate, CategoryUpdate, RuleCreate, CategoriesPageOut,
+    TechFilterUserOut,
     CategoryAllocationItem, AppTrendsOut, AppTrendItem, TechSummaryOut,
     AppDetailItem, AdoptionOut,
     WebsiteItem, WebsiteListOut, WebsiteDetailOut, WebsiteDetailTitle,
@@ -335,6 +337,99 @@ async def delete_rule(
         raise HTTPException(status_code=404, detail="Rule not found")
     await db.delete(rule)
     await db.commit()
+
+
+# ── Filter lookups ────────────────────────────────────────────────────────────
+# Group/employee lookups scoped by tech.view alone (not groups.view/users.view),
+# so a role that only grants Technology & AI access can still populate the
+# page's own filter dropdowns. Visibility mirrors visible_device_ids' scope_type
+# resolution: "all" sees everything, "groups" sees assigned groups + descendants,
+# "own" has nothing to filter by (their data is already just themselves).
+
+@router.get("/filters/groups", response_model=List[GroupOut])
+async def tech_filter_groups(
+    admin: Employee = Depends(require("tech", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    scope = getattr(admin, "_scope_type", "own")
+    if scope == "own":
+        return []
+
+    filters = [
+        Group.company_id == admin.company_id,
+        Group.is_deleted == False,   # noqa: E712
+        Group.is_archived == False,  # noqa: E712
+    ]
+    if scope == "groups":
+        gid_rows = await db.execute(
+            select(EmployeeGroupAccess.group_id).where(EmployeeGroupAccess.employee_id == admin.id)
+        )
+        my_gids = [g[0] for g in gid_rows.all()]
+        if not my_gids:
+            return []
+        visible = await descendant_group_ids(my_gids, admin.company_id, db)
+        if not visible:
+            return []
+        filters.append(Group.id.in_(visible))
+
+    groups = (
+        await db.execute(select(Group).where(*filters).order_by(Group.name.asc()))
+    ).scalars().all()
+    return [
+        GroupOut(
+            id=str(g.id), name=g.name, description=g.description,
+            parent_id=str(g.parent_id) if g.parent_id else None,
+            path=None, is_archived=g.is_archived,
+            member_count=0, child_count=0,
+            created_at=g.created_at.isoformat() if g.created_at else None,
+        )
+        for g in groups
+    ]
+
+
+@router.get("/filters/users", response_model=List[TechFilterUserOut])
+async def tech_filter_users(
+    admin: Employee = Depends(require("tech", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    scope = getattr(admin, "_scope_type", "own")
+    if scope == "own":
+        return []
+
+    q = (
+        select(Employee.id, Employee.name, Employee.email, Employee.is_active)
+        .where(
+            Employee.company_id == admin.company_id,
+            Employee.is_deleted == False,  # noqa: E712
+            Employee.is_approved == True,  # noqa: E712
+        )
+        .order_by(Employee.name.asc())
+    )
+    if scope == "groups":
+        gid_rows = await db.execute(
+            select(EmployeeGroupAccess.group_id).where(EmployeeGroupAccess.employee_id == admin.id)
+        )
+        my_gids = [g[0] for g in gid_rows.all()]
+        if not my_gids:
+            return []
+        visible = await descendant_group_ids(my_gids, admin.company_id, db)
+        if not visible:
+            return []
+        q = q.where(
+            Employee.id.in_(
+                select(GroupMember.employee_id).where(
+                    GroupMember.group_id.in_(visible),
+                    GroupMember.member_type == "employee",
+                    GroupMember.employee_id.isnot(None),
+                )
+            )
+        )
+
+    rows = await db.execute(q)
+    return [
+        TechFilterUserOut(id=str(r.id), name=r.name, email=r.email, is_active=r.is_active)
+        for r in rows.all()
+    ]
 
 
 # ── Analytics ─────────────────────────────────────────────────────────────────

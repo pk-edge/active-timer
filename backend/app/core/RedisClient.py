@@ -12,6 +12,7 @@ Redis errors after startup are swallowed by RedisCache callers.
 """
 import asyncio
 import logging
+import re
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -50,9 +51,15 @@ async def startup() -> None:
         health_check_interval=30,
         socket_keepalive=True,
         socket_connect_timeout=5,
+        # Per-command ceiling: without it a black-holed Redis (TCP up, server
+        # unresponsive) HANGS every caller instead of raising — and callers are
+        # designed to fail open to a live DB read/local limiter on exceptions.
+        socket_timeout=2,
         max_connections=8,
     )
-    log.info("redis_client: started (url=%s)", settings.REDIS_URL)
+    # Mask credentials: REDIS_URL may embed a password (redis://:pw@host).
+    safe_url = re.sub(r"://[^@/]*@", "://***@", settings.REDIS_URL)
+    log.info("redis_client: started (url=%s)", safe_url)
 
 
 async def shutdown() -> None:

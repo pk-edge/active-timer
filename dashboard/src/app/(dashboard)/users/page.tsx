@@ -233,14 +233,14 @@ function ApproveModal({ user: pending, roles, groups, onClose, onSaved }: {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-type Tab = "active" | "pending";
+type Tab = "team" | "talent" | "pending";
 
 function UsersPageInner() {
   const { loading, can } = useUser();
   const router = useRouter();
   const searchParams = useSearchParams();
   const [tab, setTab] = useState<Tab>(() =>
-    searchParams.get("tab") === "pending" ? "pending" : "active"
+    searchParams.get("tab") === "pending" ? "pending" : "team"
   );
 
   useEffect(() => {
@@ -265,12 +265,15 @@ function UsersPageInner() {
     [activity],
   );
 
+  const teamUsers   = useMemo(() => (users ?? []).filter(u => u.user_kind !== "talent"), [users]);
+  const talentUsers = useMemo(() => (users ?? []).filter(u => u.user_kind === "talent"), [users]);
+  const baseList = tab === "talent" ? talentUsers : teamUsers;
+
   const debouncedSearch = useDebouncedValue(search, 200);
   const filteredActive = useMemo(() => {
-    if (!users) return [];
-    if (!debouncedSearch.trim()) return users;
-    return users.filter(u => smartMatch(debouncedSearch, u.name, u.email, u.role_name));
-  }, [users, debouncedSearch]);
+    if (!debouncedSearch.trim()) return baseList;
+    return baseList.filter(u => smartMatch(debouncedSearch, u.name, u.email, u.role_name));
+  }, [baseList, debouncedSearch]);
 
   function refresh() { mutateUsers(); mutatePending(); }
 
@@ -310,9 +313,11 @@ function UsersPageInner() {
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Users</h1>
-          <p className="text-gray-600 text-sm mt-0.5">{users?.length ?? 0} active</p>
+          <p className="text-gray-600 text-sm mt-0.5">
+            {tab === "talent" ? talentUsers.length : teamUsers.length} {tab === "talent" ? "talent" : "team members"}
+          </p>
         </div>
-        {tab === "active" && can("users", "create") && (
+        {(tab === "team" || tab === "talent") && can("users", "create") && (
           <button onClick={() => setEditing("new")}
                   className="flex items-center gap-2 bg-brand-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-brand-700">
             <Plus size={15} /> Add user
@@ -323,9 +328,13 @@ function UsersPageInner() {
       {/* Tabs + search */}
       <div className="flex items-center gap-4 mb-4">
         <div className="flex items-center bg-gray-100 rounded-lg overflow-hidden">
-          <button onClick={() => setTab("active")}
-                  className={`px-3 py-1.5 text-sm font-medium transition ${tab === "active" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"}`}>
-            Active
+          <button onClick={() => setTab("team")}
+                  className={`px-3 py-1.5 text-sm font-medium transition ${tab === "team" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"}`}>
+            Team
+          </button>
+          <button onClick={() => setTab("talent")}
+                  className={`px-3 py-1.5 text-sm font-medium transition ${tab === "talent" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"}`}>
+            Talent
           </button>
           <button onClick={() => setTab("pending")}
                   className={`flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition ${tab === "pending" ? "bg-white text-gray-900 shadow-sm" : "text-gray-600"}`}>
@@ -336,7 +345,7 @@ function UsersPageInner() {
           </button>
         </div>
 
-        {tab === "active" && (
+        {(tab === "team" || tab === "talent") && (
           <div className="relative max-w-xs flex-1">
             <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
             <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search name or email…"
@@ -347,7 +356,7 @@ function UsersPageInner() {
       </div>
 
       {/* Active users table */}
-      {tab === "active" && (
+      {(tab === "team" || tab === "talent") && (
         <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
           <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[920px]">

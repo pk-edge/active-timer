@@ -61,6 +61,7 @@ class UserOut(BaseModel):
     role_id: Optional[str] = None
     role_name: Optional[str] = None
     scope_type: Optional[str] = None
+    user_kind: str = "team"               # "talent" | "team"
     is_active: bool
     is_approved: bool = True
     group_ids: list[str] = []
@@ -130,6 +131,10 @@ class MemberOut(BaseModel):
     employee_id: Optional[str] = None
     device_id: Optional[str] = None
     label: str                             # employee name or device hostname
+    group_id: Optional[str] = None         # populated only when include_subgroups=true
+    group_name: Optional[str] = None
+    path: Optional[str] = None
+    direct: Optional[bool] = None
 
 
 class GroupDetailOut(GroupOut):

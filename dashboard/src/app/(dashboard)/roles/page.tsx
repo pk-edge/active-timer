@@ -18,6 +18,9 @@ const SCOPES = [
 
 const TALENT_ROLE = "Talent";
 
+const PERMISSION_ACTIONS = ["view", "create", "edit", "delete", "manage_members"] as const;
+const ACTION_LABELS: Record<string, string> = { manage_members: "Members" };
+
 /** System roles are locked except Talent, whose permissions admins may customize. */
 function canEditRole(role: Role): boolean {
   return !role.is_system || role.name === TALENT_ROLE;
@@ -97,14 +100,14 @@ function RoleEditor({ role, modules, onClose, onSaved }: {
                 <thead>
                   <tr className="bg-gray-50 text-gray-600 text-xs">
                     <th className="text-left px-3 py-2 font-medium">Module</th>
-                    {["view", "create", "edit", "delete"].map(a => <th key={a} className="px-2 py-2 font-medium capitalize w-16">{a}</th>)}
+                    {PERMISSION_ACTIONS.map(a => <th key={a} className="px-2 py-2 font-medium capitalize w-16">{ACTION_LABELS[a] ?? a}</th>)}
                   </tr>
                 </thead>
                 <tbody>
                   {modules.map(m => (
                     <tr key={m.key} className="border-t border-gray-100">
                       <td className="px-3 py-2 text-gray-700">{m.label}</td>
-                      {["view", "create", "edit", "delete"].map(a => (
+                      {PERMISSION_ACTIONS.map(a => (
                         <td key={a} className="text-center">
                           {m.actions.includes(a) ? (
                             <input type="checkbox" checked={perms.has(`${m.key}:${a}`)} onChange={() => toggle(m.key, a)}

@@ -38,17 +38,20 @@ async def descendant_group_ids(
     return {r[0] for r in rows.all()}
 
 
-async def devices_for_groups(
+async def devices_for_groups_detailed(
     group_ids: set[uuid.UUID],
     db: AsyncSession,
-) -> list[uuid.UUID]:
-    """Distinct device ids from direct members of the given groups."""
+) -> dict[uuid.UUID, uuid.UUID]:
+    """Map each device id (direct device member, or device of a member employee)
+    within the given groups to one containing group_id. When a device is reachable
+    through more than one group in the set, an arbitrary one is kept — good enough
+    for display purposes (e.g. notification group-path labels)."""
     if not group_ids:
-        return []
+        return {}
     rows = await db.execute(
         text(
             """
-            SELECT DISTINCT COALESCE(gm.device_id, d.id) AS did
+            SELECT gm.group_id, COALESCE(gm.device_id, d.id) AS did
             FROM group_members gm
             LEFT JOIN devices d ON d.employee_id = gm.employee_id
                 AND gm.member_type = 'employee'
@@ -58,7 +61,18 @@ async def devices_for_groups(
         ),
         {"gids": [str(i) for i in group_ids]},
     )
-    return [r[0] for r in rows.all()]
+    out: dict[uuid.UUID, uuid.UUID] = {}
+    for gid, did in rows.all():
+        out.setdefault(did, gid)
+    return out
+
+
+async def devices_for_groups(
+    group_ids: set[uuid.UUID],
+    db: AsyncSession,
+) -> list[uuid.UUID]:
+    """Distinct device ids from direct members of the given groups."""
+    return list((await devices_for_groups_detailed(group_ids, db)).keys())
 
 
 def build_paths(

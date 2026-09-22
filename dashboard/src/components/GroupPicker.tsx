@@ -14,6 +14,10 @@ interface GroupPickerProps {
   excludeId?: string;
   className?: string;
   disabled?: boolean;
+  /** Supply a pre-fetched, already-scoped group list instead of the default
+   * groups.view-gated `/groups` fetch — used by pages (e.g. Technology & AI)
+   * whose viewers may only hold a narrower permission. */
+  groups?: Group[];
 }
 
 /** Hierarchical team/group selector — used across analytics filters and forms. */
@@ -25,8 +29,10 @@ export default function GroupPicker({
   excludeId,
   className = "",
   disabled = false,
+  groups: groupsOverride,
 }: GroupPickerProps) {
-  const { data: groups } = useSWR<Group[]>("groups", getGroups);
+  const { data: fetched } = useSWR<Group[]>(groupsOverride ? null : "groups", getGroups);
+  const groups = groupsOverride ?? fetched;
   const tree = buildGroupTree((groups ?? []).filter(g => g.id !== excludeId));
   const rows = flattenGroupTree(tree);
 

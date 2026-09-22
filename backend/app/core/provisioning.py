@@ -12,6 +12,11 @@ log = logging.getLogger(__name__)
 TALENT_ROLE_NAME = "Talent"
 
 
+def is_talent_role(role: Role | None) -> bool:
+    """True when `role` is the auto-provisioned, non-editable Talent role."""
+    return bool(role and role.is_system and role.name == TALENT_ROLE_NAME)
+
+
 class _SystemActor:
     """Audit actor for unauthenticated enrollment: company only, no employee."""
     def __init__(self, company_id):

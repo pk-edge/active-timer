@@ -3,7 +3,7 @@ import type {
   Me, Role, ModuleDef, User, UserActivity, UserActivityDetail,
   Group, GroupDetail, GroupMember, Installer, InstallerDownload, UpdateRunsResponse,
   OverviewStats, HomeWidgets, RealtimeDevice, WebUsage, MyStats, Notification, MeetingsResponse,
-  AppCategory, CategoriesPage, TechSummary, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
+  AppCategory, CategoriesPage, TechSummary, TechFilterUser, CategoryAllocationItem, AppTrends, AppDetailItem, AdoptionData,
   UncategorizedData,
   WebsiteListOut, WebsiteDetailOut,
   AppUsageListOut, AppUsageDetailOut,
@@ -242,7 +242,8 @@ export async function registerUser(body: { name: string; email: string; password
 
 export const getGroups  = (includeArchived = false) =>
   request<Group[]>(`/v1/groups${includeArchived ? "?include_archived=true" : ""}`);
-export const getGroup   = (id: string) => request<GroupDetail>(`/v1/groups/${id}`);
+export const getGroup = (id: string, includeSubgroups = false) =>
+  request<GroupDetail>(`/v1/groups/${id}${includeSubgroups ? "?include_subgroups=true" : ""}`);
 export const createGroup = (body: { name: string; description?: string; parent_id?: string | null }) =>
   request<Group>("/v1/groups", { method: "POST", body: JSON.stringify(body) });
 export const updateGroup = (id: string, body: { name: string; description?: string; parent_id?: string | null }) =>
@@ -440,6 +441,11 @@ export function techDateParams(since: string, until: string): URLSearchParams {
 
 // ── Tech Utilization ──────────────────────────────────────────────────────────
 
+// Scoped by tech.view alone (not groups.view/users.view) — so the Technology &
+// AI page's own filter dropdowns work for a role that only grants tech access.
+export const getTechFilterGroups = () => request<Group[]>("/v1/tech/filters/groups");
+export const getTechFilterUsers = () => request<TechFilterUser[]>("/v1/tech/filters/users");
+
 export const getTechSummary = (since: string, until: string, group_id?: string, employee_id?: string) => {
   const p = techDateParams(since, until);
   if (group_id)    p.set("group_id",    group_id);
@@ -544,6 +550,7 @@ export interface CompanySettings {
   idle_timeout_mins: number;
   email_alerts: boolean;
   idle_alert_mins: number;
+  offline_alert_enabled: boolean;
   offline_alert_mins: number;
   daily_report: boolean;
   max_file_size_mb: number;
@@ -631,6 +638,27 @@ export interface DeviceFullReport {
   top_urls: { url: string; visits: number }[];
 }
 
+/** Registered-device inventory snapshot — no activity metrics, no date range. */
+export interface DeviceRosterReport {
+  generated_at: string;
+  total_devices: number;
+  online_devices: number;
+  offline_devices: number;
+  archived_devices: number;
+  unassigned_devices: number;
+  platform_breakdown: { platform: string; count: number }[];
+  devices: {
+    hostname: string;
+    platform: string;
+    raw_platform: string;
+    employee_name: string | null;
+    status: "online" | "offline" | "archived";
+    agent_version: string | null;
+    enrolled_at: string;
+    last_seen: string | null;
+  }[];
+}
+
 export const getFleetReport = (since: string, until: string) =>
   request<FleetReport>(`/v1/reports/devices/fleet?since=${since}&until=${until}`);
 
@@ -645,14 +673,15 @@ export interface ReportJob {
   status: "pending" | "running" | "done" | "failed";
   progress: number;
   error: string | null;
-  result: FleetReport | DeviceFullReport | null;
+  result: FleetReport | DeviceFullReport | DeviceRosterReport | null;
 }
 
 export const createReportJob = (params: {
-  type: "device_full" | "fleet";
+  type: "device_full" | "fleet" | "device_roster";
   device_id?: string;
-  since: string;
-  until: string;
+  /** Required for device_full and fleet; device_roster is a point-in-time snapshot. */
+  since?: string;
+  until?: string;
 }) =>
   request<ReportJob>("/v1/reports/jobs", {
     method: "POST",

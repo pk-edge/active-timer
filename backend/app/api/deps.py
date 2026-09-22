@@ -6,7 +6,7 @@ Import from here everywhere — never import from individual endpoint files.
 
 import asyncio
 import uuid
-from typing import AsyncGenerator
+from typing import AsyncGenerator, NamedTuple, Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -14,10 +14,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
+import hashlib
+
+from app.core.AdminAuthCache import admin_auth_cache
+from app.core.RedisCache import cache_get, cache_set
 from app.core.security import decode_token
 from app.core.permissions import all_permissions
 from app.core.config import get_settings
-from app.core.device_auth_cache import device_auth_cache
+from app.core.device_auth_cache import (
+    device_auth_cache, device_ctx_cache_key, device_ctx_tombstone_key,
+)
 from app.db.base import AsyncSessionLocal
 from app.db.models import Device, Employee, Role
 
@@ -120,6 +126,83 @@ async def get_ingest_device_id(
     return device_id
 
 
+class DeviceCtx(NamedTuple):
+    """The scalars the agent-polled endpoints need — no DB-bound ORM row."""
+    device_id: str
+    company_id: str
+    employee_id: Optional[str]
+    headless_override: Optional[bool]
+
+
+_DEVICE_CTX_TTL_SECS = 120   # cross-replica refresh cadence; mutations DEL the key
+
+
+async def get_device_ctx(
+    creds: HTTPAuthorizationCredentials = Depends(bearer),
+    db: AsyncSession = Depends(get_db),
+) -> DeviceCtx:
+    """Auth + context for the agent POLLING paths (/agent/config, device policy).
+
+    Warm path is one Redis GET, zero DB: the device's context lives in Redis
+    keyed by device_id, so archive/delete/re-enroll/reassign/headless mutations
+    evict it on EVERY replica with one DEL (see device_auth_cache.invalidate_device)
+    and the agent still sees changes on its next poll. The stored token
+    fingerprint pins the entry to the exact JWT that validated it, so a rotated
+    token can never ride a stale entry. A miss falls through to one short read
+    on the request's (lazy) session — with Redis absent this degrades to
+    exactly the pre-cache behavior.
+    """
+    token = creds.credentials
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != "device":
+            raise ValueError
+        device_uuid = uuid.UUID(payload["sub"])
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid device token")
+
+    token_fp = hashlib.sha256(token.encode()).hexdigest()
+    key = device_ctx_cache_key(str(device_uuid))
+    entry, _ = await cache_get(key)
+    if entry is not None and entry.get("token_fp") == token_fp:
+        return DeviceCtx(
+            device_id=entry["device_id"],
+            company_id=entry["company_id"],
+            employee_id=entry["employee_id"],
+            headless_override=entry["headless_override"],
+        )
+
+    row = (await db.execute(
+        select(Device.id, Device.company_id, Device.employee_id, Device.headless_override)
+        .where(
+            Device.id        == device_uuid,
+            Device.jwt_token == token,
+            Device.is_active == True,
+        )
+    )).first()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
+
+    ctx = DeviceCtx(
+        device_id=str(row[0]),
+        company_id=str(row[1]),
+        employee_id=str(row[2]) if row[2] else None,
+        headless_override=row[3],
+    )
+    # A fresh invalidation writes a tombstone BEFORE deleting the entry; skip
+    # caching while one exists so this lookup (whose DB read may predate the
+    # mutation's commit) can't re-warm a just-revoked/changed context.
+    tomb, _ = await cache_get(device_ctx_tombstone_key(str(device_uuid)))
+    if tomb is None:
+        await cache_set(
+            key,
+            {"token_fp": token_fp, "device_id": ctx.device_id, "company_id": ctx.company_id,
+             "employee_id": ctx.employee_id, "headless_override": ctx.headless_override},
+            fresh_secs=_DEVICE_CTX_TTL_SECS, stale_secs=_DEVICE_CTX_TTL_SECS,
+        )
+    return ctx
+
+
 # ── Admin / user auth + RBAC ────────────────────────────────────────────────
 
 def _has_permission(perms: set[tuple[str, str]], module: str, action: str) -> bool:
@@ -143,6 +226,15 @@ async def get_current_user(
         user_uuid = uuid.UUID(payload["sub"])
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid admin token")
+
+    # Warm path: the detached user (perms already attached) cached for a short
+    # TTL — a page load fires several parallel calls with the same token, and
+    # this removes their repeated joined SELECT. JWT signature/expiry were
+    # already verified above; user/role mutations call invalidate_all().
+    cached = admin_auth_cache.get(creds.credentials)
+    if cached is not None:
+        return cached
+    seen_epoch = admin_auth_cache.epoch()
 
     # One joined query instead of three round-trips (employee → role → permissions);
     # this dependency runs on every authenticated request, so round-trips dominate.
@@ -179,6 +271,7 @@ async def get_current_user(
     # copy is always safe to read. Endpoints that mutate the current user must
     # issue an explicit UPDATE instead of relying on ORM dirty-tracking.
     db.expunge(user)
+    admin_auth_cache.set(creds.credentials, user, seen_epoch=seen_epoch)
     return user
 
 
