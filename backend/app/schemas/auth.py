@@ -27,3 +27,32 @@ class AdminLoginResponse(BaseModel):
     token_type:   str = "bearer"
     role:         str
     name:         str
+
+
+# ── Super-Admin impersonation ────────────────────────────────────────────────
+
+class ImpersonateRequest(BaseModel):
+    user_id: str
+
+
+class ImpersonationTargetOut(BaseModel):
+    id:        str
+    name:      str
+    email:     str
+    role_name: Optional[str] = None
+
+
+class ImpersonateResponse(BaseModel):
+    access_token: str
+    token_type:   str = "bearer"
+    expires_in:   int                      # seconds until the session self-expires
+    target:       ImpersonationTargetOut
+
+
+class ExitImpersonationResponse(BaseModel):
+    """A freshly minted ordinary admin token — the original is never handed back,
+    it is re-issued server-side after re-verifying the admin."""
+    access_token: str
+    token_type:   str = "bearer"
+    role:         str
+    name:         str

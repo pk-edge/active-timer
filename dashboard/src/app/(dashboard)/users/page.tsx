@@ -57,8 +57,15 @@ function UserModal({ user, roles, groups, onClose, onSaved }: {
 
   async function save() {
     setSaving(true); setErr("");
+    // Only a groups-scoped role may hold group access — the backend rejects the
+    // combination outright. `showGroups` hides the checkboxes when the selected
+    // role isn't groups-scoped, but `groupIds` still holds whatever the user had
+    // before, so sending it verbatim made "move this RM to a non-group role" a
+    // guaranteed 400. Send an empty list instead: that is what the change means,
+    // and it clears the rows the new role can't use.
     const body: Record<string, unknown> = {
-      name, role_id: roleId || null, group_ids: Array.from(groupIds),
+      name, role_id: roleId || null,
+      group_ids: showGroups ? Array.from(groupIds) : [],
     };
     if (password) body.password = password;
     try {
@@ -184,7 +191,13 @@ function ApproveModal({ user: pending, roles, groups, onClose, onSaved }: {
     if (!roleId) { setErr("Please assign a role before approving."); return; }
     setSaving(true); setErr("");
     try {
-      await approveUser(pending.id, { role_id: roleId, group_ids: Array.from(groupIds) });
+      // Same rule as the edit modal: group access only travels with a
+      // groups-scoped role, and picking a different role after ticking groups
+      // must not send the now-inapplicable selection.
+      await approveUser(pending.id, {
+        role_id: roleId,
+        group_ids: showGroups ? Array.from(groupIds) : [],
+      });
       onSaved();
     } catch (e) { setErr(String(e instanceof Error ? e.message : e)); }
     finally { setSaving(false); }

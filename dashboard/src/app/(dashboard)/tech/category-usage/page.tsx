@@ -7,11 +7,14 @@ import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, ChevronLeft } from "lucide-react";
 import { getCategoryUsage, getCategoryUsageDetail } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
+  ListSkeletonRows, DetailSkeletonRows,
   type DateRange } from "@/components/UsagePageShell";
+import { smartSort } from "@/lib/smartSearch";
 import type { CategoryUsageItem, CategoryUsageDetailOut } from "@/types";
 
 const DETAIL_TABS = ["Activities", "Users"];
@@ -19,21 +22,29 @@ const DETAIL_TABS = ["Activities", "Users"];
 // ── Right panel ───────────────────────────────────────────────────────────────
 
 function DetailPanel({
-  item, since, until, groupId }: { item: CategoryUsageItem; since: string; until: string; groupId: string }) {
+  item, since, until, groupId, employeeId, deviceId }: {
+    item: CategoryUsageItem; since: string; until: string;
+    groupId: string; employeeId: string; deviceId: string;
+  }) {
   const [tab, setTab] = useState("Activities");
   const [userSearch, setUserSearch] = useState("");
 
-  const { data, isLoading } = useSWR<CategoryUsageDetailOut>(
-    ["cat-detail", item.cat_id, tab.toLowerCase(), since, until, groupId],
-    () => getCategoryUsageDetail(item.cat_id, tab.toLowerCase(), since, until, groupId || undefined),
+  const { data, isLoading, isValidating } = useSWR<CategoryUsageDetailOut>(
+    ["cat-detail", item.cat_id, tab.toLowerCase(), since, until, groupId, employeeId, deviceId],
+    () => getCategoryUsageDetail(item.cat_id, tab.toLowerCase(), since, until,
+                                 { group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
+  // Cold load only — keepPreviousData means isLoading goes false the instant
+  // any data exists, even for a different tab/filter key. isValidating covers
+  // the background-refetch case (switching tabs, changing filters) instead.
+  const isRefreshing = isValidating && !!data;
+
+  const debouncedUserSearch = useDebouncedValue(userSearch, 200);
 
   const displayUsers = useMemo(() => {
     const list = data?.users ?? [];
-    if (!userSearch.trim()) return list;
-    const q = userSearch.toLowerCase();
-    return list.filter(u => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
-  }, [data?.users, userSearch]);
+    return smartSort(debouncedUserSearch, list, u => [u.name, u.email]);
+  }, [data?.users, debouncedUserSearch]);
 
   return (
     <div className="flex flex-col h-full">
@@ -42,6 +53,9 @@ function DetailPanel({
         <div className="flex items-center gap-2 mb-1">
           <div className="w-3 h-3 rounded-full shrink-0" style={{ background: item.color }} />
           <p className="font-semibold text-gray-900 text-sm flex-1">{item.name}</p>
+          {isRefreshing && (
+            <span className="text-xs text-gray-400 animate-pulse shrink-0">Updating…</span>
+          )}
           <p className="text-xs text-gray-600 shrink-0">
             Total Duration: <span className="font-medium text-gray-700">{fmtDur(item.duration_secs)}</span>
           </p>
@@ -72,7 +86,7 @@ function DetailPanel({
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {isLoading ? (
-          <p className="text-sm text-gray-600 py-8 text-center">Loading…</p>
+          <DetailSkeletonRows />
         ) : tab === "Activities" ? (
           <>
             {(data?.activities ?? []).length === 0
@@ -106,24 +120,32 @@ export default function CategoryUsagePage() {
   const [dateRange, setDateRange] = useState<DateRange>({ since: format(new Date(), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
   const [groupId,     setGroupId]     = useState("");
   const [employeeId,  setEmployeeId]  = useState("");
+  const [deviceId,    setDeviceId]    = useState("");
   const [summaryMode, setSummaryMode] = useState(true);
   const [selected,    setSelected]    = useState<CategoryUsageItem | null>(null);
 
-  const { data, isLoading } = useSWR(
-    ["category-usage", dateRange.since, dateRange.until, groupId, employeeId],
-    () => getCategoryUsage(dateRange.since, dateRange.until, groupId || undefined),
+  const { data, isLoading, isValidating } = useSWR(
+    ["category-usage", dateRange.since, dateRange.until, groupId, employeeId, deviceId],
+    () => getCategoryUsage(dateRange.since, dateRange.until,
+                           { group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
+  // isValidating is true during background revalidation (stale data is still
+  // shown, per the global keepPreviousData config) — a filter change re-keys
+  // this call, but without this the old list just sits there with no
+  // indication a new fetch is running until it silently swaps. Same
+  // "Updating…" convention as Organization Overview.
+  const isRefreshing = isValidating && !!data;
+
+  const debouncedSearch = useDebouncedValue(search, 200);
 
   const filtered = useMemo(() => {
     const items = data?.items ?? [];
-    if (!search.trim()) return items;
-    const q = search.toLowerCase();
-    return items.filter(i => i.name.toLowerCase().includes(q));
-  }, [data, search]);
+    return smartSort(debouncedSearch, items, i => [i.name]);
+  }, [data, debouncedSearch]);
 
   // Client-side pagination over the (today-scoped) list — keeps the DOM light.
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [search, dateRange.since, dateRange.until, groupId, employeeId]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId, deviceId]);
   const paged = useMemo(
     () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
     [filtered, page],
@@ -155,7 +177,12 @@ export default function CategoryUsagePage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div>
-          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Category Usage</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Category Usage</h1>
+            {isRefreshing && (
+              <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+            )}
+          </div>
           <p className="text-sm text-gray-600 mt-0.5">Time broken down by application category</p>
         </div>
         <div className="flex items-center gap-2">
@@ -177,6 +204,7 @@ export default function CategoryUsagePage() {
           dateRange={dateRange} setDateRange={setDateRange}
           groupId={groupId} setGroupId={setGroupId}
           employeeId={employeeId} setEmployeeId={setEmployeeId}
+          deviceId={deviceId} setDeviceId={setDeviceId}
           showProdFilter={false}
           summaryMode={summaryMode} setSummaryMode={setSummaryMode}
         />
@@ -200,9 +228,13 @@ export default function CategoryUsagePage() {
             <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide text-right">%</p>
           </div>
 
-          <div className="flex-1 overflow-y-auto min-h-0">
+          <div className="flex-1 overflow-y-auto min-h-0" aria-busy={isLoading || undefined}>
             {isLoading ? (
-              <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
+              <ListSkeletonRows
+                gridClassName="grid-cols-[16px_1fr_110px_52px] sm:grid-cols-[16px_1fr_120px_60px]"
+                rowClassName="gap-3 px-4 sm:px-5 py-3.5"
+                columns={["dot", "text", "duration", "pct"]}
+              />
             ) : filtered.length === 0 ? (
               <p className="text-sm text-gray-600 py-12 text-center">No categories found.</p>
             ) : paged.map(item => (
@@ -235,7 +267,8 @@ export default function CategoryUsagePage() {
             >
               <ChevronLeft size={16} /> Back to list
             </button>
-            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until} groupId={groupId} />
+            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until}
+                         groupId={groupId} employeeId={employeeId} deviceId={deviceId} />
           </div>
         )}
       </div>

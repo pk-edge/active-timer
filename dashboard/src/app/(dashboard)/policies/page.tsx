@@ -15,6 +15,8 @@ import {
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/AccessDenied";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { smartMatch } from "@/lib/smartSearch";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import type { BlockedUrl, Device, User } from "@/types";
 
 // ── Detected-URL multi-select picker ─────────────────────────────────────────
@@ -395,17 +397,19 @@ export default function PoliciesPage() {
   const { data: users }           = useSWR<User[]>("users-policy", () => getUsers());
 
   const canEdit = can("policy", "edit");
+  const debouncedSearch = useDebouncedValue(search, 200);
 
   const filtered = useMemo(() => {
     let list = rules ?? [];
     if (filter === "active")   list = list.filter(r => r.is_active);
     if (filter === "inactive") list = list.filter(r => !r.is_active);
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      list = list.filter(r => r.pattern.includes(q) || (r.notes ?? "").toLowerCase().includes(q));
+    if (debouncedSearch.trim()) {
+      // smartMatch normalizes both sides (case/accent-insensitive), fixing the
+      // prior bug where only the query and notes were lowercased, not pattern.
+      list = list.filter(r => smartMatch(debouncedSearch, r.pattern, r.notes));
     }
     return list;
-  }, [rules, filter, search]);
+  }, [rules, filter, debouncedSearch]);
 
   async function toggleActive(rule: BlockedUrl) {
     await updateBlockedUrl(rule.id, { is_active: !rule.is_active });

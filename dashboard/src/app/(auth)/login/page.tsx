@@ -2,7 +2,9 @@
 import { useState, useEffect, FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { adminLogin, loginWithToken, setPassword, BASE } from "@/lib/api";
+import {
+  adminLogin, loginWithToken, setPassword, BASE, consumeImpersonationEndedNotice,
+} from "@/lib/api";
 import { logEvent } from "@/lib/auditLogger";
 import { Clock, Eye, EyeOff, X, ShieldOff } from "lucide-react";
 import EdgeLogo from "@/components/EdgeLogo";
@@ -172,6 +174,17 @@ export default function LoginPage() {
   const [restricted,    setRestricted]   = useState(false);
   const [loading,       setLoading]      = useState(false);
   const [phase,         setPhase]        = useState<Phase>(initialPhase);
+
+  /* ── Explain an impersonation session that ended mid-flight ──────────── */
+  useEffect(() => {
+    // The admin's own token is never stored client-side (exit re-mints it
+    // server-side), so an expired/revoked impersonation token genuinely means
+    // signing in again. Say so rather than bouncing them here unexplained.
+    if (consumeImpersonationEndedNotice()) {
+      setError("Your impersonation session ended. Please sign in again.");
+      setPhase("form");
+    }
+  }, []);
 
   /* ── Handle redirect from Google OAuth callback ──────────────────────── */
   useEffect(() => {

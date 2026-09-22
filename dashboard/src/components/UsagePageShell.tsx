@@ -3,17 +3,21 @@
  * Shared two-panel shell for Website Usage, Application Usage, Category Usage.
  * Left: filterable list table. Right: detail panel with tabs.
  */
-import { useState, useMemo, useRef, useEffect } from "react";
+import { useState, useMemo, useRef, useEffect, type RefObject } from "react";
 import useSWR from "swr";
 import {
   Search, RefreshCw, Download, ChevronDown, X,
   CheckCircle2, MinusCircle, Circle, BarChart2,
   ChevronLeft, ChevronRight,
 } from "lucide-react";
-import { getUsers, fmtSeconds } from "@/lib/api";
+import { getTechFilterUsers, getTechFilterDevices, fmtSeconds } from "@/lib/api";
 import GroupPicker from "@/components/GroupPicker";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
-import type { User } from "@/types";
+import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartSort } from "@/lib/smartSearch";
+import { platformLabel } from "@/lib/devicePlatform";
+import type { TechFilterUser, TechFilterDevice } from "@/types";
 
 export type { DateRange };
 
@@ -58,15 +62,37 @@ interface SearchBarProps {
   placeholder: string;
 }
 
+// Bars currently mounted, in mount order. A page can legitimately render more
+// than one at once (tech/category-usage mounts a list-level bar plus a
+// detail-panel bar when its Users tab is open) — without coordination both
+// would grab the "/" hotkey and fight over focus. Only the most-recently
+// mounted bar (the one the user is more likely acting on) responds.
+const searchBarRegistry: RefObject<HTMLInputElement | null>[] = [];
+
 export function SmartSearchBar({ value, onChange, placeholder }: SearchBarProps) {
   const ref = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    searchBarRegistry.push(ref);
+    return () => {
+      const i = searchBarRegistry.indexOf(ref);
+      if (i !== -1) searchBarRegistry.splice(i, 1);
+    };
+  }, []);
+
+  useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === "/" && document.activeElement?.tagName !== "INPUT") {
-        e.preventDefault();
-        ref.current?.focus();
-      }
+      if (e.key !== "/") return;
+      const active = document.activeElement;
+      const tag = active?.tagName;
+      const isEditable =
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        (active instanceof HTMLElement && active.isContentEditable);
+      if (isEditable) return;
+      if (searchBarRegistry[searchBarRegistry.length - 1] !== ref) return;
+      e.preventDefault();
+      ref.current?.focus();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -106,6 +132,8 @@ interface FilterBarProps {
   setGroupId:      (v: string) => void;
   employeeId:      string;
   setEmployeeId:   (v: string) => void;
+  deviceId:        string;
+  setDeviceId:     (v: string) => void;
   productivity?:   string;
   setProductivity?: (v: string) => void;
   showProdFilter?: boolean;
@@ -116,11 +144,90 @@ interface FilterBarProps {
 export function FilterBar({
   dateRange, setDateRange, groupId, setGroupId,
   employeeId, setEmployeeId,
+  deviceId, setDeviceId,
   productivity = "", setProductivity,
   showProdFilter = true,
   summaryMode, setSummaryMode,
 }: FilterBarProps) {
-  const { data: users }  = useSWR<User[]>("users-filter", () => getUsers());
+  // `/v1/tech/filters/users` is gated on `tech:view` — the SAME permission
+  // these pages require — unlike `/v1/users` (`users:view`), which silently
+  // 403s for anyone with tech access but not users access and collapses this
+  // filter to nothing (PRD-2960). It's also scoped the same way the pages
+  // themselves are: `[]` for `own`-scoped callers, group-restricted for
+  // `groups`-scoped callers.
+  const { data: users, isLoading: usersLoading } =
+    useSWR<TechFilterUser[]>("tech-filter-users", () => getTechFilterUsers());
+
+  // Raw text in the talent search box. Kept separate from `employeeId` so
+  // typing a new query doesn't blow away the active filter until a talent is
+  // actually selected (or the box is cleared).
+  const [employeeQuery, setEmployeeQuery] = useState("");
+  const debouncedEmployeeQuery = useDebouncedValue(employeeQuery, 200);
+
+  // GroupPicker clears employeeId when a group is chosen — mirror that here
+  // so the search box doesn't keep showing a stale selected name.
+  useEffect(() => {
+    if (!employeeId) setEmployeeQuery("");
+  }, [employeeId]);
+
+  // Defensive: if employeeId is ever set before the user has typed anything
+  // (e.g. a future caller pre-populates the filter), show the matching name
+  // instead of a blank box.
+  useEffect(() => {
+    if (employeeId && employeeQuery === "") {
+      const match = users?.find(u => u.id === employeeId);
+      if (match) setEmployeeQuery(match.name);
+    }
+  }, [employeeId, users, employeeQuery]);
+
+  const activeUsers = useMemo(() => (users ?? []).filter(u => u.is_active), [users]);
+
+  // Email is shown alongside the name in TalentSearchBar's result rows so
+  // talents who share a name (e.g. several "Mohammad"s) are distinguishable —
+  // the core ask in PRD-2960.
+  const employeeResults: TalentSearchResult[] = useMemo(
+    () => smartSort(debouncedEmployeeQuery, activeUsers, u => [u.name, u.email])
+      .map(u => ({ id: u.id, name: u.name, email: u.email })),
+    [debouncedEmployeeQuery, activeUsers],
+  );
+
+  // Device filter. `/v1/tech/filters/devices` is gated on `tech:view` for the
+  // same reason the users lookup above is — `/v1/devices` needs `devices:view`
+  // and would 403 for a tech-only role. It lists UNASSIGNED devices too, which
+  // is the whole reason this can't be folded into the talent filter: a machine
+  // with no owner is unreachable from a person search.
+  const { data: devices, isLoading: devicesLoading } =
+    useSWR<TechFilterDevice[]>("tech-filter-devices", () => getTechFilterDevices());
+
+  const [deviceQuery, setDeviceQuery] = useState("");
+  const debouncedDeviceQuery = useDebouncedValue(deviceQuery, 200);
+
+  // Selecting a group or a talent clears deviceId (see the handlers below) —
+  // mirror that here so the box doesn't keep showing a hostname for a filter
+  // that is no longer applied.
+  useEffect(() => {
+    if (!deviceId) setDeviceQuery("");
+  }, [deviceId]);
+
+  useEffect(() => {
+    if (deviceId && deviceQuery === "") {
+      const match = devices?.find(d => d.id === deviceId);
+      if (match) setDeviceQuery(match.hostname);
+    }
+  }, [deviceId, devices, deviceQuery]);
+
+  const activeDevices = useMemo(() => (devices ?? []).filter(d => d.is_active), [devices]);
+
+  const deviceResults: TalentSearchResult[] = useMemo(
+    () => smartSort(debouncedDeviceQuery, activeDevices, d => [d.hostname, d.employee_name ?? "", d.platform])
+      .map(d => ({
+        id: d.id,
+        name: d.hostname,
+        email: d.employee_name ?? "Unassigned",
+        detail: platformLabel(d.platform),
+      })),
+    [debouncedDeviceQuery, activeDevices],
+  );
 
   return (
     <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -145,20 +252,43 @@ export function FilterBar({
       {/* Team / Group — includes subgroups in filter */}
       <GroupPicker
         value={groupId}
-        onChange={v => { setGroupId(v); setEmployeeId(""); }}
+        onChange={v => { setGroupId(v); setEmployeeId(""); setDeviceId(""); }}
       />
 
-      {/* User */}
-      <div className="relative shrink-0">
-        <select value={employeeId} onChange={e => { setEmployeeId(e.target.value); setGroupId(""); }}
-                className="appearance-none bg-white border border-gray-200 rounded-lg pl-3 pr-8 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 shadow-sm">
-          <option value="">All Users</option>
-          {(users ?? []).filter(u => u.is_active).map(u => (
-            <option key={u.id} value={u.id}>{u.name}</option>
-          ))}
-        </select>
-        <ChevronDown size={12} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-      </div>
+      {/* Talent — search-driven filter (replaces the old bare-name <select>;
+          see PRD-2960). Clearing the box (X / Escape / backspace to empty)
+          restores "All Users" the same way the old blank option did. */}
+      <TalentSearchBar
+        value={employeeQuery}
+        onChange={v => {
+          setEmployeeQuery(v);
+          if (v === "") setEmployeeId("");
+        }}
+        results={employeeResults}
+        onSelect={r => { setEmployeeId(r.id); setEmployeeQuery(r.name); setGroupId(""); setDeviceId(""); }}
+        loading={usersLoading}
+        placeholder="All Users — name or email…"
+        label="Filter by talent"
+        className="w-full sm:w-64 shrink-0"
+      />
+
+      {/* Device — search-driven, same control as the Activity Logs device
+          picker. Mutually exclusive with group/talent: the three narrow the
+          same device set, so combining them would mostly produce empty
+          results and read as a broken filter rather than an intersection. */}
+      <TalentSearchBar
+        value={deviceQuery}
+        onChange={v => {
+          setDeviceQuery(v);
+          if (v === "") setDeviceId("");
+        }}
+        results={deviceResults}
+        onSelect={r => { setDeviceId(r.id); setDeviceQuery(r.name); setGroupId(""); setEmployeeId(""); }}
+        loading={devicesLoading}
+        placeholder="All Devices — hostname…"
+        label="Filter by device"
+        className="w-full sm:w-64 shrink-0"
+      />
 
       {/* Productivity */}
       {showProdFilter && setProductivity && (
@@ -242,6 +372,98 @@ export function DurationRow({
       <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
         <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(pct, 100)}%`, background: color }} />
       </div>
+    </div>
+  );
+}
+
+// ── List skeleton rows ────────────────────────────────────────────────────────
+// Cold-load placeholder for the two-panel list views (Website/App/Category
+// Usage). Each page passes its OWN grid template / gap / padding classes so
+// the skeleton rows are pixel-close to the real rows they'll be replaced by —
+// nothing shifts once data arrives. `columns` names each page's own column
+// sequence in order (they differ: websites/apps have a leading productivity
+// icon + trailing menu icon; category usage has a leading color dot and no
+// menu column).
+
+type SkeletonColumn = "icon" | "dot" | "text" | "duration" | "pct" | "menu";
+
+const SKELETON_TEXT_WIDTHS = ["72%", "58%", "66%", "50%", "62%", "78%", "54%", "68%"];
+
+function SkeletonCell({ type, seed }: { type: SkeletonColumn; seed: number }) {
+  switch (type) {
+    case "icon":
+      return <div className="w-4 h-4 rounded-full bg-gray-200 animate-pulse self-center" />;
+    case "dot":
+      return <div className="w-3 h-3 rounded-full bg-gray-200 animate-pulse mt-0.5 shrink-0" />;
+    case "text":
+      return (
+        <div className="min-w-0 self-center">
+          <div
+            className="h-3.5 bg-gray-200 rounded animate-pulse"
+            style={{ width: SKELETON_TEXT_WIDTHS[seed % SKELETON_TEXT_WIDTHS.length] }}
+          />
+          <div className="h-2.5 w-16 bg-gray-100 rounded animate-pulse mt-1.5" />
+        </div>
+      );
+    case "duration":
+      return <div className="h-3.5 w-14 bg-gray-200 rounded animate-pulse self-center" />;
+    case "pct":
+      return <div className="h-3.5 w-9 bg-gray-200 rounded animate-pulse self-center justify-self-end" />;
+    case "menu":
+      return <div className="w-3.5 h-3.5 rounded-full bg-gray-200 animate-pulse self-center" />;
+  }
+}
+
+export function ListSkeletonRows({
+  gridClassName, rowClassName, columns, count = 8,
+}: {
+  /** Same `grid-cols-[...] sm:grid-cols-[...]` string the real rows use. */
+  gridClassName: string;
+  /** Gap + padding classes the real rows use (e.g. "gap-2 px-3 sm:px-4 py-3"). */
+  rowClassName: string;
+  columns: SkeletonColumn[];
+  count?: number;
+}) {
+  return (
+    <>
+      {Array.from({ length: count }).map((_, i) => (
+        <div
+          key={i}
+          className={`grid ${gridClassName} ${rowClassName} border-b border-gray-100`}
+          aria-hidden="true"
+        >
+          {columns.map((col, j) => <SkeletonCell key={j} type={col} seed={i + j} />)}
+        </div>
+      ))}
+    </>
+  );
+}
+
+// ── Detail panel skeleton ─────────────────────────────────────────────────────
+// Generic cold-load placeholder for a DetailPanel's active tab content. Not
+// tailored per-tab-shape (Titles/Subpages/Users/Usage/Activities all differ
+// slightly) — this approximates the most common shape (a DurationRow list)
+// closely enough that the plain "Loading…" text disappears without needing a
+// bespoke skeleton per tab.
+
+export function DetailSkeletonRows({ count = 6 }: { count?: number }) {
+  return (
+    <div className="pt-1" aria-hidden="true">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="py-2.5 border-b border-gray-100 last:border-0">
+          <div className="flex items-center justify-between mb-1.5 gap-2">
+            <div
+              className="h-3.5 bg-gray-200 rounded animate-pulse"
+              style={{ width: SKELETON_TEXT_WIDTHS[i % SKELETON_TEXT_WIDTHS.length] }}
+            />
+            <div className="flex items-center gap-3 shrink-0">
+              <div className="h-3 w-12 bg-gray-200 rounded animate-pulse" />
+              <div className="h-2.5 w-7 bg-gray-100 rounded animate-pulse" />
+            </div>
+          </div>
+          <div className="h-1 w-full bg-gray-100 rounded-full animate-pulse" />
+        </div>
+      ))}
     </div>
   );
 }
