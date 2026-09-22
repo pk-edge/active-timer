@@ -13,16 +13,20 @@ from sqlalchemy import select, func, delete, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, require
+from app.api.deps import get_db, require, require_super_admin, forbid_impersonation
 from app.core import audit
 from app.core.AdminAuthCache import admin_auth_cache
 from app.core.config import get_settings
 from app.core.group_tree import descendant_group_ids
+from app.core.impersonation import is_super_admin, is_impersonating
 from app.core.ingest_queue import ingest_queue
 from app.core.provisioning import is_talent_role
+from app.core.search import build_search
 from app.core.security import hash_password_async
 from app.db.models import Employee, Device, Role, EmployeeGroupAccess, Group, GroupMember
-from app.schemas.rbac import UserIn, UserPatch, UserOut, ApproveRequest
+from app.schemas.rbac import (
+    UserIn, UserPatch, UserOut, ApproveRequest, ImpersonationCandidateOut,
+)
 
 router = APIRouter()
 settings = get_settings()
@@ -59,11 +63,59 @@ async def _resolve_role(role_id: str | None, company_id, db: AsyncSession) -> Ro
         rid = uuid.UUID(role_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid role id")
-    r = await db.execute(select(Role).where(Role.id == rid, Role.company_id == company_id))
+    # Permissions eager-loaded: _assert_can_assign_role needs them for the
+    # containment check below, and every caller of this helper assigns the
+    # result to an Employee, so paying one extra join here is cheaper than a
+    # second query at each of the three call sites.
+    r = await db.execute(
+        select(Role).options(selectinload(Role.permissions))
+        .where(Role.id == rid, Role.company_id == company_id)
+    )
     role = r.scalar_one_or_none()
     if not role:
         raise HTTPException(status_code=404, detail="Role not found")
     return role
+
+
+def _assert_can_assign_role(user: Employee, role: Role | None) -> None:
+    """Anti-escalation for assigning an EXISTING role to a user.
+
+    Mirrors roles.py's _assert_can_grant / _assert_can_touch_system_role, which
+    guard the same thing when a role is being CREATED or EDITED. Without this,
+    anyone holding users:create/users:edit could hand a user — including
+    themselves, via a self-service flow, or another account they control — the
+    Super Admin role, or any role whose scope/permissions exceed their own,
+    entirely bypassing the roles.py guards. Unassigning a role (role=None) only
+    ever reduces privilege, so it is always allowed.
+    """
+    if role is None:
+        return
+
+    caller_scope = getattr(user, "_scope_type", "own")
+
+    if role.is_system and caller_scope != "all":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="System roles can only be assigned by an all-scope administrator",
+        )
+    if role.scope_type == "all" and caller_scope != "all":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an all-scope user can assign a role with all-data scope",
+        )
+    if role.scope_type == "groups" and caller_scope not in ("all", "groups"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an all- or group-scoped user can assign a role with group scope",
+        )
+
+    held = getattr(user, "_perms", set())
+    missing = [f"{p.module}.{p.action}" for p in role.permissions if (p.module, p.action) not in held]
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Cannot assign a role granting permissions you do not hold: {', '.join(missing)}",
+        )
 
 
 async def _set_group_access(
@@ -104,6 +156,64 @@ async def _set_group_access(
         db.add(EmployeeGroupAccess(employee_id=emp_id, group_id=guid))
 
 
+@router.get("/impersonatable", response_model=list[ImpersonationCandidateOut])
+async def list_impersonatable_users(
+    search: str | None = Query(default=None),
+    limit:  int = Query(default=50, ge=1, le=200),
+    admin: Employee = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Candidates for Super-Admin impersonation.
+
+    A dedicated endpoint rather than a flag on GET /v1/users, for two reasons:
+    that route is gated on `users:view` (which ordinary admins hold, and this
+    list must be invisible to them), and it returns deactivated accounts and has
+    no result cap. Eligibility here mirrors POST /v1/auth/impersonate exactly —
+    same company, active, not deleted, not the caller, and never another Super
+    Admin — so the picker can never offer a target the start endpoint will reject.
+
+    NOTE: this route must stay declared BEFORE `GET /{user_id}` or FastAPI will
+    match "impersonatable" as a user id.
+    """
+    q = (
+        select(Employee).options(selectinload(Employee.role_obj))
+        .where(
+            Employee.company_id  == admin.company_id,
+            Employee.id          != admin.id,
+            Employee.is_deleted  == False,   # noqa: E712
+            Employee.is_active   == True,    # noqa: E712
+            Employee.is_approved == True,    # noqa: E712
+        )
+    )
+    # Wildcard-safe, accent-insensitive, multi-token search (see
+    # app/core/search.py) — replaces the old raw `%term%` substring match.
+    # When a search is active, rank by relevance first, name as tiebreaker;
+    # otherwise keep the plain alphabetical ordering unchanged.
+    sc = build_search(search, ["employees.name", "employees.email"], prefix="isearch")
+    if sc.where:
+        q = q.where(text(sc.where)).order_by(text(sc.order_by), Employee.name.asc())
+        q = q.params(**sc.params)
+    else:
+        q = q.order_by(Employee.name.asc())
+
+    # Over-fetch modestly so that filtering out Super Admins below can't leave the
+    # caller short of `limit` results.
+    rows = (await db.execute(q.limit(limit * 2))).scalars().all()
+
+    out: list[ImpersonationCandidateOut] = []
+    for emp in rows:
+        if is_super_admin(emp):
+            continue
+        out.append(ImpersonationCandidateOut(
+            id=str(emp.id), name=emp.name, email=emp.email,
+            role_name=emp.role_obj.name if emp.role_obj else emp.role,
+            user_kind="talent" if is_talent_role(emp.role_obj) else "team",
+        ))
+        if len(out) >= limit:
+            break
+    return out
+
+
 @router.get("", response_model=list[UserOut])
 async def list_users(
     search:  str | None = Query(default=None),
@@ -114,15 +224,17 @@ async def list_users(
     q = (
         select(Employee).options(selectinload(Employee.role_obj))
         .where(Employee.company_id == user.company_id, Employee.is_deleted == False)  # noqa: E712
-        .order_by(Employee.created_at.asc())
     )
     if pending:
         q = q.where(Employee.is_approved == False, Employee.is_active == True)  # noqa: E712
     else:
         q = q.where(Employee.is_approved == True)  # noqa: E712
-    if search:
-        like = f"%{search.lower()}%"
-        q = q.where(func.lower(Employee.name).like(like) | func.lower(Employee.email).like(like))
+
+    # Wildcard-safe, accent-insensitive, multi-token search (see
+    # app/core/search.py) — replaces the old raw `%term%` substring match.
+    sc = build_search(search, ["employees.name", "employees.email"], prefix="usearch")
+    if sc.where:
+        q = q.where(text(sc.where))
 
     # Groups-scoped users only see employees who belong to their assigned groups.
     # Pending users have no group memberships yet (they just registered), so skip
@@ -148,6 +260,18 @@ async def list_users(
                 )
             )
         )
+
+    # Relevance ordering when actively searching; otherwise the original,
+    # unchanged registration-order listing. `.params()` must come AFTER every
+    # text() fragment referencing `sc`'s bind names has been attached (both
+    # the WHERE above and the ORDER BY here) — SQLAlchemy's `.params()` only
+    # fills bind values for parameters already present in the statement at
+    # the time it's called, so calling it any earlier would leave the ones
+    # introduced by this order_by clause unbound.
+    if sc.where:
+        q = q.order_by(text(sc.order_by), Employee.created_at.asc()).params(**sc.params)
+    else:
+        q = q.order_by(Employee.created_at.asc())
 
     rows = await db.execute(q)
     employees = rows.scalars().all()
@@ -480,6 +604,7 @@ async def create_user(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already exists")
 
     role = await _resolve_role(body.role_id, user.company_id, db)
+    _assert_can_assign_role(user, role)
 
     # If a soft-deleted row exists for this email, resurrect it in place.
     # The DB unique constraint on email prevents inserting a second row.
@@ -557,6 +682,19 @@ async def update_user(
     user: Employee = Depends(require("users", "edit")),
     db: AsyncSession = Depends(get_db),
 ):
+    # Impersonation must never become account takeover or privilege escalation.
+    # This endpoint can set a password hash and reassign a role, so a session
+    # wearing someone else's identity is barred from both (and from flipping
+    # activation) even when that identity legitimately holds users:edit.
+    if is_impersonating(user):
+        blocked = [f for f in ("password", "role_id", "is_active")
+                   if getattr(body, f) is not None]
+        if blocked:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot change {', '.join(blocked)} while impersonating another user",
+            )
+
     emp = await _get_user(user_id, user.company_id, db)
     changed: dict = {}
     final_role = emp.role_obj
@@ -565,6 +703,7 @@ async def update_user(
         emp.name = body.name
     if body.role_id is not None:
         role = await _resolve_role(body.role_id, user.company_id, db)
+        _assert_can_assign_role(user, role)
         new_role_id = role.id if role else None
         if new_role_id != emp.role_id:
             changed["role"] = role.name if role else None
@@ -622,6 +761,7 @@ async def approve_user(
     role = await _resolve_role(body.role_id, user.company_id, db)
     if not role:
         raise HTTPException(status_code=400, detail="role_id is required to approve a user")
+    _assert_can_assign_role(user, role)
 
     emp.role_id = role.id
     emp.is_approved = True

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, require
 from app.core import audit as _audit_core
+from app.core.search import build_bm25_search
 from app.db.models import Employee
 
 router = APIRouter()
@@ -55,7 +56,15 @@ async def list_audit(
     actor_id:    Optional[str] = Query(default=None, description="Filter by actor employee UUID"),
     since:       Optional[date] = Query(default=None, description="Earliest date (YYYY-MM-DD, inclusive)"),
     until:       Optional[date] = Query(default=None, description="Latest date (YYYY-MM-DD, inclusive)"),
-    search:      Optional[str] = Query(default=None, description="Full-text search across action, actor, target"),
+    search:      Optional[str] = Query(
+        default=None,
+        description=(
+            "BM25-ranked full-text search over action, actor role, target type/id, "
+            "and metadata. Does NOT match the actor's name/email — use actor_id "
+            "for that (a dedicated employee-name search here would need the "
+            "typo-tolerant trigram path used elsewhere, not BM25)."
+        ),
+    ),
     user: Employee = Depends(require("audit", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -83,32 +92,42 @@ async def list_audit(
         filters.append("a.created_at < (CAST(:until AS date) + INTERVAL '1 day')")
         params["until"] = until
 
-    if search:
-        filters.append("""(
-            a.action ILIKE :search
-            OR e.name ILIKE :search
-            OR e.email ILIKE :search
-            OR a.target_id ILIKE :search
-            OR a.actor_role ILIKE :search
-            OR a.metadata::text ILIKE :search
-        )""")
-        params["search"] = f"%{search}%"
+    # BM25-ranked search over audit_log's OWN columns (action, actor role,
+    # target type/id, metadata JSON) via the generated `search_tsv` column
+    # (migration 035_audit_bm25.sql) — see app/core/search.py::build_bm25_search()
+    # for the formula and CODEBASE_GUIDE.md "Search" for why audit uses BM25
+    # instead of the shared pg_trgm build_search() path. Deliberately does
+    # NOT search the joined employee name/email — that stays on the
+    # typo-tolerant trigram path used elsewhere; audit's own free-text field
+    # is scoped to its own document-like content.
+    sc = await build_bm25_search(
+        db,
+        search,
+        table="audit_log",
+        tsv_column="search_tsv",
+        company_id=str(user.company_id),
+        prefix="asearch",
+    )
+    if sc.where:
+        filters.append(sc.where)
+        params.update(sc.params)
 
     where = " AND ".join(filters)
 
-    # Count query for pagination metadata — the employees join is only needed
-    # when the search filter references e.* columns.
-    count_join = "LEFT JOIN employees e ON e.id = a.actor_employee_id" if search else ""
+    # Count query for pagination metadata — BM25 recall/ranking only ever
+    # references a.* columns, so (unlike the old build_search()-based search,
+    # which could match on the joined employee's name/email) the employees
+    # join is never needed here.
     count_result = await db.execute(
         text(f"""
             SELECT COUNT(*) FROM audit_log a
-            {count_join}
             WHERE {where}
         """),
         params,
     )
     total = int(count_result.scalar() or 0)
 
+    order_by = f"{sc.order_by}, a.created_at DESC" if sc.order_by else "a.created_at DESC"
     rows = await db.execute(
         text(f"""
             SELECT a.id, a.action, a.target_type, a.target_id, a.metadata,
@@ -117,7 +136,7 @@ async def list_audit(
             FROM audit_log a
             LEFT JOIN employees e ON e.id = a.actor_employee_id
             WHERE {where}
-            ORDER BY a.created_at DESC
+            ORDER BY {order_by}
             LIMIT :limit OFFSET :offset
         """),
         params,

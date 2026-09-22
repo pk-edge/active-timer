@@ -1,20 +1,32 @@
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
+from sqlalchemy.orm import joinedload
 
-from app.api.deps import get_db, get_current_user
-from app.core import audit
+from app.api.deps import get_db, get_current_user, require_super_admin
+from app.core import audit, impersonation
+from app.core.config import get_settings
 from app.core.device_auth_cache import invalidate_device
 from app.core.provisioning import link_or_provision_employee
 from app.core.rate_limit import DistributedLimiter
 from app.core.security import (
-    create_device_token, create_admin_token, hash_password_async, verify_password_async,
+    create_device_token, create_admin_token, create_impersonation_token,
+    hash_password_async, verify_password_async,
 )
 from app.db.models import Company, Device, Employee, EmployeeGroupAccess
-from app.schemas.auth import EnrollRequest, EnrollResponse, AdminLoginRequest, AdminLoginResponse
-from app.schemas.rbac import MeOut, PermissionItem, RegisterRequest, RegisterResponse
+from app.schemas.auth import (
+    EnrollRequest, EnrollResponse, AdminLoginRequest, AdminLoginResponse,
+    ImpersonateRequest, ImpersonateResponse, ImpersonationTargetOut,
+    ExitImpersonationResponse,
+)
+from app.schemas.rbac import (
+    MeOut, PermissionItem, RegisterRequest, RegisterResponse, ImpersonatorOut,
+)
+
+settings = get_settings()
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -223,6 +235,7 @@ async def admin_login(body: AdminLoginRequest, request: Request, db: AsyncSessio
 
 @router.get("/me", response_model=MeOut)
 async def me(user: Employee = Depends(get_current_user)):
+    impersonator_id = getattr(user, "_impersonator_id", None)
     return MeOut(
         id=str(user.id),
         name=user.name,
@@ -233,4 +246,143 @@ async def me(user: Employee = Depends(get_current_user)):
             PermissionItem(module=m, action=a)
             for (m, a) in sorted(getattr(user, "_perms", set()))
         ],
+        # Only a real Super Admin acting as themselves may start a session.
+        can_impersonate=(impersonator_id is None and impersonation.is_super_admin(user)),
+        impersonating=impersonator_id is not None,
+        impersonator=(
+            ImpersonatorOut(id=impersonator_id, email=getattr(user, "_impersonator_email", None))
+            if impersonator_id else None
+        ),
+    )
+
+
+# ── Super-Admin impersonation ────────────────────────────────────────────────
+#
+# Design notes live in app/core/impersonation.py. The short version:
+#   • who may start one is a STRUCTURAL check, not a grantable permission;
+#   • the token's `jti` is registered in Redis so "Exit" genuinely revokes it —
+#     if we cannot register it, we refuse to issue the token at all;
+#   • exit re-mints a fresh admin token server-side after re-verifying the admin,
+#     so no privileged token is ever parked in the browser alongside the session.
+
+@router.post("/impersonate", response_model=ImpersonateResponse)
+async def start_impersonation(
+    body:  ImpersonateRequest,
+    admin: Employee = Depends(require_super_admin),
+    db:    AsyncSession = Depends(get_db),
+):
+    try:
+        target_uuid = uuid.UUID(body.user_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid user id")
+
+    if target_uuid == admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="You cannot impersonate yourself",
+        )
+
+    target = (await db.execute(
+        select(Employee)
+        .options(joinedload(Employee.role_obj))
+        .where(
+            Employee.id         == target_uuid,
+            Employee.company_id == admin.company_id,   # tenant isolation
+            Employee.is_deleted == False,              # noqa: E712
+        )
+    )).unique().scalar_one_or_none()
+
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if not target.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot impersonate a deactivated user",
+        )
+    if impersonation.is_super_admin(target):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super Admins cannot be impersonated",
+        )
+
+    jti      = str(uuid.uuid4())
+    ttl_secs = settings.IMPERSONATION_TTL_MINUTES * 60
+
+    # A session we cannot revoke must never begin: without the registry entry the
+    # Exit button would be cosmetic and the token would live until it expired.
+    if not await impersonation.register_session(jti, str(admin.id), ttl_secs):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Impersonation is temporarily unavailable — please try again shortly",
+        )
+
+    target_role = target.role_obj.name if target.role_obj else target.role
+    token = create_impersonation_token(
+        target_id=str(target.id), company_id=str(admin.company_id),
+        act_by=str(admin.id), act_email=admin.email, jti=jti,
+    )
+
+    await audit.record(
+        db, admin, "user.impersonate.start", "user", str(target.id),
+        {"target_email": target.email, "target_role": target_role,
+         "jti": jti, "ttl_minutes": settings.IMPERSONATION_TTL_MINUTES},
+    )
+    await db.commit()
+
+    log.info("Impersonation started: admin=%s target=%s jti=%s", admin.id, target.id, jti)
+    return ImpersonateResponse(
+        access_token=token,
+        expires_in=ttl_secs,
+        target=ImpersonationTargetOut(
+            id=str(target.id), name=target.name, email=target.email, role_name=target_role,
+        ),
+    )
+
+
+@router.post("/impersonate/exit", response_model=ExitImpersonationResponse)
+async def exit_impersonation(
+    user: Employee = Depends(get_current_user),
+    db:   AsyncSession = Depends(get_db),
+):
+    """End the session and hand back a fresh admin token.
+
+    Authenticated with the IMPERSONATION token — the admin's original token was
+    never stored anywhere, so the identity to restore comes from the `act_by`
+    claim and is re-verified against the database before anything is minted.
+    """
+    jti      = getattr(user, "_imp_jti", None)
+    admin_id = getattr(user, "_impersonator_id", None)
+    if not jti or not admin_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Not an impersonation session",
+        )
+
+    # Revoke FIRST and unconditionally: if anything below fails, the session the
+    # caller asked to end must still be over.
+    await impersonation.revoke_session(jti)
+    await audit.record(
+        db, user, "user.impersonate.stop", "user", str(user.id), {"jti": jti},
+    )
+
+    admin = (await db.execute(
+        select(Employee)
+        .options(joinedload(Employee.role_obj))
+        .where(Employee.id == uuid.UUID(admin_id), Employee.is_active == True)  # noqa: E712
+    )).unique().scalar_one_or_none()
+
+    # Deactivated or demoted while impersonating — the session is already ended
+    # above; they simply have to sign in again rather than get a token back.
+    if not admin or not impersonation.is_super_admin(admin):
+        await db.commit()
+        log.warning("Impersonation exit without handback: admin=%s no longer eligible", admin_id)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your admin account is no longer active — please sign in again",
+        )
+
+    await db.commit()
+    log.info("Impersonation ended: admin=%s target=%s jti=%s", admin.id, user.id, jti)
+    return ExitImpersonationResponse(
+        access_token=create_admin_token(str(admin.id), admin.role, str(admin.company_id)),
+        role=admin.role_obj.name if admin.role_obj else admin.role,
+        name=admin.name,
     )

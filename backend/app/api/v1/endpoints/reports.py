@@ -52,6 +52,65 @@ async def _scope_clause(admin: Employee, db: AsyncSession) -> tuple[str, dict]:
     return " AND ae.device_id = ANY(:vids)", {"vids": [str(i) for i in ids]}
 
 
+def _validate_range(days: int, since: Optional[date], until: Optional[date]) -> None:
+    """Validation for the days-vs-since/until precedence on the four report
+    endpoints below.
+
+    Rule (deliberately simple and unambiguous, not a silent-precedence guess):
+    - since/until must be supplied TOGETHER — one without the other is 400.
+    - since must not be after until — 400.
+    - since/until are mutually exclusive with `days` being anything other than
+      its own default (7): if the caller sends since/until AND an explicit
+      non-default `days`, that's two conflicting ways to select the window in
+      the same request — 400 rather than silently picking one. (A `days=7`
+      sent alongside since/until is indistinguishable from `days` simply being
+      left at its default, since FastAPI gives us no way to tell "omitted" from
+      "explicitly 7" for a query param with a default — that ambiguity is
+      accepted and since/until wins in that one case.)
+    """
+    if (since is None) != (until is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="since and until must be provided together",
+        )
+    if since is not None and until is not None:
+        if since > until:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="since must not be after until",
+            )
+        if days != 7:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="days must be left at its default when since/until are provided",
+            )
+
+
+def _window_clause(days: int, since: Optional[date], until: Optional[date]) -> tuple[str, dict]:
+    """SQL fragment + bound params selecting the requested window over ae.timestamp.
+
+    since/until (when both given) select the fixed inclusive calendar range
+    [since, until] — until's whole day is included via the same
+    `CAST(:until AS date) + INTERVAL '1 day'` idiom already used by
+    audit.py/logs.py/the fleet & device_full report jobs below. Otherwise this
+    is byte-identical to the pre-existing `days`-ending-today rolling window.
+    """
+    if since is not None and until is not None:
+        return (
+            "ae.timestamp >= CAST(:since AS date) AND ae.timestamp < (CAST(:until AS date) + INTERVAL '1 day')",
+            {"since": since, "until": until},
+        )
+    return "ae.timestamp >= NOW() - make_interval(days => :days)", {"days": days}
+
+
+def _range_cache_fp(since: Optional[date], until: Optional[date]) -> tuple:
+    """Cache-key fragment distinguishing a since/until query from a plain
+    `days` one so the two shapes never share a Redis entry (a since/until
+    query where `until` != today must never be served the `days`-keyed
+    rolling-window result, and vice versa)."""
+    return (str(since) if since else None, str(until) if until else None)
+
+
 async def _get_visible_device(device_id: str, admin: Employee, db: AsyncSession) -> Device:
     """Fetch a device by id, enforcing company + visibility scope in one pass."""
     try:
@@ -76,10 +135,14 @@ async def _get_visible_device(device_id: str, admin: Employee, db: AsyncSession)
 @router.get("/company/summary", response_model=List[CompanyDayOut])
 async def company_summary(
     days:  int = Query(default=7, ge=1, le=90),
+    since: Optional[date] = Query(default=None, description="Start date YYYY-MM-DD (inclusive); requires `until`, mutually exclusive with a non-default `days`"),
+    until: Optional[date] = Query(default=None, description="End date YYYY-MM-DD (inclusive); requires `since`"),
     admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
+    _validate_range(days, since, until)
     clause, sparams = await _scope_clause(admin, db)
+    window_clause, wparams = _window_clause(days, since, until)
 
     # Hoist scalars off the ORM object BEFORE any cache helper runs: a helper
     # error triggers db.rollback(), which expires `admin`, and a later
@@ -87,15 +150,17 @@ async def company_summary(
     cid = str(admin.company_id)
 
     _scope_fp = "all" if not clause else str(admin.id)
-    _ckey = ("report:summary", cid, _scope_fp, days)
+    _ckey = ("report:summary", cid, _scope_fp, days, *_range_cache_fp(since, until))
     _redis_hit, _ = await cache_get(_ckey)
     if _redis_hit is not None:
         return _redis_hit
 
-    # Fast path: full-scope admins read from the pre-aggregated cache.
-    # Scoped users (own/groups) fall through to the live query — their result
-    # is a device-specific subset the cache does not store.
-    if not clause:
+    # Fast path: full-scope admins + the plain days-rolling-window shape read
+    # from the pre-aggregated cache — it has no `until` concept at all (always
+    # implicitly ends today), so a since/until query skips it and goes live.
+    # Scoped users (own/groups) also fall through to the live query — their
+    # result is a device-specific subset the cache does not store.
+    if not clause and since is None:
         from app.core import report_cache
         cached = await report_cache.summary_from_cache(db, cid, days)
         if cached is not None:
@@ -107,7 +172,7 @@ async def company_summary(
             await cache_set(_ckey, [i.model_dump() for i in _items], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
             return _items
 
-    # Fallback: live aggregation (scoped users or cache miss/stale).
+    # Fallback: live aggregation (scoped users, a since/until range, or cache miss/stale).
     result = await db.execute(
         text(f"""
             SELECT
@@ -118,10 +183,10 @@ async def company_summary(
             FROM activity_events ae
             JOIN devices d ON d.id = ae.device_id
             WHERE d.company_id = :company_id
-              AND ae.timestamp >= NOW() - make_interval(days => :days){clause}
+              AND {window_clause}{clause}
             GROUP BY day ORDER BY day DESC
         """),
-        {"company_id": cid, "days": days, **sparams},
+        {"company_id": cid, **wparams, **sparams},
     )
     _items = [
         CompanyDayOut(date=str(r.day), active_seconds=int(r.active or 0),
@@ -136,21 +201,27 @@ async def company_summary(
 async def top_apps(
     days:  int = Query(default=7, ge=1, le=90),
     limit: int = Query(default=20, ge=1, le=100),
+    since: Optional[date] = Query(default=None, description="Start date YYYY-MM-DD (inclusive); requires `until`, mutually exclusive with a non-default `days`"),
+    until: Optional[date] = Query(default=None, description="End date YYYY-MM-DD (inclusive); requires `since`"),
     admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
+    _validate_range(days, since, until)
     clause, sparams = await _scope_clause(admin, db)
+    window_clause, wparams = _window_clause(days, since, until)
 
     cid = str(admin.company_id)  # hoisted: see company_summary
 
     _scope_fp = "all" if not clause else str(admin.id)
-    _ckey = ("report:top_apps", cid, _scope_fp, days, limit)
+    _ckey = ("report:top_apps", cid, _scope_fp, days, limit, *_range_cache_fp(since, until))
     _redis_hit, _ = await cache_get(_ckey)
     if _redis_hit is not None:
         return _redis_hit
 
-    # Fast path: full-scope admins + standard window (7 / 14 / 30) read from cache.
-    if not clause:
+    # Fast path: full-scope admins + standard window (7 / 14 / 30) read from
+    # cache. A since/until query skips this entirely — top_apps_from_cache is
+    # hard-restricted to the 3 pre-computed windows and has no `until` concept.
+    if not clause and since is None:
         from app.core import report_cache
         cached = await report_cache.top_apps_from_cache(db, cid, days, limit)
         if cached is not None:
@@ -168,11 +239,11 @@ async def top_apps(
             WHERE d.company_id = :company_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= NOW() - make_interval(days => :days)
+              AND {window_clause}
               {_EXCL_IDLE}{clause}
             GROUP BY normalize_app_name(ae.app_name) ORDER BY seconds DESC LIMIT :limit
         """),
-        {"company_id": cid, "days": days, "limit": limit, **sparams},
+        {"company_id": cid, "limit": limit, **wparams, **sparams},
     )
     _items = [AppUsageOut(app_name=r.app_name, seconds=int(r.seconds or 0)) for r in result.fetchall()]
     await cache_set(_ckey, [i.model_dump() for i in _items], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
@@ -220,29 +291,33 @@ async def device_top_apps(
     device_id: str,
     days:  int = Query(default=7, ge=1, le=90),
     limit: int = Query(default=20, ge=1, le=100),
+    since: Optional[date] = Query(default=None, description="Start date YYYY-MM-DD (inclusive); requires `until`, mutually exclusive with a non-default `days`"),
+    until: Optional[date] = Query(default=None, description="End date YYYY-MM-DD (inclusive); requires `since`"),
     admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
+    _validate_range(days, since, until)
     device = await _get_visible_device(device_id, admin, db)
+    window_clause, wparams = _window_clause(days, since, until)
 
-    _ckey = ("report:dev_top_apps", str(device.id), days, limit)
+    _ckey = ("report:dev_top_apps", str(device.id), days, limit, *_range_cache_fp(since, until))
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
         return _cached
 
     result = await db.execute(
-        text("""
+        text(f"""
             SELECT normalize_app_name(ae.app_name) AS app_name,
                    SUM(ae.duration) AS seconds
             FROM activity_events ae
             WHERE ae.device_id = :device_id
               AND ae.event_type = 'window_change'
               AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= NOW() - make_interval(days => :days)
+              AND {window_clause}
               AND ae.app_name NOT IN ('System Idle Process','LockApp','LogonUI','Idle','screensaver')
             GROUP BY normalize_app_name(ae.app_name) ORDER BY seconds DESC LIMIT :limit
         """),
-        {"device_id": str(device.id), "days": days, "limit": limit},
+        {"device_id": str(device.id), "limit": limit, **wparams},
     )
     _items = [AppUsageOut(app_name=r.app_name, seconds=int(r.seconds or 0)) for r in result.fetchall()]
     await cache_set(_ckey, [i.model_dump() for i in _items], fresh_secs=FRESH_DETAIL, stale_secs=STALE_DETAIL)
@@ -253,12 +328,16 @@ async def device_top_apps(
 async def device_summary(
     device_id: str,
     days:  int = Query(default=7, ge=1, le=90),
+    since: Optional[date] = Query(default=None, description="Start date YYYY-MM-DD (inclusive); requires `until`, mutually exclusive with a non-default `days`"),
+    until: Optional[date] = Query(default=None, description="End date YYYY-MM-DD (inclusive); requires `since`"),
     admin: Employee = Depends(require("reports", "view")),
     db: AsyncSession = Depends(get_db),
 ):
+    _validate_range(days, since, until)
     device = await _get_visible_device(device_id, admin, db)
+    window_clause, wparams = _window_clause(days, since, until)
 
-    _ckey = ("report:dev_summary", str(device.id), days)
+    _ckey = ("report:dev_summary", str(device.id), days, *_range_cache_fp(since, until))
     _cached, _ = await cache_get(_ckey)
     if _cached is not None:
         return _cached
@@ -271,10 +350,10 @@ async def device_summary(
                 SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle
             FROM activity_events ae
             WHERE ae.device_id = :device_id
-              AND ae.timestamp >= NOW() - make_interval(days => :days)
+              AND {window_clause}
             GROUP BY day ORDER BY day DESC
         """),
-        {"device_id": str(device.id), "days": days},
+        {"device_id": str(device.id), **wparams},
     )
     _items = [
         CompanyDayOut(date=str(r.day), active_seconds=int(r.active or 0),

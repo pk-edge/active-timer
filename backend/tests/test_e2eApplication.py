@@ -267,13 +267,17 @@ async def test_05_dashboards_and_reports(client):
 
     r = await client.get("/v1/logs?limit=5", headers=_admin_h())
     assert r.status_code == 200
-    logs = r.json()
+    body = r.json()
+    logs = body["items"]
     assert 0 < len(logs) <= 5
     assert all(l["hostname"] == CTX["hostname"] for l in logs)
+    assert body["offset"] == 0 and body["limit"] == 5
+    assert isinstance(body["has_more"], bool)
 
     r = await client.get("/v1/logs?event_type=url_visit&limit=50", headers=_admin_h())
     assert r.status_code == 200
-    assert r.json() and all(l["event_type"] == "url_visit" for l in r.json())
+    items = r.json()["items"]
+    assert items and all(l["event_type"] == "url_visit" for l in items)
 
 
 # ── 06 · RBAC: roles, groups, and data scoping end-to-end ─────────────────────
@@ -328,7 +332,7 @@ async def test_06_rbac_groups_scoping(client):
     assert r.status_code == 200 and r.json()[0]["device_count"] == 1
 
     r = await client.get("/v1/logs?limit=5", headers=rm_h)
-    assert r.status_code == 200 and len(r.json()) > 0
+    assert r.status_code == 200 and len(r.json()["items"]) > 0
 
     # Missing permissions must 403.
     for path in ("/v1/users", "/v1/roles", "/v1/audit", "/v1/tech/utilization/summary"):

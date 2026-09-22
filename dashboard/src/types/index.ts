@@ -76,11 +76,26 @@ export interface LogEvent {
   employee_name:  string | null;
 }
 
+/** GET /v1/logs response envelope. No exact total is returned — `has_more` is
+ *  derived server-side from a cheap one-row over-fetch rather than a COUNT(*)
+ *  over activity_events, so the UI can offer Prev/Next but not "page N of M". */
+export interface LogsPage {
+  items:    LogEvent[];
+  has_more: boolean;
+  offset:   number;
+  limit:    number;
+}
+
 // ── RBAC ──────────────────────────────────────────────────────────────────────
 
 export interface Permission { module: string; action: string; }
 
 export interface ModuleDef { key: string; label: string; actions: string[]; }
+
+export interface Impersonator {
+  id:    string;
+  email: string | null;
+}
 
 export interface Me {
   id:          string;
@@ -89,6 +104,21 @@ export interface Me {
   role_name:   string | null;
   scope_type:  string;
   permissions: Permission[];
+  /** True only for a Super Admin acting as themselves. This is the ONLY signal
+   *  the dashboard gets that impersonation exists — it is false for everyone
+   *  else, so the menu never renders for them. */
+  can_impersonate?: boolean;
+  impersonating?:   boolean;
+  impersonator?:    Impersonator | null;
+}
+
+/** A candidate returned by GET /v1/users/impersonatable. */
+export interface ImpersonationCandidate {
+  id:        string;
+  name:      string;
+  email:     string;
+  role_name: string | null;
+  user_kind: "team" | "talent";
 }
 
 export interface Role {
@@ -335,6 +365,16 @@ export interface TechFilterUser {
   name:      string;
   email:     string;
   is_active: boolean;
+}
+
+export interface TechFilterDevice {
+  id:            string;
+  hostname:      string;
+  /** Null for a device not yet assigned to anyone — still listed, because an
+   *  unassigned machine is exactly what the talent filter cannot reach. */
+  employee_name: string | null;
+  platform:      string;
+  is_active:     boolean;
 }
 
 export interface CategoryAllocationItem {

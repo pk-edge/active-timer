@@ -14,11 +14,14 @@ const UsageBarChart = dynamic(() => import("./_components/UsageBarChart"), {
   loading: () => <div className="h-[220px] animate-pulse bg-gray-50 rounded-lg" />,
 });
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, ProdIcon, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
+  ListSkeletonRows, DetailSkeletonRows,
   type DateRange } from "@/components/UsagePageShell";
+import { smartSort } from "@/lib/smartSearch";
 import type { AppUsageItem, AppUsageDetailOut } from "@/types";
 
 const DETAIL_TABS = ["Titles", "Users", "Usage"];
@@ -26,13 +29,21 @@ const DETAIL_TABS = ["Titles", "Users", "Usage"];
 // ── Right panel ───────────────────────────────────────────────────────────────
 
 function DetailPanel({
-  item, since, until, groupId, employeeId }: { item: AppUsageItem; since: string; until: string; groupId: string; employeeId: string }) {
+  item, since, until, groupId, employeeId, deviceId }: {
+    item: AppUsageItem; since: string; until: string;
+    groupId: string; employeeId: string; deviceId: string;
+  }) {
   const [tab, setTab] = useState("Titles");
 
-  const { data, isLoading } = useSWR<AppUsageDetailOut>(
-    ["app-detail", item.app_name, tab.toLowerCase(), since, until, groupId, employeeId],
-    () => getAppUsageDetail(item.app_name, tab.toLowerCase(), since, until, groupId || undefined, employeeId || undefined),
+  const { data, isLoading, isValidating } = useSWR<AppUsageDetailOut>(
+    ["app-detail", item.app_name, tab.toLowerCase(), since, until, groupId, employeeId, deviceId],
+    () => getAppUsageDetail(item.app_name, tab.toLowerCase(), since, until,
+                            { group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
+  // Cold load only — keepPreviousData means isLoading goes false the instant
+  // any data exists, even for a different tab/filter key. isValidating covers
+  // the background-refetch case (switching tabs, changing filters) instead.
+  const isRefreshing = isValidating && !!data;
 
   return (
     <div className="flex flex-col h-full">
@@ -44,6 +55,9 @@ function DetailPanel({
             <Monitor size={13} style={{ color: item.color }} />
           </div>
           <p className="font-semibold text-gray-900 text-sm truncate flex-1">{item.app_name}</p>
+          {isRefreshing && (
+            <span className="text-xs text-gray-400 animate-pulse shrink-0">Updating…</span>
+          )}
         </div>
         <p className="text-xs text-gray-600">
           {fmtDur(item.duration_secs)} · {item.user_count} {item.user_count === 1 ? "user" : "users"} · {item.pct.toFixed(1)}%
@@ -64,7 +78,7 @@ function DetailPanel({
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {isLoading ? (
-          <p className="text-sm text-gray-600 py-8 text-center">Loading…</p>
+          <DetailSkeletonRows />
         ) : tab === "Titles" ? (
           <>
             {(data?.titles ?? []).length === 0
@@ -104,27 +118,33 @@ export default function AppUsagePage() {
   const [dateRange, setDateRange] = useState<DateRange>({ since: format(new Date(), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
   const [groupId,      setGroupId]      = useState("");
   const [employeeId,   setEmployeeId]   = useState("");
+  const [deviceId,     setDeviceId]     = useState("");
   const [productivity, setProductivity] = useState("");
   const [summaryMode,  setSummaryMode]  = useState(true);
   const [selected,     setSelected]     = useState<AppUsageItem | null>(null);
 
-  const { data, isLoading } = useSWR(
-    ["app-usage", dateRange.since, dateRange.until, productivity, groupId, employeeId],
-    () => getAppUsage(dateRange.since, dateRange.until, productivity || undefined, groupId || undefined, employeeId || undefined),
+  const { data, isLoading, isValidating } = useSWR(
+    ["app-usage", dateRange.since, dateRange.until, productivity, groupId, employeeId, deviceId],
+    () => getAppUsage(dateRange.since, dateRange.until,
+                      { productivity, group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
+  // isValidating is true during background revalidation (stale data is still
+  // shown, per the global keepPreviousData config) — a filter change re-keys
+  // this call, but without this the old list just sits there with no
+  // indication a new fetch is running until it silently swaps. Same
+  // "Updating…" convention as Organization Overview.
+  const isRefreshing = isValidating && !!data;
+
+  const debouncedSearch = useDebouncedValue(search, 200);
 
   const filtered = useMemo(() => {
     const items = data?.items ?? [];
-    if (!search.trim()) return items;
-    const q = search.toLowerCase();
-    return items.filter(i =>
-      i.app_name.toLowerCase().includes(q) || (i.category_name ?? "").toLowerCase().includes(q)
-    );
-  }, [data, search]);
+    return smartSort(debouncedSearch, items, i => [i.app_name, i.category_name]);
+  }, [data, debouncedSearch]);
 
   // Client-side pagination over the (today-scoped) list — keeps the DOM light.
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [search, dateRange.since, dateRange.until, groupId, employeeId, productivity]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId, deviceId, productivity]);
   const paged = useMemo(
     () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
     [filtered, page],
@@ -157,7 +177,12 @@ export default function AppUsagePage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div>
-          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Application Usage</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Application Usage</h1>
+            {isRefreshing && (
+              <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+            )}
+          </div>
           <p className="text-sm text-gray-600 mt-0.5">Desktop app activity from all devices</p>
         </div>
         <div className="flex items-center gap-2">
@@ -179,6 +204,7 @@ export default function AppUsagePage() {
           dateRange={dateRange} setDateRange={setDateRange}
           groupId={groupId} setGroupId={setGroupId}
           employeeId={employeeId} setEmployeeId={setEmployeeId}
+          deviceId={deviceId} setDeviceId={setDeviceId}
           productivity={productivity} setProductivity={setProductivity}
           summaryMode={summaryMode} setSummaryMode={setSummaryMode}
         />
@@ -203,9 +229,13 @@ export default function AppUsagePage() {
             <div />
           </div>
 
-          <div className="flex-1 overflow-y-auto min-h-0">
+          <div className="flex-1 overflow-y-auto min-h-0" aria-busy={isLoading || undefined}>
             {isLoading ? (
-              <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
+              <ListSkeletonRows
+                gridClassName="grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_120px_60px_32px]"
+                rowClassName="gap-2 px-3 sm:px-4 py-3"
+                columns={["icon", "text", "duration", "pct", "menu"]}
+              />
             ) : filtered.length === 0 ? (
               <p className="text-sm text-gray-600 py-12 text-center">No applications found.</p>
             ) : paged.map(item => (
@@ -241,7 +271,8 @@ export default function AppUsagePage() {
             >
               <ChevronLeft size={16} /> Back to list
             </button>
-            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until} groupId={groupId} employeeId={employeeId} />
+            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until}
+                         groupId={groupId} employeeId={employeeId} deviceId={deviceId} />
           </div>
         )}
       </div>

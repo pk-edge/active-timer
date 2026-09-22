@@ -59,6 +59,17 @@ class TechFilterUserOut(BaseModel):
     is_active: bool
 
 
+class TechFilterDeviceOut(BaseModel):
+    id:            str
+    hostname:      str
+    # Null for a device not yet assigned to anyone. The Tech pages' device
+    # search still lists it — an unassigned machine is exactly the case the
+    # talent filter cannot reach.
+    employee_name: Optional[str] = None
+    platform:      str
+    is_active:     bool
+
+
 # ── Utilization analytics ─────────────────────────────────────────────────────
 
 class CategoryAllocationItem(BaseModel):

@@ -14,6 +14,8 @@ import {
 import { useUser } from "@/hooks/useUser";
 import { AccessDenied } from "@/components/AccessDenied";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { smartSort } from "@/lib/smartSearch";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import type { AppCategory, CategoriesPage, UncategorizedItem } from "@/types";
 
 const PRESET_COLORS = [
@@ -591,17 +593,31 @@ export default function CategoriesPage() {
   const [custPage, setCustPage] = useState(1);
 
   const canEdit = can("categories", "edit");
+  const debouncedSearch = useDebouncedValue(search, 200);
 
   // Two independent SWR fetches — system and custom categories, each paginated
   const { data: sysData,  mutate: mutateSys } = useSWR<CategoriesPage>(
-    ["tech-categories", "system", sysPage, PER_PAGE, search],
+    ["tech-categories", "system", sysPage, PER_PAGE],
     () => getTechCategories({ page: sysPage, per_page: PER_PAGE, is_system: true }),
     { keepPreviousData: true },
   );
   const { data: custData, mutate: mutateCust } = useSWR<CategoriesPage>(
-    ["tech-categories", "custom", custPage, PER_PAGE, search],
+    ["tech-categories", "custom", custPage, PER_PAGE],
     () => getTechCategories({ page: custPage, per_page: PER_PAGE, is_system: false }),
     { keepPreviousData: true },
+  );
+
+  // Client-side filter/rank of the currently-fetched page against the search
+  // box — there's no backend search param for categories, and these pages are
+  // small, so this mirrors the client-side filtering used everywhere else in
+  // the app (see smartSearch.ts).
+  const sysItems = useMemo(
+    () => smartSort(debouncedSearch, sysData?.items ?? [], c => [c.name, c.description]),
+    [sysData, debouncedSearch],
+  );
+  const custItems = useMemo(
+    () => smartSort(debouncedSearch, custData?.items ?? [], c => [c.name, c.description]),
+    [custData, debouncedSearch],
   );
 
   // All categories (no pagination) — used only for the assign modal in UncategorizedPanel
@@ -694,18 +710,29 @@ export default function CategoriesPage() {
             System Categories
             <span className="ml-2 font-normal normal-case text-gray-400">({sysTotal})</span>
           </p>
-          <div className="space-y-3">
-            {(sysData?.items ?? []).map(cat => (
-              <CategoryCard
-                key={cat.id}
-                cat={cat}
-                canEdit={canEdit}
-                onEdit={() => { setEditing(cat); setShowForm(true); }}
-                onDelete={() => setPendingDelete(cat)}
-                onRefresh={mutateAll3}
-              />
-            ))}
-          </div>
+          {sysItems.length === 0 && debouncedSearch.trim() ? (
+            <p className="text-sm text-gray-500 py-4 text-center">
+              No system categories match &quot;{debouncedSearch}&quot;
+            </p>
+          ) : sysItems.length === 0 ? (
+            // Not a search miss — e.g. a stale page after data changed
+            // server-side. Empty query always matches everything, so this
+            // can only happen when the current page genuinely has no rows.
+            <p className="text-sm text-gray-500 py-4 text-center">No system categories on this page.</p>
+          ) : (
+            <div className="space-y-3">
+              {sysItems.map(cat => (
+                <CategoryCard
+                  key={cat.id}
+                  cat={cat}
+                  canEdit={canEdit}
+                  onEdit={() => { setEditing(cat); setShowForm(true); }}
+                  onDelete={() => setPendingDelete(cat)}
+                  onRefresh={mutateAll3}
+                />
+              ))}
+            </div>
+          )}
           <PageNav
             page={sysPage}
             totalPages={sysData?.total_pages ?? 1}
@@ -735,10 +762,20 @@ export default function CategoriesPage() {
               </p>
             )}
           </div>
+        ) : custItems.length === 0 && debouncedSearch.trim() ? (
+          <p className="text-sm text-gray-500 py-4 text-center">
+            No custom categories match &quot;{debouncedSearch}&quot;
+          </p>
+        ) : custItems.length === 0 ? (
+          // Not a search miss — e.g. a stale page after data changed
+          // server-side (custTotal > 0 already ruled out the truly-empty case
+          // above). Empty query always matches everything, so this can only
+          // happen when the current page genuinely has no rows.
+          <p className="text-sm text-gray-500 py-4 text-center">No custom categories on this page.</p>
         ) : (
           <>
             <div className="space-y-3">
-              {(custData?.items ?? []).map(cat => (
+              {custItems.map(cat => (
                 <CategoryCard
                   key={cat.id}
                   cat={cat}
