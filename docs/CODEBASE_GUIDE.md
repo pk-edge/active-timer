@@ -127,6 +127,24 @@ role-assignment surface needs both, not just one.
 > the module that *owns the API* — the Devices page checks `reports:view`
 > before showing any report trigger.
 
+**Group access follows role scope.** `employee_group_access` is only meaningful
+for a `groups`-scoped role, and `users.py::_set_group_access` enforces that on
+the way in ("Only users with a group-scoped role can be assigned group access").
+Two things keep that invariant true, and a change to either side needs both:
+
+- **Writing it**: the dashboard sends `group_ids: []` — not the previously
+  ticked ids — whenever the selected role is not groups-scoped. Hiding the
+  checkboxes is not enough; the state behind them survives a role change, and
+  sending it produces a guaranteed 400.
+- **Keeping it**: `roles.py` clears a role's holders' group access
+  (`_clear_group_access_for_role`) when the role stops being groups-scoped or is
+  deleted. Without this the rows are stranded — inert while the invariant is
+  violated (scoping.py only reads them for a `groups`-scoped caller), but they
+  RESURRECT if that user is ever moved back onto a groups-scoped role, silently
+  restoring visibility nobody re-approved.
+
+Migration 038 pruned the rows stranded before those two halves existed.
+
 **Super-Admin impersonation**: a Super Admin can operate the dashboard as any
 active employee in their company. Core logic in `app/core/impersonation.py`;
 endpoints `POST /v1/auth/impersonate`, `POST /v1/auth/impersonate/exit`, and the

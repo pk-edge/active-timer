@@ -10,7 +10,7 @@ from app.api.deps import get_db, get_current_user, require
 from app.core import permissions as perms_catalog
 from app.core import audit
 from app.core.AdminAuthCache import admin_auth_cache
-from app.db.models import Employee, Role, RolePermission
+from app.db.models import Employee, EmployeeGroupAccess, Role, RolePermission
 from app.schemas.rbac import RoleIn, RoleOut, PermissionItem
 
 router = APIRouter()
@@ -85,6 +85,20 @@ def _assert_can_grant(user: Employee, body: RoleIn) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Cannot grant permissions you do not hold: {', '.join(missing)}",
         )
+
+
+async def _clear_group_access_for_role(role_id, db: AsyncSession) -> None:
+    """Drop employee_group_access for every holder of `role_id`.
+
+    One set-based DELETE rather than a row per holder — a role can have hundreds.
+    """
+    await db.execute(
+        delete(EmployeeGroupAccess).where(
+            EmployeeGroupAccess.employee_id.in_(
+                select(Employee.id).where(Employee.role_id == role_id)
+            )
+        )
+    )
 
 
 def _assert_can_touch_system_role(user: Employee, role: Role) -> None:
@@ -167,6 +181,17 @@ async def update_role(
     _validate_perms(body.permissions)
     _assert_can_grant(user, body)
 
+    # employee_group_access is only meaningful for a groups-scoped role — that
+    # is the invariant users.py::_set_group_access enforces on the way in. When
+    # a role stops being groups-scoped, its holders' rows silently violate it:
+    # inert for visibility (scoping.py only reads them for a "groups" caller),
+    # but still returned in UserOut.group_ids, so the Users modal seeds its
+    # checkboxes from them and sends them back on the next save — which the
+    # guard then rejects, leaving the user un-editable. Clear them here, the
+    # only place that knows the scope just changed.
+    if role.scope_type == "groups" and body.scope_type != "groups":
+        await _clear_group_access_for_role(role.id, db)
+
     role.name = body.name
     role.description = body.description
     role.scope_type = body.scope_type
@@ -200,6 +225,9 @@ async def delete_role(
     # (role_id → NULL) in the same transaction so no one is left pointing at a
     # deleted role. Cleared users fall back to their legacy `role` perms (admins
     # keep full access) or to no permissions until an admin assigns a new role.
+    # Same invariant as update_role: these users are about to have NO role, so
+    # any group access they hold is unassignable by definition.
+    await _clear_group_access_for_role(role.id, db)
     unassigned = (await db.execute(
         update(Employee).where(Employee.role_id == role.id).values(role_id=None)
     )).rowcount
