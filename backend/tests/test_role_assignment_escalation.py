@@ -243,3 +243,102 @@ async def test_unassigning_a_role_is_always_allowed(client, db_session):
     assert r.json()["role_id"] is None
 
     await db_session.rollback()
+
+
+# ── Retired-permission drift (the "screenshots.view" report) ──────────────────
+# A Super Admin could not assign the Super Admin role: the role carried a
+# `screenshots.view` row left behind when bb0b17c removed the `screenshots`
+# module from permissions.py without a cleanup migration (42 such rows in
+# production). The two sides of the containment check read from different
+# places — the caller's `held` set is built in CODE from all_permissions(),
+# the target role's from the DATABASE — so the orphan row appeared only on the
+# role's side and was reported as a permission the Super Admin "does not hold".
+#
+# deps.py already tolerates the opposite drift (code ahead of DB, when a new
+# module is added before rows exist). These cover DB ahead of code.
+
+RETIRED = ("screenshots", "view")   # removed from the catalog in bb0b17c
+
+
+@pytest.mark.asyncio
+async def test_super_admin_can_assign_super_admin_with_a_retired_permission(client, db_session):
+    """The reported failure, end to end."""
+    from app.core.permissions import is_valid
+    assert not is_valid(*RETIRED), "this test is meaningless if the pair is still in the catalog"
+
+    company = await _company(db_session)
+    sa_role = await _role(
+        db_session, company, "Super Admin", scope_type="all", is_system=True,
+        perms=[("users", "view"), ("users", "edit"), RETIRED],
+    )
+    super_admin = await _employee(db_session, company, sa_role, "sa")
+    target = await _employee(db_session, company, None, "target")
+    await db_session.flush()
+
+    r = await client.patch(
+        f"/v1/users/{target.id}", json={"role_id": str(sa_role.id)},
+        headers=_headers(super_admin, company),
+    )
+    assert r.status_code == 200, (
+        f"a Super Admin must be able to assign Super Admin; got {r.status_code} {r.text[:200]}"
+    )
+    assert r.json()["role_name"] == "Super Admin"
+
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_retired_permission_does_not_block_a_normal_role_assignment(client, db_session):
+    """Same drift on an ordinary (non-system) role and an ordinary caller: the
+    retired pair must be ignored on BOTH sides, not special-cased for Super Admin."""
+    company = await _company(db_session)
+    manager_role = await _role(
+        db_session, company, "People Ops", scope_type="groups",
+        perms=[("users", "view"), ("users", "edit")],
+    )
+    manager = await _employee(db_session, company, manager_role, "manager")
+    # A role the manager is otherwise entitled to hand out, polluted with the
+    # retired pair.
+    viewer_role = await _role(
+        db_session, company, "Viewer", scope_type="groups",
+        perms=[("users", "view"), RETIRED],
+    )
+    target = await _employee(db_session, company, None, "target")
+    await db_session.flush()
+
+    r = await client.patch(
+        f"/v1/users/{target.id}", json={"role_id": str(viewer_role.id)},
+        headers=_headers(manager, company),
+    )
+    assert r.status_code == 200, f"got {r.status_code} {r.text[:200]}"
+
+    await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_a_real_missing_permission_is_still_refused(client, db_session):
+    """Regression guard on the guard: ignoring RETIRED pairs must not soften the
+    check for permissions that genuinely exist and the caller genuinely lacks."""
+    company = await _company(db_session)
+    manager_role = await _role(
+        db_session, company, "People Ops", scope_type="groups",
+        perms=[("users", "view"), ("users", "edit")],
+    )
+    manager = await _employee(db_session, company, manager_role, "manager")
+    powerful = await _role(
+        db_session, company, "Auditor", scope_type="groups",
+        perms=[("users", "view"), ("audit", "view"), RETIRED],
+    )
+    target = await _employee(db_session, company, None, "target")
+    await db_session.flush()
+
+    r = await client.patch(
+        f"/v1/users/{target.id}", json={"role_id": str(powerful.id)},
+        headers=_headers(manager, company),
+    )
+    assert r.status_code == 403
+    detail = r.json()["detail"]
+    assert "audit.view" in detail, f"the real gap must still be named: {detail}"
+    assert "screenshots" not in detail, f"a retired pair must never be reported: {detail}"
+
+    await db_session.rollback()

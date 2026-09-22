@@ -70,6 +70,13 @@ def _assert_can_grant(user: Employee, body: RoleIn) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only an all- or group-scoped user can assign a role group scope",
         )
+    # Deliberately NOT filtered through perms_catalog.is_valid() the way
+    # users.py::_assert_can_assign_role is. That guard reads the target role's
+    # permissions from the DATABASE, where a pair retired from permissions.py
+    # can linger and read as one the caller "does not hold". Here the
+    # permissions come from the REQUEST, and both call sites run
+    # _validate_perms() first, which already rejects anything outside the
+    # catalog with a 400 — so a retired pair can never reach this line.
     held = getattr(user, "_perms", set())
     missing = [f"{p.module}.{p.action}" for p in body.permissions
                if (p.module, p.action) not in held]

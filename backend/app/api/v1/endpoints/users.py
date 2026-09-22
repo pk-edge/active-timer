@@ -19,6 +19,7 @@ from app.core.AdminAuthCache import admin_auth_cache
 from app.core.config import get_settings
 from app.core.group_tree import descendant_group_ids
 from app.core.impersonation import is_super_admin, is_impersonating
+from app.core import permissions as perms_catalog
 from app.core.ingest_queue import ingest_queue
 from app.core.provisioning import is_talent_role
 from app.core.search import build_search
@@ -109,8 +110,21 @@ def _assert_can_assign_role(user: Employee, role: Role | None) -> None:
             detail="Only an all- or group-scoped user can assign a role with group scope",
         )
 
+    # Pairs no longer in the catalog are ignored on the role's side. The two
+    # sides of this comparison come from different places — `held` is built in
+    # CODE (all_permissions() for a Super Admin), the role's from the DATABASE —
+    # so a permission retired from permissions.py without a cleanup migration
+    # lingers on the role and reads as one the caller "does not hold". That is
+    # what made a Super Admin unable to assign Super Admin (`screenshots.view`,
+    # orphaned by bb0b17c). Skipping them is safe because a retired pair grants
+    # nothing: require() is only ever called with pairs that exist in the
+    # catalog, and _validate_perms rejects unknown pairs at create/edit time, so
+    # one can never be introduced deliberately. deps.py already tolerates the
+    # mirror-image drift (code ahead of DB); this is DB ahead of code.
     held = getattr(user, "_perms", set())
-    missing = [f"{p.module}.{p.action}" for p in role.permissions if (p.module, p.action) not in held]
+    missing = [f"{p.module}.{p.action}" for p in role.permissions
+               if (p.module, p.action) not in held
+               and perms_catalog.is_valid(p.module, p.action)]
     if missing:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
