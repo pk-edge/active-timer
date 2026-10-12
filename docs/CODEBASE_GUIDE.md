@@ -53,6 +53,7 @@ main stack).
 | `backend/app/core/scoping.py` | `visible_device_ids(user, db)` — resolves a user's device visibility (`all` / `own` / `groups`, with group-tree expansion) |
 | `backend/app/core/ingest_queue.py` | In-memory bounded queue + 30s batched Postgres `COPY` flush for agent event ingestion |
 | `backend/app/core/report_cache.py`, `tech_cache.py` | Background workers pre-aggregating company reports / tech-analytics into fast-lookup tables |
+| `backend/app/services/ReportQueries.py` | Single home of the `fleet` / `device_full` report SQL + the shared active-time definition (`_ACTIVE_CASE`, `_EXCL_IDLE`) |
 | `backend/app/core/analytics_cache.py` | Stale-while-revalidate + single-flight wrapper over `RedisCache` used by every Tech & AI endpoint |
 | `backend/app/core/RedisClient.py`, `RedisCache.py` | Redis connection pool + stale-while-revalidate response cache (`tt:c:*`) |
 | `backend/app/core/broadcaster.py` | Redis pub/sub SSE fan-out (`devices_updated`) across all backend replicas |
@@ -72,7 +73,8 @@ main stack).
 | `dashboard/src/app/(auth)/` | Login/register route group (unauthenticated) |
 | `dashboard/src/app/(dashboard)/` | All authenticated pages: home, overview, team, activity, categories, devices, logs, reports, tech, users, groups, roles, policies, audit, settings, files, agents |
 | `dashboard/src/lib/api.ts` | Single fetch client: Bearer JWT from `localStorage`, per-navigation `AbortController` generation so route changes cancel in-flight GETs |
-| `dashboard/src/hooks/` | `useAuth`, `useUser`, `useRealtimeStream` (SSE), `useDevicesPush`, `useDebouncedValue` |
+| `dashboard/src/hooks/` | `useAuth`, `useUser`, `useRealtimeStream` (SSE), `useDevicesPush`, `useDebouncedValue`, `useStartReportJob` (optimistic report-job start) |
+| `dashboard/src/components/ExportReportDialog.tsx`, `lib/reportRange.ts` | Shared date-ranged report export dialog (Devices + Reports pages) and its range rules (UTC normalization, 732-day cap) |
 | `dashboard/src/contexts/ReportJobsContext.tsx` | Async report-generation job tracking (client state) |
 | `installer/macos/`, `installer/windows/` | Platform installer build scripts; company token + API base URL are baked in at build time (not runtime-configurable) |
 | `agent-simulator/` | Standalone Dockerized load simulator (default 2000 simulated agents) — independent `docker-compose.yml`, does not touch the main stack |
@@ -191,34 +193,55 @@ request when Redis is down. Jobs carry only JSON — file rendering happens
 client-side in `dashboard/src/lib/reportDownload.ts` (xlsx / jsPDF), tracked by
 `ReportJobsContext` and surfaced in the sidebar's Downloads tray, where a
 finished job stays until dismissed so it can be re-opened from its cached
-result. Roster scope is resolved with `visible_device_ids()` in the request
-handler and passed into the worker, which has no `admin` to re-derive it from.
+result.
+
+- **One query module.** The `fleet` / `device_full` SQL lives only in
+  `app/services/ReportQueries.py` (`build_fleet_report`, `build_device_full_report`);
+  the background worker, the Redis-down sync fallback and the GET
+  `/devices/fleet` + `/device/{id}/full` endpoints all call it. Pass `db=` to run
+  sequentially on a request session; omit it (workers) to run the queries
+  concurrently on private sessions, bounded process-wide by a semaphore so
+  overlapping exports can't drain the connection pool. Long scans get a 300 s
+  `statement_timeout`; job errors are logged, never echoed to the client.
+- **Scope is resolved in the request handler** with `visible_device_ids()` and
+  handed to the worker (which has no `admin`): `None` = all, list = only those,
+  `[]` = nothing. This applies to `fleet` and `device_roster`; `device_full`
+  checks the single device via `_get_visible_device`. The fleet Redis cache key
+  carries a scope fingerprint (`fleet_cache_key`), so scoped and full-scope
+  results never share an entry. `POST /jobs` returns a cache hit as an
+  already-`done` job.
+- **Range rules** (`_validate_job_range`, mirrored client-side in
+  `lib/reportRange.ts`): both dates required, since ≤ until, until not after
+  today (UTC), span ≤ `MAX_REPORT_RANGE_DAYS` (732 — "Last 2 Years" incl. a
+  Feb 29).
+- **One active-time definition.** `_ACTIVE_CASE` / `_EXCL_IDLE` are built from
+  `report_cache._IDLE_APPS_SQL` (the list home.py also uses, macOS
+  `loginwindow`/`ScreenSaverEngine` included), so cached, live, on-screen and
+  exported totals agree.
+- **UI.** Every date-ranged export goes through `ExportReportDialog`
+  (`components/`), started via `useStartReportJob`. Devices page: row "Export"
+  → `device_full` for that device; "Fleet Report" → `fleet`. Reports page:
+  "Export report" pre-fills the page's current range and talent/device filter
+  (device selected → `device_full`, none → scoped `fleet`).
 
 The four quick-look report endpoints (`GET /company/summary`, `/company/top-apps`,
 `/device/{id}/summary`, `/device/{id}/top-apps` — separate from the job queue
-above) accept EITHER a rolling `days` window (unchanged default, ending "now")
-OR an explicit `since`/`until` inclusive calendar range (real "Last Month" /
-"Last Year" / Custom support, not a `days` trick — `days` alone can never
-express a fixed end date other than today). The two are mutually exclusive:
-since/until must be given together, since must not be after until, and `days`
-must stay at its default (7) when since/until are used — see
-`_validate_range()`/`_window_clause()` in `endpoints/reports.py`. since/until
-skip both `report_cache.summary_from_cache`/`top_apps_from_cache` (those tables
-have no `until` concept, always implicitly ending today) and go straight to a
-live aggregation query; the per-request Redis response-cache key
-(`report:summary`/`report:top_apps`/`report:dev_summary`/`report:dev_top_apps`)
-includes since/until whenever they're used so a since/until query can never be
-served a `days`-keyed cache entry or vice versa. The dashboard's Reports page
-(`dashboard/src/app/(dashboard)/reports/page.tsx`) drives this via the shared
-`DateRangePicker` component, but does NOT always send since/until:
-`reportRangeArg()` sends plain `days` whenever the picked range ends today and
-is ≤90 days (Last 7/30/90 Days, This Month, This Year — the shape the
-pre-aggregated cache already knows how to serve), and only falls back to
-since/until for a range the `days` model genuinely cannot express (Last Month,
-Last Year, a Custom range with a past end date, or >90 days ending today).
-This matters because company summary/top-apps are two of the heaviest
-dashboard endpoints — the fast path exists specifically so the default,
-by-far-most-common view doesn't pay for a live aggregation on every load.
+above) accept EITHER `days` OR an explicit `since`/`until` inclusive calendar
+range (mutually exclusive, validated by `_validate_range()`). Both resolve
+through `_resolve_window()` to the same thing — an inclusive UTC calendar-day
+range; `days=N` means `[today-(N-1), today]`, exactly the DateRangePicker's
+"Last N Days" — so a `days` request, the equivalent since/until and an export
+of that range cover identical rows, and share a Redis response-cache key
+(`_range_cache_fp` keys on the resolved dates). Fast paths for full-scope
+admins: company summary reads `report_cache.summary_range_from_cache` for any
+range inside the cache's refreshed 31-day window (day-bucketed, so exact);
+company top-apps reads `report_top_apps_cache` when the range is the last
+7/14/30 calendar days ending today (the worker computes those windows
+calendar-aligned). Anything else goes live. The Reports page
+(`reports/page.tsx`) normalizes the picked range to the server's UTC "today"
+(`normalizeReportRange`, shifting rather than clamping so "Last 7 Days" stays 7
+days), sends plain `days` for ranges ending today and ≤90 days and since/until
+otherwise, and uses that same normalized range as the export's initial range.
 
 **Technology & AI filters**: the four Tech pages (`/tech`, `/tech/websites`,
 `/tech/apps`, `/tech/category-usage`) narrow on the same four axes — date

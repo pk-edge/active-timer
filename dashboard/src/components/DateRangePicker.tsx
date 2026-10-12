@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { format, subDays, startOfMonth, endOfMonth, startOfYear, subMonths, subYears } from "date-fns";
 import { CalendarDays, ChevronDown } from "lucide-react";
 
@@ -42,6 +42,19 @@ function detectPreset(range: DateRange): string {
 export default function DateRangePicker({ value, onChange }: Props) {
   const [open, setOpen] = useState(false);
   const preset = detectPreset(value);
+
+  // Escape dismisses just the popover. Capture + stopPropagation keeps it from
+  // also reaching an enclosing modal's own Escape handler.
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      setOpen(false);
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [open]);
 
   function applyPreset(p: typeof PRESETS[number]) {
     onChange(p.get());
