@@ -16,6 +16,8 @@ import { platformLabel } from "@/lib/devicePlatform";
 import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
 import { AccessDenied } from "@/components/AccessDenied";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
+import ExportReportDialog from "@/components/ExportReportDialog";
+import { normalizeReportRange, utcToday } from "@/lib/reportRange";
 
 // Lazy: the per-day bar chart pulls in recharts only when it actually renders.
 const DailyActiveBarChart = dynamic(() => import("./_components/DailyActiveBarChart"), {
@@ -28,7 +30,7 @@ const DailyActiveBarChart = dynamic(() => import("./_components/DailyActiveBarCh
     </div>
   ),
 });
-import { Search, X } from "lucide-react";
+import { Download, Search, X } from "lucide-react";
 import type { CompanyDay, AppUsage, Device, User } from "@/types";
 
 // Company-wide top-apps caps at 100 server-side (backend/app/api/v1/endpoints/
@@ -45,25 +47,18 @@ function describeRange(range: DateRange): string {
   return range.since === range.until ? range.since : `${range.since} – ${range.until}`;
 }
 
-// Company summary/top-apps are, per this codebase's own architecture notes,
-// two of the heaviest dashboard endpoints — that's WHY a pre-aggregated cache
-// (report_daily_summary / report_top_apps_cache) exists for the plain
-// "N days ending today" shape. That cache has no `until` concept at all, so
-// the backend only consults it when the request is `days`-only (no since/
-// until). Sending since/until unconditionally — including for the default
-// "Last 7 Days" view, which is the single most common load on this page —// would silently give up that fast path on every visit for no reason: the
-// range picker's "ending today" presets (Last 7/30/90 Days, This Month, This
-// Year) are EXACTLY the shape the cache already knows how to serve.
-//
-// So: only actually send since/until when the range does something the
-// `days` model genuinely cannot express — ends before today (Last Month,
-// Last Year, a Custom range with a past end date) or spans more than the
-// backend's 90-day cap on `days`. Everything else still goes through the
-// fast, cacheable path, exactly as it did before this feature existed.
+// Company summary/top-apps are two of the heaviest dashboard endpoints, which
+// is why the backend keeps a pre-aggregated per-day cache. A range ending
+// today that fits the `days` model (≤90 days) is sent as plain `days`: the
+// server resolves `days=N` to exactly the calendar days [today-(N-1), today]
+// (UTC) — the same rows as the equivalent since/until, and the shape its
+// top-apps cache is keyed by. Anything else (a past end date, >90 days) is
+// sent as since/until. Either way the window equals what "Export report"
+// covers for the same range, so the numbers match. `range` must already be
+// normalized (normalizeReportRange) so "today" means the server's UTC today.
 function reportRangeArg(range: DateRange): { days: number; range?: ReportDateRange } {
-  const today = format(new Date(), "yyyy-MM-dd");
   const days = differenceInCalendarDays(new Date(range.until), new Date(range.since)) + 1;
-  if (range.until === today && days <= 90) {
+  if (range.until === utcToday() && days <= 90) {
     return { days };
   }
   return { days, range };
@@ -80,6 +75,7 @@ export default function ReportsPage() {
   const [appSearch, setAppSearch] = useState("");
   const [talentQuery, setTalentQuery] = useState("");
   const [deviceQuery, setDeviceQuery] = useState("");
+  const [exportOpen, setExportOpen] = useState(false);
   const debouncedAppSearch = useDebouncedValue(appSearch, 200);
 
   const { data: devices } = useSWR<Device[]>("devices", getDevices);
@@ -189,14 +185,18 @@ export default function ReportsPage() {
     if (match) setDeviceQuery(match.hostname);
   }, [deviceId, devices]);
 
-  const { days: rangeArgDays, range: rangeArg } = reportRangeArg(dateRange);
+  // What the server actually reports on (picker dates shifted to the UTC
+  // day when the local date is ahead) — drives the queries, the subtitle and
+  // the export's initial range, so all three describe the same window.
+  const effectiveRange = useMemo(() => normalizeReportRange(dateRange), [dateRange]);
+  const { days: rangeArgDays, range: rangeArg } = reportRangeArg(effectiveRange);
 
   const summaryKey = deviceId
-    ? ["device-summary", deviceId, dateRange.since, dateRange.until]
-    : ["summary", dateRange.since, dateRange.until];
+    ? ["device-summary", deviceId, effectiveRange.since, effectiveRange.until]
+    : ["summary", effectiveRange.since, effectiveRange.until];
   const appsKey = deviceId
-    ? ["device-apps", deviceId, dateRange.since, dateRange.until]
-    : ["top-apps", dateRange.since, dateRange.until];
+    ? ["device-apps", deviceId, effectiveRange.since, effectiveRange.until]
+    : ["top-apps", effectiveRange.since, effectiveRange.until];
 
   const { data: summary, isLoading: summaryLoading, isValidating: summaryValidating } = useSWR<CompanyDay[]>(
     summaryKey,
@@ -241,6 +241,18 @@ export default function ReportsPage() {
     /* Outer: fills the flex-col main, no overflow — all scroll happens inside */
     <div className="flex-1 min-h-0 flex flex-col gap-3">
 
+      {/* Exports exactly what the filters above show. The dialog gets a copy of
+          the range, so changing it there never touches the page filter. */}
+      {exportOpen && can("reports", "view") && (
+        <ExportReportDialog
+          initialRange={effectiveRange}
+          target={selectedDevice
+            ? { kind: "device", deviceId: selectedDevice.id, hostname: selectedDevice.hostname, employeeName: selectedDevice.employee_name }
+            : { kind: "fleet" }}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
+
       {/* ── Header + filters — fixed height, never scrolls away ── */}
       <div className="shrink-0 flex flex-col gap-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -255,7 +267,7 @@ export default function ReportsPage() {
               {selectedDevice
                 ? `${selectedDevice.hostname}${selectedDevice.employee_name ? ` · ${selectedDevice.employee_name}` : ""}`
                 : "Company-wide"}
-              {" · "}{describeRange(dateRange)}
+              {" · "}{describeRange(effectiveRange)}
             </p>
           </div>
 
@@ -263,7 +275,23 @@ export default function ReportsPage() {
               talent search below reads as the page's main filter. Supports real
               calendar ranges (This/Last Month, This/Last Year, Custom), not just
               a rolling N-days-ending-today window. */}
-          <DateRangePicker value={dateRange} onChange={setDateRange} />
+          <div className="flex flex-wrap items-center gap-2">
+            <DateRangePicker value={dateRange} onChange={setDateRange} />
+            {can("reports", "view") && (
+              <button
+                type="button"
+                onClick={() => setExportOpen(true)}
+                // A device filter whose device isn't resolved yet must not fall
+                // back to a fleet export.
+                disabled={!!deviceId && !selectedDevice}
+                title="Export what these filters show"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-brand-200 bg-brand-50 text-brand-700 hover:border-brand-300 hover:bg-brand-100 shadow-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download size={14} />
+                Export report
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex flex-wrap items-start gap-2 sm:gap-3">

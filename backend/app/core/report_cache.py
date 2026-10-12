@@ -214,7 +214,7 @@ async def _refresh_top_apps() -> None:
                 WHERE ae.event_type = 'window_change'
                   AND ae.app_name IS NOT NULL
                   AND ae.app_name NOT IN {_IDLE_APPS_SQL}
-                  AND ae.timestamp >= NOW() - make_interval(days => :window)
+                  AND ae.timestamp >= CURRENT_DATE - CAST(:window AS integer) + 1
                 GROUP BY d.company_id, normalize_app_name(ae.app_name)
                 ON CONFLICT (company_id, days_window, app_name) DO UPDATE SET
                     seconds      = EXCLUDED.seconds,
@@ -311,11 +311,41 @@ async def summary_from_cache(db, company_id: UUID, days: int):
         return None
 
 
+async def summary_range_from_cache(db, company_id, since, until):
+    """Fresh cached daily-summary rows for the inclusive day range [since, until],
+    or None on miss / stale / table absent / a range the cache doesn't cover.
+
+    Only days inside the refreshed window (the last 31 days — see
+    _refresh_daily_summary) can be trusted; anything older is a miss so the
+    caller falls back to the live query instead of returning a partial range.
+    """
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import text
+    if since < datetime.now(timezone.utc).date() - timedelta(days=30):
+        return None
+    try:
+        result = await db.execute(text("""
+            SELECT day, active_seconds, idle_seconds, device_count
+            FROM   report_daily_summary
+            WHERE  company_id   = :cid
+              AND  day BETWEEN CAST(:since AS date) AND CAST(:until AS date)
+              AND  refreshed_at >= NOW() - (:stale * INTERVAL '1 minute')
+            ORDER BY day DESC
+        """), {"cid": str(company_id), "since": since, "until": until, "stale": STALE_MINUTES_DAILY})
+        rows = result.fetchall()
+        return rows if rows else None
+    except Exception:
+        log.debug("report_cache.summary_range_from_cache: cache miss (table absent or error)")
+        await db.rollback()
+        return None
+
+
 async def top_apps_from_cache(db, company_id: UUID, days: int, limit: int):
     """Return fresh cached top-app rows, or None on miss / stale / non-standard window / table absent.
 
-    Only pre-computed for days in (7, 14, 30). Any other value returns None so
-    the endpoint falls back to the live query.
+    Only pre-computed for days in (7, 14, 30), each the last N calendar days
+    ending today (UTC). Any other value returns None so the endpoint falls back
+    to the live query.
     """
     if days not in _WINDOWS:
         return None
