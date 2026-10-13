@@ -1,7 +1,7 @@
 # ── TimeTracker — local Docker deployment ─────────────────────────────────────
 #
 # Services:
-#   db        — PostgreSQL 16          → localhost:15432
+#   db        — PostgreSQL 16          → 127.0.0.1:15432 (loopback only)
 #   minio     — S3-compatible storage  → localhost:9000  (console: localhost:9001)
 #   backend   — FastAPI                → localhost:8000
 #   dashboard — Next.js                → localhost:3002
@@ -12,15 +12,37 @@
 #   open http://localhost:3002
 services:
   # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  # Tuned for the single-host target (2 vCPU / 4 GB: Postgres ~1200 MB). Every
+  # knob has an env override for bigger/smaller machines.
+  #   max_connections 50 = 2 workers x (3+2 HTTP + 1+1 ingest) = 14 steady,
+  #                        28 mid rolling-deploy, + migrations/psql headroom.
+  #   shared_buffers 512MB (~25% of RAM budget), effective_cache_size 1536MB
+  #   (planner hint: shared_buffers + OS cache), work_mem 8MB (per sort/hash
+  #   node — 50 conns x a few nodes must stay inside the 1200 MB limit),
+  #   maintenance_work_mem 128MB (index builds in migrations).
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=${PG_SHARED_BUFFERS:-512MB}"
+      - "-c"
+      - "max_connections=${PG_MAX_CONNECTIONS:-50}"
+      - "-c"
+      - "effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-1536MB}"
+      - "-c"
+      - "work_mem=${PG_WORK_MEM:-8MB}"
+      - "-c"
+      - "maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-128MB}"
+    mem_limit: ${DB_MEM_LIMIT:-1200m}
     environment:
       POSTGRES_DB:       timetracker
       POSTGRES_USER:     timetracker
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-timetracker_dev}
     ports:
-      - "15432:5432"
+      # Loopback only — Postgres must never be reachable from the network.
+      - "127.0.0.1:15432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -69,13 +91,32 @@ services:
   # No RDB/AOF — cache + stream data is ephemeral; a restart just forces a
   # cold-cache recompute. The stream survives restart only if a volume is added.
   #
-  # SECURITY: port 16379 is exposed for local redis-cli convenience, so Redis
-  # runs WITH a password (requirepass). NOTE: the previous config used
-  # protected-mode WITHOUT a password, which makes Redis abort every
-  # non-loopback connection — including the backend's — so the response cache,
-  # SSE pub/sub and distributed rate limits were silently disabled in this
-  # stack. With requirepass set, remote connections are allowed but must auth.
-  # For staging/prod use a managed endpoint (ElastiCache) and set REDIS_URL.
+  # MEMORY: --maxmemory 256mb (container mem_limit 320m leaves room for the
+  # replication/client buffers and fork-free overhead) with `volatile-lru`.
+  # EVERY app key carries a TTL (response cache tt:c:* via SETEX, rate-limit
+  # counters tt:rl:* via EXPIRE, report-job state tt:rjob:*, impersonation
+  # sessions, SET NX EX locks, leader lock PX) — those are the only keys
+  # volatile-lru may evict, and all are disposable (a miss = recompute / fresh
+  # window / re-poll). `allkeys-lru` is deliberately NOT used: it could also
+  # evict the one TTL-less key, the durable audit stream `tt:s:audit` (XADD
+  # MAXLEN ~100k), silently dropping audit events. If memory is exhausted by
+  # non-evictable data Redis returns OOM on writes instead, which every caller
+  # already treats as fail-open (cache miss / local limiter).
+  # SSE pub/sub uses channels (no keyspace) — unaffected.
+  #
+  # HARDENING: FLUSHALL / FLUSHDB / KEYS / CONFIG / DEBUG are renamed to "" (=
+  # disabled). The app and the healthcheck use none of them (verified by grep:
+  # only GET/SET/SETEX/DEL/INCR/EXPIRE/XADD/PUBLISH/EVAL/HSET/HGETALL/PING).
+  # Use `redis-cli -a $REDIS_PASSWORD --scan` instead of KEYS; to change config,
+  # edit this command and recreate the container.
+  #
+  # SECURITY: requirepass is set, and the port is published on LOOPBACK ONLY
+  # (127.0.0.1:16379) for local redis-cli. Containers reach it as redis:6379.
+  # NOTE: the older config used protected-mode WITHOUT a password, which makes
+  # Redis abort every non-loopback connection — including the backend's — so
+  # the response cache, SSE pub/sub and distributed rate limits were silently
+  # disabled. For staging/prod use a managed endpoint (ElastiCache) and set
+  # REDIS_URL.
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -86,9 +127,17 @@ services:
       "--loglevel", "verbose",
       "--protected-mode", "yes",
       "--requirepass", "${REDIS_PASSWORD:-timetracker_dev_redis}",
+      "--maxmemory", "${REDIS_MAXMEMORY:-256mb}",
+      "--maxmemory-policy", "volatile-lru",
+      "--rename-command", "FLUSHALL", "",
+      "--rename-command", "FLUSHDB", "",
+      "--rename-command", "KEYS", "",
+      "--rename-command", "CONFIG", "",
+      "--rename-command", "DEBUG", "",
     ]
+    mem_limit: ${REDIS_MEM_LIMIT:-320m}
     ports:
-      - "16379:6379"   # host port avoids clashing with a local redis on 6379
+      - "127.0.0.1:16379:6379"   # loopback only; host port avoids clashing with a local redis on 6379
     logging:
       driver: "json-file"
       options:
@@ -106,6 +155,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
+    # Budget: ~800 MB for the 2-worker FastAPI process tree (see Dockerfile).
+    mem_limit: ${BACKEND_MEM_LIMIT:-800m}
     depends_on:
       db:
         condition: service_healthy
@@ -121,6 +172,15 @@ services:
       # development | staging | production. On staging/production the backend
       # refuses to boot with a default/dev JWT_SECRET (forge-admin-token guard).
       ENVIRONMENT:            ${ENVIRONMENT:-development}
+      # uvicorn worker processes (Dockerfile default 2). Singleton loops are
+      # leader-elected, DB pools are per worker: 2 x (3+2 + 1+1) = 14 connections.
+      WEB_CONCURRENCY:        ${WEB_CONCURRENCY:-2}
+      # Peer IP(s) uvicorn trusts for X-Forwarded-* (rate limiting keys on the
+      # resolved client IP). '*' is right when port 8000 is reachable only via
+      # the proxy/ALB (ECS); narrow to exact IPs otherwise. See backend/Dockerfile.
+      FORWARDED_ALLOW_IPS:    ${FORWARDED_ALLOW_IPS:-*}
+      # Global API rate limiting (policies: app/core/config.py RATE_LIMIT_*).
+      RATE_LIMIT_ENABLED:     ${RATE_LIMIT_ENABLED:-true}
       JWT_SECRET:             ${JWT_SECRET:-dev_jwt_secret_change_in_production}
       JWT_ALGORITHM:          HS256
       JWT_DEVICE_EXPIRE_DAYS: 365
@@ -156,7 +216,16 @@ services:
       DASHBOARD_URL:          ${DASHBOARD_URL:-http://localhost:3002}
       ALLOWED_EMAIL_DOMAIN:   ${ALLOWED_EMAIL_DOMAIN:-onedge.co}
     ports:
-      - "8000:8000"
+      # Loopback by default. FORWARDED_ALLOW_IPS defaults to '*' (right behind
+      # the ALB on ECS, where only the ALB can reach the task), which makes
+      # X-Forwarded-For — and so the per-IP rate limits — spoofable by anyone who
+      # can hit this port directly. Publishing on all interfaces would expose
+      # exactly that. Set BACKEND_BIND=0.0.0.0 only when a trusted reverse proxy
+      # on another host must reach it, and then narrow FORWARDED_ALLOW_IPS to
+      # that proxy's IP. The dashboard container talks to the backend over the
+      # compose network; browsers on this host reach it at http://localhost:8000
+      # (the default NEXT_PUBLIC_API_URL) — both work with the 127.0.0.1 bind.
+      - "${BACKEND_BIND:-127.0.0.1}:8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
       interval: 15s

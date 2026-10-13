@@ -60,6 +60,9 @@ main stack).
 | `backend/app/core/AdminAuthCache.py` | In-process token→Employee cache for admin auth (short TTL) |
 | `backend/app/core/device_auth_cache.py` | Redis device-context cache with tombstone-based invalidation |
 | `backend/app/core/rate_limit.py` | `DistributedLimiter` — Redis fixed-window rate limiting w/ in-process fallback |
+| `backend/app/core/RateLimitMiddleware.py`, `RequestSizeLimit.py` | Global per-user/device/IP/company rate limiting (429) and request-body caps (413) |
+| `backend/app/core/LeaderLock.py` | Redis + flock leader election so singleton background loops run in one worker |
+| `backend/app/core/DeviceStateSync.py` | Mirrors live per-device state across uvicorn workers via Redis |
 | `backend/app/core/audit.py` | Background audit-event writer (off the request path), Redis stream-backed |
 | `backend/app/core/device_janitor.py` | Marks devices offline after inactivity cutoff |
 | `backend/app/core/update_signing.py`, `manifest.py`, `release_urls.py`, `rollout.py` | Agent auto-update release/manifest/signing pipeline (server side) |
@@ -232,12 +235,42 @@ through `_resolve_window()` to the same thing — an inclusive UTC calendar-day
 range; `days=N` means `[today-(N-1), today]`, exactly the DateRangePicker's
 "Last N Days" — so a `days` request, the equivalent since/until and an export
 of that range cover identical rows, and share a Redis response-cache key
-(`_range_cache_fp` keys on the resolved dates). Fast paths for full-scope
-admins: company summary reads `report_cache.summary_range_from_cache` for any
-range inside the cache's refreshed 31-day window (day-bucketed, so exact);
-company top-apps reads `report_top_apps_cache` when the range is the last
-7/14/30 calendar days ending today (the worker computes those windows
-calendar-aligned). Anything else goes live. The Reports page
+(`_range_cache_fp` keys on the resolved dates). **Range cache (migration 039).** `report_cache` keeps three per-day tables
+for up to 732 days: `report_daily_summary` (company/day),
+`report_daily_device_cache` (company/day/device, active + idle) and
+`report_daily_app_usage` (company/day/app). `_compute_day()` is the single
+recompute unit (window + idle halves pre-aggregated per device into temp tables,
+delete + re-insert under an advisory lock, idempotent). The fast cycle (10 min)
+recomputes today + yesterday and stamps `report_cache_state.last_fast_refresh`.
+Backfill walks `report_cache_state.covered_since` backwards a few days per cycle
+(bounded time per cycle), lowering it only in the transaction that adds that
+day to all three tables. Readers (`company_summary_range`, `device_summary_range`,
+`company_top_apps_range`) answer only when `covers()` holds: state row exists,
+`since >= covered_since`, and `last_fast_refresh` < 35 min old when the range
+touches today/yesterday; otherwise `None` → live. Full-scope company summary and
+top-apps, scoped and per-device summaries, and the fleet/device_full exports
+all read these, so screen and export agree; scoped and per-device top-apps stay
+live (few devices, covering index). `report_top_apps_cache` (old 7/14/30 windows)
+is no longer read. Live fallbacks (`ReportQueries.daily_summary_sql` /
+`top_apps_sql` / `top_devices_sql`) use the same split + per-(day, device)
+pre-aggregation; `device_count` = devices with a window_change or idle_start
+that day, in cache and live alike. **Late agent data** (agents buffer offline
+and upload later): the leader recomputes days 2–7 back hourly and 8–30 back
+daily, so data up to 7 days late shows within ~1 h, up to 30 days within ~24 h.
+home.py's cache readers (`summary_from_cache`, `device_active_from_cache`) gate
+freshness on `report_cache_state.last_fast_refresh` (no per-row touch-UPDATE).
+
+**Heavy-query protection.** Live fallbacks of company summary / top-apps / fleet
+are single-flighted: `try_acquire` returns a unique token, `release(key, token)`
+is a token-checked delete, results/failure markers are written BEFORE release,
+and losers (`wait_or_take`) roll back their session, then take over if the
+winner's lock vanishes (e.g. client disconnect). Request-path computes run with
+`LIVE_STATEMENT_TIMEOUT_MS` (60 s) inside an 80 s total budget (< 90 s lock
+TTL); background jobs use 300 s on the background pool. Only a statement
+timeout (sqlstate 57014) writes the 30 s failure marker → identical requests get
+`503` + `Retry-After` without touching the DB; a pool-checkout timeout is a
+plain `503` (Retry-After 5, no marker); other errors are 500s. since/until on
+the quick-look GETs is capped at 732 days like the jobs. The Reports page
 (`reports/page.tsx`) normalizes the picked range to the server's UTC "today"
 (`normalizeReportRange`, shifting rather than clamping so "Last 7 Days" stays 7
 days), sends plain `days` for ranges ending today and ≤90 days and since/until
@@ -335,6 +368,60 @@ table instead of a live `GROUP BY` scan), and `device_janitor` (marks devices
 offline after `ONLINE_CUTOFF_SECS`). All cache layers are designed to fail
 open to a live DB query if Redis is unavailable.
 
+**Workers & leader election.** uvicorn runs `WEB_CONCURRENCY` workers (default
+2, one per vCPU). `report_cache`, `tech_cache` and `device_janitor` are
+singletons: `LeaderLock.LeaderElector("background")` starts them in exactly one
+process (per-host `flock` + Redis `SET NX PX` lock renewed every 10 s,
+token-checked release; Redis down → the flock holder leads, i.e. one per
+container as with a single worker). `audit` and `ingest_queue` stay per-worker
+(they drain per-process buffers). Live per-device state (`ingest_queue.device_cache`)
+is mirrored across workers by `DeviceStateSync` (Redis hash `tt:dstate`).
+Migrations/seed run under a Postgres advisory lock so two workers never apply
+them concurrently. DB pools are per worker: HTTP 3+2 (checkout timeout 5 s) +
+ingest 1+1 + background 1+1 (`BackgroundSessionLocal`: singleton loops and
+report-job workers, so a backfill or exports never take HTTP connections) = 9
+per worker, 18 for 2 workers, 36 during a rolling deploy (Postgres
+`max_connections` 50). Every engine pins the session `timezone=UTC` (day
+bucketing and `CURRENT_DATE` assume it). Singleton `start()`/`stop()` are
+idempotent; if the leader lock file can't be opened the worker leads only while
+holding the Redis lock. In-process auth caches are invalidated across workers by
+`AuthInvalidationBus` (Redis channel `tt:auth_invalidate`; a listener reconnect
+flushes both caches).
+
+**Rate limiting & abuse protection** (pure-ASGI, SSE-safe, all numbers in
+`config.py` `RATE_LIMIT_*`): `RateLimitMiddleware` charges every request to
+Redis fixed-window buckets in one Lua round-trip, shared by all workers; Redis
+down/slow → per-process counters (circuit breaker), never unlimited. Identity:
+admin JWT subject (signature verified, no DB), device JWT subject for agent
+traffic (own 1200/min bucket, never per-IP — offices sit behind NAT), client IP
+otherwise (an expired token with a valid signature is keyed by its subject;
+`*/stream` endpoints read `?token=`). Policies: burst 20/5 s, read 120/min, write
+30/min, search (`?search=` / `?q=`) 30/min, `POST /v1/reports/jobs` 2/min,
+company 6000/min (≈ the box's ~100 RPS burst ceiling — stops one tenant
+monopolising the server; charged only if the user's buckets pass), anonymous
+300/min/IP, Google OAuth its own per-IP bucket. Exempt: `/health*`, OPTIONS,
+docs, and the credential POSTs (login/register/enroll/setup reset), which keep
+their own limiters; SSE counts once at connect. Redis pool is a
+`BlockingConnectionPool` (32/worker, 0.3 s wait); the limiter falls back to local
+counters only after 3 consecutive Redis failures. Rejections are `429` + `Retry-After` +
+`X-RateLimit-*`, with CORS headers (the middleware sits inside CORS). The
+credential limiters in `rate_limit.py` (login/register/enroll/setup) are
+separate and unchanged. `RequestSizeLimit` rejects bodies over 1 MiB with `413`
+(declared or streamed), with per-route caps for ingest, CSV import, installer
+and file uploads. Negative auth caches: a validly-signed device token whose
+device is gone/revoked is remembered 60 s (`device_auth_cache`, cleared by
+`invalidate_device()`), a missing/inactive admin 15 s (`AdminAuthCache`).
+Client IP comes from `X-Forwarded-For` because `FORWARDED_ALLOW_IPS='*'`: correct
+only while port 8000 is reachable solely through the ALB/proxy (ECS) — narrow it
+for any directly exposed deployment. CORS exposes `Retry-After` and `X-RateLimit-*`. The
+dashboard maps 429/503 to `RateLimitedError` / `ServiceBusyError` (`lib/api.ts`)
+and SWR retries once after `Retry-After`, never immediately; the Devices SSE
+reconnects with exponential backoff (paused while the tab is hidden) and report
+job polling gives up after 10 consecutive failures. The Reports page never shows
+a previous filter's data as current: each card has cold / refreshing (dimmed,
+inert) / error (Retry) / empty / success states. Backend, Postgres and Redis
+publish on `127.0.0.1` in compose (`BACKEND_BIND` to override).
+
 **Ingest pipeline**: agents `POST /v1/ingest` → 202 immediately, event lands
 in an in-memory bounded `asyncio.Queue` (back-pressure 503 if full) → flushed
 every 30s via `COPY` into a temp staging table → `INSERT … ON CONFLICT` dedup
@@ -428,9 +515,9 @@ Full walkthrough: `DEPLOY.md`. Summary:
 
 | Service | Local URL | Image |
 |---|---|---|
-| Postgres | `localhost:15432` | `postgres:16-alpine` |
+| Postgres | `127.0.0.1:15432` (`shared_buffers` 512MB, `max_connections` 50) | `postgres:16-alpine` |
 | MinIO (S3 API / console) | `localhost:9002` / `localhost:9003` | `minio/minio` |
-| Redis | `localhost:16379` (password-protected via `requirepass`) | `redis:7-alpine` |
+| Redis | `127.0.0.1:16379` (`requirepass`, 256 MB `volatile-lru`, FLUSHALL/FLUSHDB/KEYS/CONFIG/DEBUG disabled) | `redis:7-alpine` |
 | Backend | `localhost:8000` | built from `backend/Dockerfile` |
 | Dashboard | `localhost:3002` | built from `dashboard/Dockerfile` |
 

@@ -1,6 +1,6 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import useSWR from "swr";
 import { format, subDays, differenceInCalendarDays } from "date-fns";
@@ -18,6 +18,7 @@ import { AccessDenied } from "@/components/AccessDenied";
 import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
 import ExportReportDialog from "@/components/ExportReportDialog";
 import { normalizeReportRange, utcToday } from "@/lib/reportRange";
+import { ReportErrorPanel, ReportEmptyPanel, isAbortError } from "./_components/ReportCardStates";
 
 // Lazy: the per-day bar chart pulls in recharts only when it actually renders.
 const DailyActiveBarChart = dynamic(() => import("./_components/DailyActiveBarChart"), {
@@ -70,7 +71,6 @@ export default function ReportsPage() {
     since: format(subDays(new Date(), 6), "yyyy-MM-dd"),
     until: format(new Date(), "yyyy-MM-dd"),
   }));
-  const rangeDays = differenceInCalendarDays(new Date(dateRange.until), new Date(dateRange.since)) + 1;
   const [deviceId, setDeviceId] = useState("");
   const [appSearch, setAppSearch] = useState("");
   const [talentQuery, setTalentQuery] = useState("");
@@ -190,6 +190,8 @@ export default function ReportsPage() {
   // the export's initial range, so all three describe the same window.
   const effectiveRange = useMemo(() => normalizeReportRange(dateRange), [dateRange]);
   const { days: rangeArgDays, range: rangeArg } = reportRangeArg(effectiveRange);
+  // Length of the window the server actually reports on (not the raw picker value).
+  const effectiveRangeDays = differenceInCalendarDays(new Date(effectiveRange.until), new Date(effectiveRange.since)) + 1;
 
   const summaryKey = deviceId
     ? ["device-summary", deviceId, effectiveRange.since, effectiveRange.until]
@@ -198,25 +200,75 @@ export default function ReportsPage() {
     ? ["device-apps", deviceId, effectiveRange.since, effectiveRange.until]
     : ["top-apps", effectiveRange.since, effectiveRange.until];
 
-  const { data: summary, isLoading: summaryLoading, isValidating: summaryValidating } = useSWR<CompanyDay[]>(
+  const {
+    data: summary, error: summaryRawError, isLoading: summaryLoading,
+    isValidating: summaryValidating, mutate: mutateSummary,
+  } = useSWR<CompanyDay[]>(
     summaryKey,
     () => deviceId
       ? getDeviceSummary(deviceId, rangeArgDays, rangeArg)
       : getCompanySummary(rangeArgDays, rangeArg),
   );
-  const { data: apps, isLoading: appsLoading, isValidating: appsValidating } = useSWR<AppUsage[]>(
+  const {
+    data: apps, error: appsRawError, isLoading: appsLoading,
+    isValidating: appsValidating, mutate: mutateApps,
+  } = useSWR<AppUsage[]>(
     appsKey,
     () => deviceId
       ? getDeviceTopApps(deviceId, rangeArgDays, rangeArg)
       : getTopApps(rangeArgDays, APP_SEARCH_LIMIT, rangeArg),
   );
 
+  // A navigation-aborted request is not a failure (and SWR may have cached it as
+  // one for this key) — never surface it.
+  const summaryError = isAbortError(summaryRawError) ? undefined : summaryRawError;
+  const appsError = isAbortError(appsRawError) ? undefined : appsRawError;
+
+  // Per-card state machine (same for stat cards + chart, which share the summary
+  // query, and for Top applications):
+  //   cold       isLoading with no data at all            -> skeleton
+  //   error      the CURRENT key's request failed         -> inline error panel
+  //              (shown even though keepPreviousData still hands us the previous
+  //              range's rows — those must never pass as this filter's data)
+  //   refreshing validating, data present, no error       -> data dimmed + "Updating…"
+  //   empty      data present but nothing in the range    -> actionable empty state
+  //   success    data present                             -> as before
   // isValidating is true during background revalidation (stale data is still
   // shown, per the global keepPreviousData config) — a filter/date-range/
   // device change re-keys both SWR calls above, but without this the old
   // numbers just sit there with no indication a new fetch is in flight until
   // they silently swap. Same "Updating…" convention as Organization Overview.
-  const isRefreshing = (summaryValidating && !!summary) || (appsValidating && !!apps);
+  const summaryRefreshing = summaryValidating && !!summary && !summaryError;
+  const appsRefreshing = appsValidating && !!apps && !appsError;
+  const isRefreshing = summaryRefreshing || appsRefreshing;
+
+  // The chart is keyed by the range+device its data was actually fetched for, so
+  // recharts remounts (and replays its entry animation) when new data lands
+  // instead of carrying the old series' animation state. The key only advances
+  // once that fetch settles — while refreshing, the old data keeps the old key
+  // rather than re-animating stale bars.
+  const chartKey = `${deviceId || "all"}|${effectiveRange.since}|${effectiveRange.until}`;
+  const settledChartKeyRef = useRef(chartKey);
+  // Day count of the window the DISPLAYED summary belongs to. While refreshing, the
+  // stat cards still show the previous range's totals, so their "over N days"
+  // label must keep describing that window, not the newly picked one.
+  const settledRangeDaysRef = useRef(effectiveRangeDays);
+  if (summary && !summaryValidating && !summaryError) {
+    settledChartKeyRef.current = chartKey;
+    settledRangeDaysRef.current = effectiveRangeDays;
+  }
+  const shownRangeDays = settledRangeDaysRef.current;
+
+  // Empty-state escape hatches: widen to the last 30 days (only offered when the
+  // current range is shorter), and drop the device filter.
+  function widenRange() {
+    setDateRange({
+      since: format(subDays(new Date(), 29), "yyyy-MM-dd"),
+      until: format(new Date(), "yyyy-MM-dd"),
+    });
+  }
+  const onWiden = effectiveRangeDays < 30 ? widenRange : undefined;
+  const onClearDevice = deviceId ? () => { setDeviceId(""); setDeviceQuery(""); } : undefined;
 
   const filteredApps = useMemo(() => {
     if (!apps) return [];
@@ -234,8 +286,8 @@ export default function ReportsPage() {
   // NOT an early return: the header, date picker, and both search bars render
   // immediately either way, so the page is interactive before the first
   // response ever lands instead of being replaced by a full-page placeholder.
-  const summaryColdLoading = summaryLoading && !summary;
-  const appsColdLoading = appsLoading && !apps;
+  const summaryColdLoading = summaryLoading && !summary && !summaryError;
+  const appsColdLoading = appsLoading && !apps && !appsError;
 
   return (
     /* Outer: fills the flex-col main, no overflow — all scroll happens inside */
@@ -260,7 +312,7 @@ export default function ReportsPage() {
             <div className="flex items-center gap-2">
               <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">Reports</h1>
               {isRefreshing && (
-                <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+                <span role="status" className="text-xs text-gray-400 animate-pulse motion-reduce:animate-none">Updating…</span>
               )}
             </div>
             <p className="text-gray-600 text-xs sm:text-sm mt-0.5">
@@ -335,12 +387,27 @@ export default function ReportsPage() {
             </div>
           ))}
         </div>
+      ) : summaryError ? (
+        // The numbers below would describe a different range (or nothing), so show
+        // placeholders — the chart card carries the error message and Retry.
+        <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3" aria-label="Stats unavailable">
+          {["Total active time", "Avg per day"].map(label => (
+            <div key={label} className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
+              <p className="text-xs text-gray-600 mb-0.5">{label}</p>
+              <p className="text-lg sm:text-xl font-semibold text-gray-400 leading-tight">—</p>
+              <p className="text-xs text-gray-600 mt-0.5">unavailable</p>
+            </div>
+          ))}
+        </div>
       ) : totalActive > 0 && (
-        <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <div
+          className={`shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3 transition-opacity motion-reduce:transition-none ${summaryRefreshing ? "opacity-60 pointer-events-none" : ""}`}
+          aria-busy={summaryRefreshing}
+        >
           <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
             <p className="text-xs text-gray-600 mb-0.5">Total active time</p>
             <p className="text-lg sm:text-xl font-semibold text-gray-900 leading-tight">{fmtSeconds(totalActive)}</p>
-            <p className="text-xs text-gray-600 mt-0.5">over {rangeDays} {rangeDays === 1 ? "day" : "days"}</p>
+            <p className="text-xs text-gray-600 mt-0.5">over {shownRangeDays} {shownRangeDays === 1 ? "day" : "days"}</p>
           </div>
           {summary && summary.length > 0 && (
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
@@ -362,11 +429,39 @@ export default function ReportsPage() {
               nothing shifts when the real chart mounts in its place. */}
           <div className="h-32 sm:h-40 bg-gray-50 rounded animate-pulse" />
         </div>
-      ) : summary && (
+      ) : summaryError ? (
         <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 pt-4 pb-3 shadow-sm">
           <p className="text-sm font-semibold text-gray-800 mb-2">Active time per day</p>
-          {/* h-32 on mobile (128px), h-40 on sm+ (160px) */}
-          <DailyActiveBarChart data={summary} />
+          <ReportErrorPanel
+            error={summaryError}
+            what="the daily chart"
+            onRetry={() => { void mutateSummary(); }}
+            retrying={summaryValidating}
+          />
+        </div>
+      ) : summary && (
+        <div
+          className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 pt-4 pb-3 shadow-sm"
+          aria-busy={summaryRefreshing}
+        >
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-sm font-semibold text-gray-800">Active time per day</p>
+            {summaryRefreshing && (
+              <span role="status" className="text-xs text-gray-400 animate-pulse motion-reduce:animate-none">Updating…</span>
+            )}
+          </div>
+          {totalActive > 0 ? (
+            // h-32 on mobile (128px), h-40 on sm+ (160px). While refreshing the
+            // old range's bars stay visible but dimmed and inert (no tooltips),
+            // so they can't be read as the new range's data.
+            <div
+              className={`transition-opacity motion-reduce:transition-none ${summaryRefreshing ? "opacity-50 pointer-events-none" : ""}`}
+            >
+              <DailyActiveBarChart key={settledChartKeyRef.current} data={summary} />
+            </div>
+          ) : (
+            <ReportEmptyPanel onWiden={onWiden} onClearDevice={onClearDevice} />
+          )}
         </div>
       )}
 
@@ -388,12 +483,39 @@ export default function ReportsPage() {
             ))}
           </div>
         </div>
-      ) : apps && apps.length > 0 && (
-        <div className="flex-1 min-h-0 flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+      ) : appsError ? (
+        <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 sm:px-5 pt-4 pb-4 shadow-sm">
+          <p className="text-sm font-semibold text-gray-800 mb-3">Top applications</p>
+          <ReportErrorPanel
+            error={appsError}
+            what="top applications"
+            onRetry={() => { void mutateApps(); }}
+            retrying={appsValidating}
+          />
+        </div>
+      ) : apps && apps.length === 0 ? (
+        <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 sm:px-5 pt-4 pb-2 shadow-sm">
+          <p className="text-sm font-semibold text-gray-800">Top applications</p>
+          <ReportEmptyPanel
+            hint="No applications were used in this range. Try a wider date range, or pick a different device."
+            onWiden={onWiden}
+            onClearDevice={onClearDevice}
+          />
+        </div>
+      ) : apps && (
+        <div
+          className="flex-1 min-h-0 flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden"
+          aria-busy={appsRefreshing}
+        >
 
           {/* Card header + search — sticky at top of card, never scrolls */}
           <div className="shrink-0 px-4 sm:px-5 pt-4 pb-3 border-b border-gray-100">
-            <p className="text-sm font-semibold text-gray-800 mb-3">Top applications</p>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <p className="text-sm font-semibold text-gray-800">Top applications</p>
+              {appsRefreshing && (
+                <span role="status" className="text-xs text-gray-400 animate-pulse motion-reduce:animate-none">Updating…</span>
+              )}
+            </div>
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
               <input
@@ -415,7 +537,11 @@ export default function ReportsPage() {
           </div>
 
           {/* Scrollable rows — this is the ONLY element that scrolls */}
-          <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-5 py-3 space-y-2.5">
+          {/* While refreshing, the previous range's rows stay but are dimmed and
+              inert so they can't be mistaken for the new range's ranking. */}
+          <div
+            className={`flex-1 min-h-0 overflow-y-auto px-4 sm:px-5 py-3 space-y-2.5 transition-opacity motion-reduce:transition-none ${appsRefreshing ? "opacity-50 pointer-events-none" : ""}`}
+          >
             {filteredApps.map((app, i) => {
               const pct = Math.round((app.seconds / (apps[0]?.seconds || 1)) * 100);
               return (

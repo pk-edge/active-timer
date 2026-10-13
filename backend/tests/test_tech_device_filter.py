@@ -408,7 +408,7 @@ async def test_cache_key_separates_device_filtered_from_unfiltered(client, db_se
     async def no_lock(key, ttl=30):
         return True
 
-    async def noop(key):
+    async def noop(key, token=None):
         return None
 
     monkeypatch.setattr(ac, "cache_get", fake_get)

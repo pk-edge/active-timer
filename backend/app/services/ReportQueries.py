@@ -7,8 +7,15 @@ an export shows are, by construction, the numbers the page shows.
 
 Session handling: pass `db` to run the queries sequentially on that one session
 (request-scoped callers; an AsyncSession cannot run concurrent statements), or
-leave it None to run them concurrently, each on its own AsyncSessionLocal
-session (background workers, which have no request session).
+leave it None to run them concurrently, each on its own BackgroundSessionLocal
+session (background workers, which have no request session — the isolated
+background pool, so exports never take HTTP-request connections).
+
+Statement budget: request-path computes (db given) run under
+LIVE_STATEMENT_TIMEOUT_MS (60 s) like every other live endpoint, so a request
+can never pin an HTTP pool connection for minutes (and the single-flight lock,
+90 s, always outlives the statement). Only background jobs (db=None) get
+BACKGROUND_STATEMENT_TIMEOUT_MS (300 s) for multi-year scans.
 
 Scoping is the caller's job: resolve visible_device_ids() while the request
 session and `admin` are alive and hand the result in as `device_ids`
@@ -16,13 +23,14 @@ session and `admin` are alive and hand the result in as `device_ids`
 """
 import asyncio
 import hashlib
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 from sqlalchemy import text
 
+from app.core import report_cache
 from app.core.report_cache import _IDLE_APPS_SQL
-from app.db.base import AsyncSessionLocal
+from app.core.config import get_settings
 
 # Active-time CASE expression (window_change only, real apps). OS idle/lock-
 # screen processes show up as foreground-window events when the screen is idle
@@ -50,41 +58,57 @@ _RANGE = (
 ProgressFn = Callable[[int], Awaitable[None]]
 
 
-# The engine's session-level statement_timeout (DB_STATEMENT_TIMEOUT_MS, 120 s)
-# is sized for request traffic; a multi-year activity_events scan can legitimately
-# run longer. Same value report_cache.py uses for its long scans.
-_REPORT_STATEMENT_TIMEOUT = "SET LOCAL statement_timeout = '300000'"
+# Per-statement budgets. The engine's session-level statement_timeout
+# (DB_STATEMENT_TIMEOUT_MS, 120 s) is sized for request traffic.
+#  * LIVE: anything computed while a client waits on an HTTP-pool connection.
+#    Must stay below reports._LIVE_LOCK_TTL (the single-flight lock).
+#  * BACKGROUND: export jobs (db=None) on the background pool, where a
+#    multi-year activity_events scan can legitimately run longer.
+LIVE_STATEMENT_TIMEOUT_MS = 60_000
+BACKGROUND_STATEMENT_TIMEOUT_MS = 300_000
 
-# Caps how many report queries hold a pooled connection at once, across every
-# concurrent job in this process. Jobs run in the API process on the shared
-# engine (pool 5 + overflow 5); without a cap a few overlapping exports would
-# take every connection and make ordinary requests time out waiting for one.
-_REPORT_DB_SLOTS = asyncio.Semaphore(2)
+
+def _timeout_sql(ms: int) -> str:
+    return f"SET LOCAL statement_timeout = '{int(ms)}'"
+
+
+# Caps how many report queries hold a background-pool connection at once, across
+# every concurrent job in this process, and never exceeds the pool itself
+# (BACKGROUND_DB_POOL_SIZE + BACKGROUND_DB_MAX_OVERFLOW, default 2): without the
+# cap overlapping exports would queue on the pool and hit its checkout timeout.
+_s = get_settings()
+_REPORT_DB_SLOTS = asyncio.Semaphore(
+    max(1, min(2, _s.BACKGROUND_DB_POOL_SIZE + _s.BACKGROUND_DB_MAX_OVERFLOW)))
 
 Query = tuple[str, dict]  # (sql, params)
 
 
-async def _fetch(db, sql: str, params: dict) -> list:
+async def _fetch(db, sql: str, params: dict, timeout_ms: int = BACKGROUND_STATEMENT_TIMEOUT_MS) -> list:
     """Run one statement and return all rows — on `db` if given, else on a
-    private short-lived session so several _fetch calls can run in parallel."""
+    private short-lived background-pool session so several _fetch calls can run
+    in parallel."""
     if db is not None:
         return (await db.execute(text(sql), params)).fetchall()
     async with _REPORT_DB_SLOTS:
-        async with AsyncSessionLocal() as own:
-            await own.execute(text(_REPORT_STATEMENT_TIMEOUT))
+        async with report_cache.background_session() as own:
+            await own.execute(text(_timeout_sql(timeout_ms)))
             return (await own.execute(text(sql), params)).fetchall()
 
 
-async def _run_all(db, *queries: Query) -> list:
+async def _run_all(db, *queries: Query, timeout_ms: Optional[int] = None) -> list:
     """Run (sql, params) queries. Concurrent when each owns its session
     (db is None), otherwise sequential on the shared session. Coroutines are
     created only when they are about to run, so a failure leaves none unawaited;
-    on the concurrent path the first failure cancels the sibling queries."""
+    on the concurrent path the first failure cancels the sibling queries.
+    `timeout_ms` defaults to LIVE (60 s) on a request session and BACKGROUND
+    (300 s) on private sessions."""
     if db is not None:
-        await db.execute(text(_REPORT_STATEMENT_TIMEOUT))  # lasts for this transaction
+        # lasts for this transaction
+        await db.execute(text(_timeout_sql(timeout_ms or LIVE_STATEMENT_TIMEOUT_MS)))
         return [await _fetch(db, sql, params) for sql, params in queries]
 
-    tasks = [asyncio.ensure_future(_fetch(None, sql, params)) for sql, params in queries]
+    t_ms = timeout_ms or BACKGROUND_STATEMENT_TIMEOUT_MS
+    tasks = [asyncio.ensure_future(_fetch(None, sql, params, t_ms)) for sql, params in queries]
     try:
         return list(await asyncio.gather(*tasks))
     except BaseException:
@@ -97,6 +121,152 @@ async def _run_all(db, *queries: Query) -> list:
 async def _progress(cb: Optional[ProgressFn], pct: int) -> None:
     if cb:
         await cb(pct)
+
+
+# ── Live aggregation SQL (the fallback when the per-day cache can't answer) ───
+# One definition for the on-screen endpoints and the exports. Each query is split
+# into its window_change half and its idle_start half so each can run as an
+# index-only scan on its partial covering index (idx_events_window_covering /
+# idx_events_idle_covering, or the device-led variant when scoped), and is
+# pre-aggregated per (day, device) BEFORE rolling up. Counting devices with
+# COUNT(DISTINCT device_id) straight over the events instead sorts tens of
+# millions of rows to disk. Params: :cid, :since, :until, :vids (scoped only),
+# :limit (top apps). Scope is applied inside the scans, the company filter after
+# pre-aggregation on the small per-device rows.
+#
+# device_count = devices that logged a window_change (real app_name) or an
+# idle_start that day — the same definition the cache tables store.
+
+def daily_summary_sql(*, scoped: bool) -> str:
+    ae_scope = " AND ae.device_id = ANY(:vids)" if scoped else ""
+    return f"""
+        SELECT u.day,
+               SUM(u.active) AS active,
+               SUM(u.idle)   AS idle,
+               COUNT(DISTINCT u.device_id) AS device_count
+        FROM (
+            SELECT DATE(ae.timestamp) AS day, ae.device_id,
+                   SUM(CASE WHEN ae.app_name NOT IN {_IDLE_APPS_SQL}
+                            THEN ae.duration ELSE 0 END) AS active,
+                   0 AS idle
+            FROM   activity_events ae
+            WHERE  ae.event_type = 'window_change'
+              AND  ae.app_name IS NOT NULL
+              AND  {_RANGE}{ae_scope}
+            GROUP  BY DATE(ae.timestamp), ae.device_id
+            UNION ALL
+            SELECT DATE(ae.timestamp) AS day, ae.device_id,
+                   0 AS active,
+                   SUM(ae.duration) AS idle
+            FROM   activity_events ae
+            WHERE  ae.event_type = 'idle_start'
+              AND  {_RANGE}{ae_scope}
+            GROUP  BY DATE(ae.timestamp), ae.device_id
+        ) u
+        JOIN devices d ON d.id = u.device_id
+        WHERE d.company_id = :cid
+        GROUP BY u.day
+    """
+
+
+def top_apps_sql(*, scoped: bool) -> str:
+    ae_scope = " AND ae.device_id = ANY(:vids)" if scoped else ""
+    return f"""
+        SELECT normalize_app_name(a.app_name) AS app_name,
+               SUM(a.secs) AS seconds
+        FROM (
+            SELECT ae.device_id, ae.app_name, SUM(ae.duration) AS secs
+            FROM   activity_events ae
+            WHERE  ae.event_type = 'window_change'
+              AND  ae.app_name IS NOT NULL
+              AND  {_RANGE}{ae_scope}
+              {_EXCL_IDLE}
+            GROUP  BY ae.device_id, ae.app_name
+        ) a
+        JOIN devices d ON d.id = a.device_id
+        WHERE d.company_id = :cid
+        GROUP BY normalize_app_name(a.app_name)
+        ORDER BY seconds DESC, app_name
+        LIMIT :limit
+    """
+
+
+def top_devices_sql(*, scoped: bool, from_cache: bool) -> str:
+    """Ten most active devices (hostname + assigned employee), active > 0."""
+    if from_cache:
+        vids = " AND device_id = ANY(:vids)" if scoped else ""
+        inner = f"""
+            SELECT device_id, SUM(active_seconds) AS active
+            FROM   report_daily_device_cache
+            WHERE  company_id = :cid
+              AND  day BETWEEN CAST(:since AS date) AND CAST(:until AS date){vids}
+            GROUP  BY device_id
+            HAVING SUM(active_seconds) > 0
+        """
+    else:
+        ae_scope = " AND ae.device_id = ANY(:vids)" if scoped else ""
+        inner = f"""
+            SELECT ae.device_id, SUM(ae.duration) AS active
+            FROM   activity_events ae
+            WHERE  ae.event_type = 'window_change'
+              AND  ae.app_name IS NOT NULL
+              AND  {_RANGE}{ae_scope}
+              {_EXCL_IDLE}
+            GROUP  BY ae.device_id
+            HAVING SUM(ae.duration) > 0
+        """
+    return f"""
+        SELECT d.id::text AS device_id,
+               d.hostname,
+               e.name     AS employee_name,
+               a.active   AS active_seconds
+        FROM ({inner}) a
+        JOIN   devices d ON d.id = a.device_id
+        LEFT JOIN employees e ON e.id = d.employee_id
+        WHERE  d.company_id = :cid
+        ORDER  BY a.active DESC, d.id
+        LIMIT  10
+    """
+
+
+async def live_daily_summary(db, company_id: str, since: date, until: date,
+                             device_ids: Optional[list[str]]) -> list:
+    """Live (day, active, idle, device_count) rows, unsorted. `device_ids`:
+    None = whole company, list = only those devices."""
+    params: dict = {"cid": company_id, "since": since, "until": until}
+    if device_ids is not None:
+        params["vids"] = list(device_ids)
+    return (await db.execute(
+        text(daily_summary_sql(scoped=device_ids is not None)), params)).fetchall()
+
+
+async def live_top_apps(db, company_id: str, since: date, until: date,
+                        device_ids: Optional[list[str]], limit: int) -> list:
+    params: dict = {"cid": company_id, "since": since, "until": until, "limit": limit}
+    if device_ids is not None:
+        params["vids"] = list(device_ids)
+    return (await db.execute(
+        text(top_apps_sql(scoped=device_ids is not None)), params)).fetchall()
+
+
+async def _cache_covers(db, since: date, until: date) -> bool:
+    """Can the per-day cache tables answer [since, until]? Checked on `db` when
+    given, else on a short-lived private session. Never raises."""
+    try:
+        if db is not None:
+            return await report_cache.covers(db, since, until)
+        async with _REPORT_DB_SLOTS:
+            async with report_cache.background_session() as own:
+                return await report_cache.covers(own, since, until)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _cache_answer_unsure(until: date) -> bool:
+    """True when a range reaches today/yesterday — days the worker refreshes only
+    every few minutes, so an EMPTY cache answer may just mean "not computed yet"
+    and the exact live query should decide (same rule as report_cache._read)."""
+    return until >= datetime.now(timezone.utc).date() - timedelta(days=1)
 
 
 # ── Scope fingerprint / cache key ─────────────────────────────────────────────
@@ -122,10 +292,12 @@ def fleet_cache_key(company_id: str, since: date, until: date,
 async def build_device_full_report(
     company_id: str, device_id: str, since: date, until: date,
     *, db=None, on_progress: Optional[ProgressFn] = None,
+    timeout_ms: Optional[int] = None,
 ) -> Optional[dict]:
     """DeviceFullReportOut-shaped dict for one device, or None if the device
     doesn't exist in the company. The caller must have already checked the
-    device is visible to the requester."""
+    device is visible to the requester. `timeout_ms`: per-statement budget,
+    default LIVE (60 s) with `db`, BACKGROUND (300 s) without."""
     await _progress(on_progress, 5)
     params = {"did": device_id, "since": since, "until": until}
 
@@ -141,17 +313,16 @@ async def build_device_full_report(
     dev_row = dev_rows[0]
     await _progress(on_progress, 20)
 
+    # The daily rows come from the per-day device cache when it covers the range
+    # (same numbers the live query produces, from a few hundred rows), else live.
+    d_params = {"cid": company_id, "vids": [device_id], "since": since, "until": until}
+    live_daily_q: Query = (daily_summary_sql(scoped=True), d_params)
+    from_cache = await _cache_covers(db, since, until)
+    daily_q: Query = (report_cache.DEVICE_SUMMARY_RANGE_SQL, d_params) if from_cache else live_daily_q
+
     daily, apps_raw, top_urls = await _run_all(
         db,
-        (f"""
-            SELECT DATE(ae.timestamp) AS day,
-                   SUM({_ACTIVE_CASE}) AS active,
-                   SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle
-            FROM   activity_events ae
-            WHERE  ae.device_id = :did
-              AND  {_RANGE}
-            GROUP  BY day ORDER BY day
-        """, params),
+        daily_q,
         (f"""
             SELECT normalize_app_name(ae.app_name) AS app_name,
                    SUM(ae.duration) AS seconds
@@ -176,9 +347,13 @@ async def build_device_full_report(
             HAVING substring(ae.url FROM '^https?://([^/]+)') IS NOT NULL
             ORDER  BY visits DESC LIMIT 15
         """, params),
+        timeout_ms=timeout_ms,
     )
     await _progress(on_progress, 90)
 
+    if from_cache and not daily and _cache_answer_unsure(until):
+        daily = (await _run_all(db, live_daily_q, timeout_ms=timeout_ms))[0]
+    daily = sorted(daily, key=lambda r: r.day)
     total_active   = sum(int(r.active or 0) for r in daily)
     total_idle     = sum(int(r.idle   or 0) for r in daily)
     working_days   = len([r for r in daily if int(r.active or 0) > 0])
@@ -219,21 +394,39 @@ async def build_device_full_report(
 async def build_fleet_report(
     company_id: str, since: date, until: date, device_ids: Optional[list[str]],
     *, db=None, on_progress: Optional[ProgressFn] = None,
+    timeout_ms: Optional[int] = None,
 ) -> dict:
     """FleetReportOut-shaped dict restricted to `device_ids` (None = whole
-    company). Every query — device counts, platform split, daily activity, top
+    company). `timeout_ms` as in build_device_full_report. Every query — device counts, platform split, daily activity, top
     apps, top devices — carries the same scope, so a scoped caller can neither
     see nor infer devices outside it."""
     await _progress(on_progress, 5)
 
     # Same binding as the roster / _scope_clause: plain list[str] against a uuid column.
     dev_scope = "" if device_ids is None else " AND id = ANY(:vids)"
-    ae_scope = "" if device_ids is None else " AND ae.device_id = ANY(:vids)"
     vids = {} if device_ids is None else {"vids": list(device_ids)}
 
     p_meta = {"cid": company_id, "cutoff": ONLINE_CUTOFF_SECS, **vids}
     p_plat = {"cid": company_id, **vids}
-    p_time = {"cid": company_id, "since": since, "until": until, **vids}
+    p_time = {"cid": company_id, "since": since, "until": until, "limit": 20, **vids}
+    scoped = device_ids is not None
+
+    # Daily activity, top apps and top devices come from the per-day cache tables
+    # when they cover the range (company-wide: summary + app tables, scoped:
+    # the per-device table filtered to the caller's devices), else from the live
+    # split-and-pre-aggregate queries. Scoped top apps always run live (a few
+    # devices, covering index). Same numbers either way.
+    def _time_queries(from_cache: bool) -> tuple[Query, Query, Query]:
+        if not from_cache:
+            return ((daily_summary_sql(scoped=scoped), p_time),
+                    (top_apps_sql(scoped=scoped), p_time),
+                    (top_devices_sql(scoped=scoped, from_cache=False), p_time))
+        return ((report_cache.DEVICE_SUMMARY_RANGE_SQL if scoped else report_cache.SUMMARY_RANGE_SQL, p_time),
+                ((top_apps_sql(scoped=True), p_time) if scoped else (report_cache.APPS_RANGE_SQL, p_time)),
+                (top_devices_sql(scoped=scoped, from_cache=True), p_time))
+
+    from_cache = await _cache_covers(db, since, until)
+    daily_q, apps_q, devices_q = _time_queries(from_cache)
 
     counts_rows, platforms, daily, top_apps, top_devices = await _run_all(
         db,
@@ -258,46 +451,14 @@ async def build_fleet_report(
             WHERE  company_id = :cid AND is_deleted = FALSE AND is_archived = FALSE{dev_scope}
             GROUP  BY platform ORDER BY cnt DESC
         """, p_plat),
-        (f"""
-            SELECT DATE(ae.timestamp) AS day,
-                   SUM({_ACTIVE_CASE}) AS active,
-                   SUM(CASE WHEN ae.event_type = 'idle_start' THEN ae.duration ELSE 0 END) AS idle,
-                   COUNT(DISTINCT ae.device_id) AS device_count
-            FROM   activity_events ae
-            JOIN   devices d ON d.id = ae.device_id
-            WHERE  d.company_id = :cid
-              AND  {_RANGE}{ae_scope}
-            GROUP  BY day ORDER BY day
-        """, p_time),
-        (f"""
-            SELECT normalize_app_name(ae.app_name) AS app_name,
-                   SUM(ae.duration) AS seconds
-            FROM   activity_events ae
-            JOIN   devices d ON d.id = ae.device_id
-            WHERE  d.company_id = :cid
-              AND  ae.event_type = 'window_change'
-              AND  ae.app_name IS NOT NULL
-              AND  {_RANGE}{ae_scope}
-              {_EXCL_IDLE}
-            GROUP  BY normalize_app_name(ae.app_name)
-            ORDER  BY seconds DESC LIMIT 20
-        """, p_time),
-        (f"""
-            SELECT d.id::text AS device_id,
-                   d.hostname,
-                   e.name     AS employee_name,
-                   SUM({_ACTIVE_CASE}) AS active_seconds
-            FROM   activity_events ae
-            JOIN   devices   d ON d.id = ae.device_id
-            LEFT JOIN employees e ON e.id = d.employee_id
-            WHERE  d.company_id = :cid
-              AND  {_RANGE}{ae_scope}
-            GROUP  BY d.id, d.hostname, e.name
-            ORDER  BY active_seconds DESC LIMIT 10
-        """, p_time),
+        daily_q, apps_q, devices_q,
+        timeout_ms=timeout_ms,
     )
     await _progress(on_progress, 90)
 
+    if from_cache and not daily and _cache_answer_unsure(until):
+        daily, top_apps, top_devices = await _run_all(db, *_time_queries(False), timeout_ms=timeout_ms)
+    daily = sorted(daily, key=lambda r: r.day)
     counts = counts_rows[0]
     total_app_secs = sum(int(r.seconds or 0) for r in top_apps)
     return {

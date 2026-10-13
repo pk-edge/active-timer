@@ -251,6 +251,9 @@ async def restore_device(
     device.is_archived = False
     await audit.record(db, admin, "device.restored", "device", str(device.id), {"source": "portal"})
     await db.commit()
+    # A restored device's old token validates again — drop any cached negative
+    # ("revoked") verdict so the agent is not locked out for the negative TTL.
+    await invalidate_device(str(device.id))
 
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.ONLINE_CUTOFF_SECS)
     return DeviceOut(
