@@ -21,11 +21,25 @@ Postgres, a never-committed session (rolled back by the `db_session`/`client`
 fixtures in conftest.py), uuid-tagged fixtures so parallel runs never collide.
 """
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from app.db.models import ActivityEvent, Company, Device, Employee, Role, RolePermission
+
+
+@pytest.fixture(autouse=True)
+def _live_path_only(monkeypatch):
+    """These tests seed raw events in a never-committed session and expect the
+    live queries. The per-day cache tables can't contain that data, and on a
+    database whose report_cache worker has run, `covers()` would route around the
+    live path (the cache is exercised in test_report_cache.py)."""
+    from app.core import report_cache
+
+    async def _never(db, since, until):
+        return False
+
+    monkeypatch.setattr(report_cache, "covers", _never)
 
 
 # ── Fixture helpers (mirrors test_logs_pagination.py) ──────────────────────────
@@ -367,4 +381,41 @@ async def test_reports_view_gate_still_required(client, db_session):
     )
     assert r.status_code == 403, "gate must apply before/regardless of since-until validation"
 
+    await db_session.rollback()
+
+
+# ── since/until span cap (same MAX_REPORT_RANGE_DAYS as the exports) ──────────
+
+def test_validate_range_caps_since_until_span():
+    from fastapi import HTTPException
+    from app.api.v1.endpoints.reports import MAX_REPORT_RANGE_DAYS, _validate_range
+
+    since = date(2024, 1, 1)
+    # Exactly the cap (inclusive span) is fine ...
+    _validate_range(7, since, since + timedelta(days=MAX_REPORT_RANGE_DAYS - 1))
+    # ... one day more is a 400 with a clear message.
+    with pytest.raises(HTTPException) as e:
+        _validate_range(7, since, since + timedelta(days=MAX_REPORT_RANGE_DAYS))
+    assert e.value.status_code == 400
+    assert str(MAX_REPORT_RANGE_DAYS) in e.value.detail and "exceed" in e.value.detail
+    # `days` alone keeps its own le=90 bound; the cap only concerns since/until.
+    _validate_range(90, None, None)
+
+
+@pytest.mark.asyncio
+async def test_since_until_span_cap_applies_to_all_four_endpoints(client, db_session):
+    company, admin = await _all_scope_admin(db_session)
+    device = await _device(db_session, company, "span-host")
+    headers = _admin_headers(admin, company)
+    huge = {"since": "2000-01-01", "until": "2026-01-01"}
+
+    for path in (
+        "/v1/reports/company/summary",
+        "/v1/reports/company/top-apps",
+        f"/v1/reports/device/{device.id}/summary",
+        f"/v1/reports/device/{device.id}/top-apps",
+    ):
+        r = await client.get(path, params=huge, headers=headers)
+        assert r.status_code == 400, path
+        assert "732" in r.json()["detail"], path
     await db_session.rollback()

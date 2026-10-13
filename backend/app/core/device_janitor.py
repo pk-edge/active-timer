@@ -30,11 +30,11 @@ _worker_task: asyncio.Task | None = None
 
 
 async def _do_archive() -> None:
-    from app.db.base import AsyncSessionLocal
+    from app.db.base import BackgroundSessionLocal
     from sqlalchemy import text
 
     try:
-        async with AsyncSessionLocal() as db:
+        async with BackgroundSessionLocal() as db:
             companies = (await db.execute(text("""
                 SELECT id, inactive_device_days
                 FROM   companies
@@ -83,17 +83,25 @@ async def _loop() -> None:
 
 
 async def start() -> None:
+    """Idempotent: a second call while the loop is alive is a no-op (no orphaned
+    second loop)."""
     global _worker_task
+    if _worker_task is not None and not _worker_task.done():
+        return
     _worker_task = asyncio.create_task(_loop(), name="device_janitor")
     log.info("device_janitor: worker started (interval=%ds)", _INTERVAL)
 
 
 async def stop() -> None:
+    """Idempotent: tolerates never-started / already-stopped."""
     global _worker_task
-    if _worker_task and not _worker_task.done():
-        _worker_task.cancel()
+    task, _worker_task = _worker_task, None
+    if task is not None and not task.done():
+        task.cancel()
         try:
-            await _worker_task
+            await task
         except asyncio.CancelledError:
             pass
+        except Exception:  # noqa: BLE001
+            log.exception("device_janitor: worker had failed")
     log.info("device_janitor: worker stopped")

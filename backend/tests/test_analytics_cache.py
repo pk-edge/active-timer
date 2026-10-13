@@ -62,6 +62,12 @@ class FakeRedis:
     async def delete(self, k):
         self.store.pop(k, None)
 
+    async def eval(self, script, numkeys, k, token):
+        if self._live(k) == token:
+            del self.store[k]
+            return 1
+        return 0
+
 
 @pytest.fixture
 def fake_redis(monkeypatch):

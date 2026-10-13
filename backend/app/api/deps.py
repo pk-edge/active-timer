@@ -59,6 +59,11 @@ async def get_current_device(
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid device token")
 
+    # Validly-signed but recently found revoked/unknown → 401 with zero DB reads.
+    if device_auth_cache.is_negative(creds.credentials):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
+    seen_epoch = device_auth_cache.epoch()
+
     result = await db.execute(
         select(Device).where(
             Device.id        == device_uuid,
@@ -68,6 +73,7 @@ async def get_current_device(
     )
     device = result.scalar_one_or_none()
     if not device:
+        device_auth_cache.set_negative(creds.credentials, str(device_uuid), seen_epoch=seen_epoch)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
     return device
 
@@ -99,6 +105,8 @@ async def get_ingest_device_id(
     cached = device_auth_cache.get(token)
     if cached is not None:
         return cached
+    if device_auth_cache.is_negative(token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
 
     # Cold miss → one short, bounded DB validation, then cache it.
     async with _ingest_auth_miss_sem:
@@ -107,6 +115,8 @@ async def get_ingest_device_id(
         cached = device_auth_cache.get(token)
         if cached is not None:
             return cached
+        if device_auth_cache.is_negative(token):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
         # Capture the invalidation epoch BEFORE the DB read so that an admin
         # revoke racing this lookup cannot be re-warmed by the set() below.
         seen_epoch = device_auth_cache.epoch()
@@ -120,6 +130,8 @@ async def get_ingest_device_id(
             )
             row = result.first()
     if not row:
+        # Remember the verdict briefly (epoch-guarded; enroll/restore/archive drop it).
+        device_auth_cache.set_negative(token, str(device_uuid), seen_epoch=seen_epoch)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
 
     device_id = str(row[0])
@@ -162,6 +174,10 @@ async def get_device_ctx(
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid device token")
 
+    if device_auth_cache.is_negative(token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
+    seen_epoch = device_auth_cache.epoch()
+
     token_fp = hashlib.sha256(token.encode()).hexdigest()
     key = device_ctx_cache_key(str(device_uuid))
     entry, _ = await cache_get(key)
@@ -182,6 +198,7 @@ async def get_device_ctx(
         )
     )).first()
     if not row:
+        device_auth_cache.set_negative(token, str(device_uuid), seen_epoch=seen_epoch)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Device not found or revoked")
 
     ctx = DeviceCtx(
@@ -314,10 +331,15 @@ async def get_current_user(
     cached = admin_auth_cache.get(creds.credentials)
     if cached is not None:
         return cached
+    # Validly-signed token whose employee is missing/inactive, seen moments ago:
+    # 401 without touching the DB (cleared by every user/role mutation).
+    if admin_auth_cache.is_negative(creds.credentials):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     seen_epoch = admin_auth_cache.epoch()
 
     user = await _load_active_employee(db, user_uuid)
     if not user:
+        admin_auth_cache.set_negative(creds.credentials, seen_epoch=seen_epoch)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     _attach_effective_perms(user)

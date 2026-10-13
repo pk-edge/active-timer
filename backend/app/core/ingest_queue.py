@@ -130,6 +130,9 @@ class IngestQueue:
         # Read by the realtime SSE endpoint — updated at enqueue time, never
         # delayed by the flush interval.
         self.device_cache: dict[str, dict] = {}
+        # Optional hook(device_id, state) fired on every cache update — wired in
+        # main.py to DeviceStateSync so sibling uvicorn workers see the state.
+        self.on_state_update = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -409,6 +412,11 @@ class IngestQueue:
                 ),
                 "updated_at":  time.time(),
             }
+            if self.on_state_update is not None:
+                try:
+                    self.on_state_update(did, self.device_cache[did])
+                except Exception:  # noqa: BLE001 — sharing is best-effort, never break ingest
+                    pass
 
 
 # Singleton — imported by ingest endpoint and wired into the FastAPI lifespan

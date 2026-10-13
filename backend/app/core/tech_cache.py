@@ -85,7 +85,7 @@ async def _refresh_day(offset: int, *, prestale: bool) -> None:
     `prestale` writes rows already-stale (first-boot backfill) so readers keep
     using live queries until the final flip marks the whole window fresh.
     """
-    from app.db.base import AsyncSessionLocal
+    from app.db.base import BackgroundSessionLocal
     from sqlalchemy import text
 
     ts_expr = "NOW() - INTERVAL '40 minutes'" if prestale else "NOW()"
@@ -93,7 +93,7 @@ async def _refresh_day(offset: int, *, prestale: bool) -> None:
     day_hi = f"{day_lo} + INTERVAL '1 day'"
     params = {"offset": offset}
 
-    async with AsyncSessionLocal() as db:
+    async with BackgroundSessionLocal() as db:
         # 240 s per statement: a single day is seconds in isolation, but the
         # first-boot sweep can compete with ingest + the report backfill.
         await db.execute(text("SET LOCAL statement_timeout = '240000'"))
@@ -265,9 +265,9 @@ async def _refresh_day(offset: int, *, prestale: bool) -> None:
 
 async def _touch_window(days: int) -> None:
     """Mark the whole window fresh in one shot per table (no event rescans)."""
-    from app.db.base import AsyncSessionLocal
+    from app.db.base import BackgroundSessionLocal
     from sqlalchemy import text
-    async with AsyncSessionLocal() as db:
+    async with BackgroundSessionLocal() as db:
         for tbl in ("tech_daily_app_cache", "tech_daily_category_cache",
                     "tech_daily_totals_cache", "tech_daily_url_cache"):
             await db.execute(text(f"""
@@ -280,10 +280,10 @@ async def _touch_window(days: int) -> None:
 
 async def _do_refresh() -> None:
     global _last_full_sweep
-    from app.db.base import AsyncSessionLocal
+    from app.db.base import BackgroundSessionLocal
     from sqlalchemy import text
     try:
-        async with AsyncSessionLocal() as db:
+        async with BackgroundSessionLocal() as db:
             if not await _tables_exist(db):
                 log.info("tech_cache: tables not ready yet — skipping refresh")
                 return
@@ -324,19 +324,27 @@ async def _loop() -> None:
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 async def start() -> None:
+    """Idempotent: a second call while the loop is alive is a no-op (no orphaned
+    second loop)."""
     global _worker_task
+    if _worker_task is not None and not _worker_task.done():
+        return
     _worker_task = asyncio.create_task(_loop(), name="tech_cache")
     log.info("tech_cache: worker started (interval=%ds)", REFRESH_INTERVAL)
 
 
 async def stop() -> None:
+    """Idempotent: tolerates never-started / already-stopped."""
     global _worker_task
-    if _worker_task and not _worker_task.done():
-        _worker_task.cancel()
+    task, _worker_task = _worker_task, None
+    if task is not None and not task.done():
+        task.cancel()
         try:
-            await _worker_task
+            await task
         except asyncio.CancelledError:
             pass
+        except Exception:  # noqa: BLE001 — a crashed loop must not break shutdown
+            log.exception("tech_cache: worker had failed")
     log.info("tech_cache: worker stopped")
 
 

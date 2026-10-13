@@ -23,9 +23,17 @@ Design
   TTL seconds unless explicitly invalidated (archive/delete/re-enroll call
   invalidate_device()). TTL is deliberately short (default 60s).
 • Bounded size (LRU-ish by insertion order) so memory can never grow unbounded.
-• Single-event-loop process (uvicorn --workers 1): all methods are synchronous
-  with no awaits, so each call is atomic w.r.t. the asyncio scheduler — no locks
-  needed.
+• One event loop per worker process: all methods are synchronous with no
+  awaits, so each call is atomic w.r.t. the asyncio scheduler — no locks needed.
+  With several workers each keeps its own cache; the async module-level
+  invalidate_device() below clears THIS worker's cache and broadcasts the
+  device_id over Redis pub/sub (app/core/AuthInvalidationBus.py) so every other
+  worker/replica drops it too. If a message is missed (Redis down) the TTL
+  (60s positive / negative) is the backstop.
+• Negative entries (is_negative/set_negative): a validly-signed token whose
+  device is missing/revoked is remembered briefly so a revoked agent retrying
+  every 5 s costs ZERO DB reads. invalidate_device() drops them, and set_negative
+  honours the epoch guard, so an enrolled/restored device is never locked out.
 """
 
 from __future__ import annotations
@@ -34,9 +42,19 @@ import time
 
 
 class DeviceAuthCache:
-    def __init__(self, ttl_secs: float, max_entries: int) -> None:
+    def __init__(self, ttl_secs: float, max_entries: int,
+                 negative_ttl_secs: float = 0.0, negative_max: int = 10_000) -> None:
         self._ttl = ttl_secs
         self._max = max_entries
+        # Negative entries: validly-SIGNED tokens whose device is missing/revoked/
+        # rotated-out. token -> (device_id, expiry_monotonic); reverse index by
+        # device so enroll/restore/archive/delete can drop them. Only tokens that
+        # pass JWT verification ever get here (callers verify first), so the set
+        # is bounded by minted-then-revoked tokens, and capped by `negative_max`.
+        self._neg_ttl = negative_ttl_secs
+        self._neg_max = negative_max
+        self._negatives: dict[str, tuple[str, float]] = {}
+        self._device_negatives: dict[str, set[str]] = {}
         # token -> (device_id, expiry_monotonic)
         self._entries: dict[str, tuple[str, float]] = {}
         # device_id -> set of tokens (for O(1) invalidation on revoke)
@@ -84,11 +102,59 @@ class DeviceAuthCache:
         self._entries[token] = (device_id, time.monotonic() + self._ttl)
         self._device_tokens.setdefault(device_id, set()).add(token)
 
+    # ── Negative entries ─────────────────────────────────────────────────────
+    def is_negative(self, token: str) -> bool:
+        """True if this (validly signed) token was recently found invalid/revoked."""
+        if self._neg_ttl <= 0:
+            return False
+        hit = self._negatives.get(token)
+        if hit is None:
+            return False
+        if hit[1] <= time.monotonic():
+            self._evict_negative(token)
+            return False
+        return True
+
+    def set_negative(self, token: str, device_id: str, seen_epoch: int | None = None) -> None:
+        """Remember that `token` failed DB validation, for negative_ttl seconds.
+
+        Skipped when an invalidation happened since `seen_epoch` was captured —
+        an enroll/restore racing the in-flight lookup must never be shadowed by
+        a stale "revoked" verdict (same TOCTOU guard as set()).
+        """
+        if self._neg_ttl <= 0:
+            return
+        if seen_epoch is not None and seen_epoch != self._epoch:
+            return
+        if len(self._negatives) >= self._neg_max and token not in self._negatives:
+            overflow = len(self._negatives) - self._neg_max + 1
+            for old in list(self._negatives.keys())[:overflow]:
+                self._evict_negative(old)
+        self._negatives[token] = (device_id, time.monotonic() + self._neg_ttl)
+        self._device_negatives.setdefault(device_id, set()).add(token)
+
+    def _evict_negative(self, token: str) -> None:
+        entry = self._negatives.pop(token, None)
+        if entry is not None:
+            toks = self._device_negatives.get(entry[0])
+            if toks is not None:
+                toks.discard(token)
+                if not toks:
+                    self._device_negatives.pop(entry[0], None)
+
     def invalidate_device(self, device_id: str) -> None:
-        """Drop every cached token for a device — call on archive/delete/revoke."""
+        """Drop every cached token (positive AND negative) for a device — call on
+        enroll / restore / archive / delete / revoke."""
         self._epoch += 1
         for token in self._device_tokens.pop(device_id, set()):
             self._entries.pop(token, None)
+        for token in self._device_negatives.pop(device_id, set()):
+            self._negatives.pop(token, None)
+
+    def invalidate_all(self) -> None:
+        """Drop everything and advance the epoch (used after a pub/sub gap)."""
+        self._epoch += 1
+        self.clear()
 
     def _evict_token(self, token: str) -> None:
         entry = self._entries.pop(token, None)
@@ -103,9 +169,12 @@ class DeviceAuthCache:
     def clear(self) -> None:
         self._entries.clear()
         self._device_tokens.clear()
+        self._negatives.clear()
+        self._device_negatives.clear()
 
     def stats(self) -> dict:
-        return {"tokens": len(self._entries), "devices": len(self._device_tokens)}
+        return {"tokens": len(self._entries), "devices": len(self._device_tokens),
+                "negatives": len(self._negatives)}
 
 
 # Singleton, configured from settings at import time.
@@ -115,6 +184,8 @@ _settings = get_settings()
 device_auth_cache = DeviceAuthCache(
     ttl_secs=_settings.INGEST_AUTH_CACHE_TTL_SECS,
     max_entries=_settings.INGEST_AUTH_CACHE_MAX,
+    negative_ttl_secs=_settings.INGEST_AUTH_NEGATIVE_TTL_SECS,
+    negative_max=_settings.INGEST_AUTH_NEGATIVE_MAX,
 )
 
 
@@ -144,9 +215,12 @@ async def invalidate_device(device_id: str) -> None:
     token cache on THIS replica plus the Redis device-context entry shared by
     all replicas. Call on archive / delete / re-enroll / reassign / headless
     changes so a stale context can never outlive the mutation by more than the
-    in-process TTL. The tombstone is written FIRST so there is no window where
+    in-process TTL (and, with Redis up, not even that). The tombstone is written FIRST so there is no window where
     the entry is gone but an in-flight lookup may re-warm it."""
     device_auth_cache.invalidate_device(device_id)
+    # Tell the sibling workers/replicas (never raises; TTL is the backstop).
+    from app.core.AuthInvalidationBus import auth_bus
+    await auth_bus.publish_device(device_id)
     from app.core.RedisCache import cache_delete, cache_set
     await cache_set(device_ctx_tombstone_key(device_id), True,
                     fresh_secs=CTX_TOMBSTONE_SECS, stale_secs=CTX_TOMBSTONE_SECS)

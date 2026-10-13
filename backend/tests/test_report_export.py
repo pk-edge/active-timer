@@ -33,6 +33,20 @@ from app.services.ReportQueries import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _live_path_only(monkeypatch):
+    """These tests seed raw events in a never-committed session and expect the
+    live queries. The per-day cache tables can't contain that data, and on a
+    database whose report_cache worker has run, `covers()` would route around the
+    live path (the cache is exercised in test_report_cache.py)."""
+    from app.core import report_cache
+
+    async def _never(db, since, until):
+        return False
+
+    monkeypatch.setattr(report_cache, "covers", _never)
+
+
 # ── Fixture helpers ────────────────────────────────────────────────────────────
 
 async def _company(db):
@@ -310,7 +324,7 @@ def test_validate_range_last_two_years_with_leap_day():
 async def test_run_all_failure_cancels_siblings_and_creates_no_stray_coroutines(monkeypatch):
     started, cancelled = [], []
 
-    async def fake_fetch(db, sql, params):
+    async def fake_fetch(db, sql, params, timeout_ms=None):
         started.append(sql)
         if sql == "boom":
             raise RuntimeError("boom")
@@ -428,16 +442,6 @@ def test_days_and_equivalent_since_until_share_a_cache_key():
     today = datetime.now(timezone.utc).date()
     assert _range_cache_fp(7, None, None) == _range_cache_fp(7, today - timedelta(days=6), today)
     assert _range_cache_fp(7, None, None) != _range_cache_fp(30, None, None)
-
-
-@pytest.mark.asyncio
-async def test_summary_range_cache_refuses_ranges_it_does_not_cover(db_session):
-    from app.core import report_cache
-    today = datetime.now(timezone.utc).date()
-    # Older than the 31-day refreshed window: must be a miss (live fallback),
-    # never a silently partial answer. Returns before touching the DB.
-    assert await report_cache.summary_range_from_cache(
-        db_session, uuid.uuid4(), today - timedelta(days=31), today) is None
 
 
 @pytest.mark.asyncio
