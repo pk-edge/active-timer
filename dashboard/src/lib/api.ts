@@ -34,6 +34,60 @@ export class AbortedError extends Error {
   }
 }
 
+/** Any non-2xx API response (other than the typed ones below). `status` lets callers tell 4xx from 5xx. */
+export class HttpError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
+/** HTTP 429 — the per-user rate limit was hit. `retryAfterSeconds` comes from Retry-After. */
+export class RateLimitedError extends Error {
+  readonly rateLimited = true;
+  readonly retryAfterSeconds: number;
+  /** Set by SWRProvider when it has queued the one automatic retry, so the UI can say "retrying in N s". */
+  autoRetryScheduled = false;
+  constructor(retryAfterSeconds: number, detail?: string) {
+    super(
+      detail
+        ? `Too many requests — try again in ${retryAfterSeconds} s. ${detail}`
+        : `Too many requests — try again in ${retryAfterSeconds} s.`,
+    );
+    this.name = "RateLimitedError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/**
+ * HTTP 503 with a Retry-After header — the server is deliberately shedding a
+ * heavy query (e.g. one that recently failed or timed out). `message` is the
+ * server's human `detail`.
+ */
+export class ServiceBusyError extends Error {
+  readonly serviceBusy = true;
+  readonly retryAfterSeconds: number;
+  /** See RateLimitedError.autoRetryScheduled. */
+  autoRetryScheduled = false;
+  constructor(retryAfterSeconds: number, message: string) {
+    super(message);
+    this.name = "ServiceBusyError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+/** Parses a Retry-After header (delta-seconds or HTTP-date) to whole seconds, ≥1. */
+function parseRetryAfter(value: string | null, fallback: number): number {
+  if (!value) return fallback;
+  const secs = Number(value);
+  if (Number.isFinite(secs)) return Math.max(1, Math.ceil(secs));
+  const at = Date.parse(value);
+  if (!Number.isNaN(at)) return Math.max(1, Math.ceil((at - Date.now()) / 1000));
+  return fallback;
+}
+
 // ── Navigation-scoped request cancellation ────────────────────────────────────
 // Every GET issued through request() is tied to the current "page generation".
 // When the route changes (see components/NavigationAbort.tsx) the previous
@@ -101,7 +155,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const j = JSON.parse(body);
       if (j.detail) msg = j.detail;
     } catch { /* non-JSON body */ }
-    throw new Error(msg);
+    if (res.status === 429) {
+      const retryAfter = parseRetryAfter(res.headers.get("Retry-After"), 10);
+      // Only pass the server's text through when it isn't just the status echo.
+      throw new RateLimitedError(retryAfter, msg.startsWith("429:") ? undefined : msg);
+    }
+    if (res.status === 503 && res.headers.has("Retry-After")) {
+      const retryAfter = parseRetryAfter(res.headers.get("Retry-After"), 15);
+      throw new ServiceBusyError(
+        retryAfter,
+        msg.startsWith("503:") ? "The server is busy — try again shortly." : msg,
+      );
+    }
+    throw new HttpError(res.status, msg);
   }
 
   if (res.status === 204 || res.headers.get("content-length") === "0") {

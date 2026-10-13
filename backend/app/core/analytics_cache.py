@@ -98,14 +98,15 @@ async def cached_or_compute(
 
     # True miss. Collapse concurrent misses onto one computation where we can.
     if single_flight:
-        if await try_acquire(key):
+        token = await try_acquire(key)
+        if token:
             try:
                 value = await compute(db)
                 if value is not None:
                     await cache_set(key, value, fresh_secs=fresh, stale_secs=stale)
                 return value
             finally:
-                await release(key)
+                await release(key, token)
         winner = await wait_for(key)
         if winner is not None:
             return winner

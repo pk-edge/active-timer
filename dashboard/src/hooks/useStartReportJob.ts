@@ -1,6 +1,6 @@
 "use client";
 import { useCallback } from "react";
-import { createReportJob } from "@/lib/api";
+import { createReportJob, RateLimitedError } from "@/lib/api";
 import { useReportJobs } from "@/contexts/ReportJobsContext";
 import type { ReportFormat, ReportType } from "@/contexts/ReportJobsContext";
 
@@ -17,6 +17,14 @@ export interface StartReportJobParams {
 
 // Module-level so ids stay unique across every caller (and across remounts).
 let tempSeq = 0;
+
+/** Failed-job text for the Downloads tray — a limit hit reads as a limit, not a raw error. */
+function reportJobErrorMessage(e: unknown): string {
+  if (e instanceof RateLimitedError) {
+    return `Report limit reached — try again in ${e.retryAfterSeconds} s`;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
 
 /**
  * Starts a report job with the optimistic pattern every report trigger shares:
@@ -37,6 +45,6 @@ export function useStartReportJob() {
 
     createReportJob({ type: p.type, device_id: p.deviceId, since: p.since, until: p.until })
       .then(job => activateJob(tempId, job.job_id, job.status === "done" ? job.result ?? undefined : undefined))
-      .catch(e => failJob(tempId, e instanceof Error ? e.message : String(e)));
+      .catch(e => failJob(tempId, reportJobErrorMessage(e)));
   }, [addJob, activateJob, failJob]);
 }

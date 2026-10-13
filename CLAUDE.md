@@ -79,3 +79,24 @@ fix the message instead.
 - A commit that includes a breaking change MUST carry `!` after the type/scope or a `BREAKING CHANGE:` footer — don't skip this even if the user didn't mention "breaking".
 - Body/footer (e.g. `Co-Authored-By:`) still applies per the harness's own commit instructions — Conventional Commits only constrains the header line and optional footers, it doesn't replace the rest of the commit message conventions already in force.
 - If the `commit-msg` hook rejects the message, treat that as a real validation failure to fix (reword and recommit), not an obstacle to bypass.
+
+### Bitbucket PR check — branch must not lag `master` (STANDING RULE)
+
+Bitbucket runs a **"No commits behind the destination branch"** check on PRs into `master`,
+and it fails when the source branch is more than a trivial number of commits behind. Every
+push to a dev/feature branch must therefore leave the branch **rebased onto the tip of
+`origin/master` and exactly 1 commit ahead of it** (squash the branch's work into a single
+Conventional Commit if there are several — the user has explicitly asked for one commit
+ahead, repeatedly). The full sequence after committing:
+
+1. `git fetch origin`
+2. `git rebase origin/master` — resolve conflicts carefully if any appear; never abort and
+   never paper over a bad rebase with `--force`.
+3. Verify with `git rev-list --count origin/master..<branch>` → must be `1`
+   (and `git rev-list --count <branch>..origin/master` → must be `0`).
+4. `git push --force-with-lease origin <branch>` — the rebase rewrites history, so a
+   force-push is required and expected here; `--force-with-lease` guards against
+   clobbering anyone else's concurrent push.
+
+This applies to **every** commit/push on a PR branch, not just the first one — if
+`origin/master` has moved again since the last push, rebase and force-push once more.
