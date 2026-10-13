@@ -87,6 +87,34 @@ def _log_oauth_status() -> None:
         )
 
 
+def make_singleton_hooks(singletons):
+    """-> (start_all, stop_all) for the leader-elected background loops.
+
+    `singletons` is an ordered sequence of (name, module) whose start()/stop()
+    are idempotent. stop_all isolates every stop() (one failure never skips the
+    others, and stop() tolerates never-started). start_all stops whatever DID
+    start if a later start fails, so the elector's retry begins from a clean
+    slate instead of leaving half-started loops, then re-raises so the worker
+    is not marked leader.
+    """
+    async def stop_all() -> None:
+        for name, mod in reversed(tuple(singletons)):
+            try:
+                await mod.stop()
+            except Exception:  # noqa: BLE001
+                log.exception("singleton %s: stop failed", name)
+
+    async def start_all() -> None:
+        try:
+            for _name, mod in singletons:
+                await mod.start()
+        except Exception:
+            await stop_all()
+            raise
+
+    return start_all, stop_all
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.core import broadcaster, audit, RedisClient
@@ -95,23 +123,46 @@ async def lifespan(app: FastAPI):
     await init_db()                  # migrations + RBAC seed + bootstrap admin (all idempotent)
     await RedisClient.startup()      # open Redis cache client (separate pool from pub/sub)
     await broadcaster.startup()      # open Redis pub/sub + listener BEFORE workers publish
+    from app.core.AuthInvalidationBus import auth_bus
+    await auth_bus.start()           # cross-worker auth-cache invalidation (Redis pub/sub)
     await audit.start()              # background audit writer — keeps audit off the request path
-    await ingest_queue.start()       # start 30-second COPY flusher
-    from app.core import report_cache
-    await report_cache.start()       # pre-compute report aggregates every 30 min
-    from app.core import tech_cache
-    await tech_cache.start()         # pre-compute tech utilization aggregates every 30 min
-    from app.core import device_janitor
-    await device_janitor.start()     # auto-archive devices inactive beyond company threshold
+    await ingest_queue.start()       # start 30-second COPY flusher (PER-WORKER: drains this process's buffer)
+    # Share live device state with sibling uvicorn workers (per-worker device_cache
+    # would otherwise hide devices that post to another worker).
+    from app.core.DeviceStateSync import DeviceStateSync
+    state_sync = DeviceStateSync(ingest_queue.device_cache)
+    ingest_queue.on_state_update = state_sync.note
+    await state_sync.start()
+
+    # Singleton loops operate on SHARED DB state, so with N workers they must run
+    # in exactly one: gated by a leader election (host file lock + Redis lock,
+    # see app/core/LeaderLock.py). Gaining leadership starts them, losing it stops them.
+    from app.core import report_cache, tech_cache, device_janitor
+    from app.core.LeaderLock import LeaderElector
+
+    _start_singletons, _stop_singletons = make_singleton_hooks((
+        ("report_cache", report_cache),      # pre-compute report aggregates
+        ("tech_cache", tech_cache),          # pre-compute tech utilization aggregates
+        ("device_janitor", device_janitor),  # auto-archive devices inactive beyond threshold
+    ))
+
+    elector = LeaderElector(
+        "background", _start_singletons, _stop_singletons,
+        ttl_secs=settings.LEADER_LOCK_TTL_SECS,
+        interval_secs=settings.LEADER_LOCK_INTERVAL_SECS,
+    )
+    await elector.start()
     yield
-    await device_janitor.stop()      # stop janitor
-    await tech_cache.stop()          # stop tech cache worker
-    await report_cache.stop()        # stop report cache worker
+    await elector.stop()             # stops singleton loops (if leader) + releases both locks
+    await state_sync.stop()
+    ingest_queue.on_state_update = None
     await ingest_queue.stop()        # final COPY flush + clean exit
     await audit.stop()               # flush queued audit rows, then stop the writer
+    await auth_bus.stop()
     await broadcaster.shutdown()     # stop SSE pub/sub listener + close that Redis client
     await RedisClient.shutdown()     # close cache Redis client last
-    from app.db.base import engine, ingest_engine
+    from app.db.base import background_engine, engine, ingest_engine
+    await background_engine.dispose()
     await ingest_engine.dispose()
     await engine.dispose()
 
@@ -147,6 +198,21 @@ def create_app() -> FastAPI:
         skip_paths=("/v1/home/stream",),   # SSE manages its own disconnects
     )
 
+    # Request-body caps (413) and global rate limiting (429). Both are pure ASGI
+    # (SSE is never buffered) and added BEFORE CORS so they sit INSIDE it: their
+    # 413/429 responses flow through CORSMiddleware and carry the CORS headers —
+    # without them the dashboard can't read the error. Order (outer -> inner):
+    # rate limit -> body size -> cancel-on-disconnect -> routes.
+    from app.core.RequestSizeLimit import RequestSizeLimitMiddleware, rules_from_settings
+    if settings.MAX_REQUEST_BODY_BYTES > 0:
+        app.add_middleware(
+            RequestSizeLimitMiddleware,
+            default_max=settings.MAX_REQUEST_BODY_BYTES,
+            rules=rules_from_settings(settings),
+        )
+    from app.core.RateLimitMiddleware import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware)
+
     # allow_origin_regex permanently covers every *.onedge.co subdomain so no
     # env var is needed in production.  CORS_ORIGINS still works for local dev
     # and any extra origins passed via env.
@@ -160,6 +226,12 @@ def create_app() -> FastAPI:
         # needlessly pre-authorizes arbitrary methods/headers for allowed origins.
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Setup-Secret"],
+        # Cross-origin JS can only read CORS-safelisted response headers unless
+        # they are exposed — without this the dashboard cannot read Retry-After
+        # on a 429 (the rate limiter sits INSIDE CORS, so its 429/413 pass
+        # through this middleware and pick the header up).
+        expose_headers=["Retry-After", "X-RateLimit-Limit", "X-RateLimit-Remaining",
+                        "X-RateLimit-Reset", "X-RateLimit-Policy"],
     )
 
     # Compress large JSON payloads on the wire (device/user/log/report lists are
