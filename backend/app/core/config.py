@@ -180,7 +180,9 @@ class Settings(BaseSettings):
     CDN_BASE_URL: str = ""
 
     # ── Online detection ──────────────────────────────────────────────────────
-    ONLINE_CUTOFF_SECS: int = 60
+    # Must exceed the agent heartbeat (~20 s) + the 30 s ingest flush lag with
+    # margin (docker-compose.yml pins the same 90 s).
+    ONLINE_CUTOFF_SECS: int = 90
 
     # ── Agent installer storage ───────────────────────────────────────────────
     MAX_INSTALLER_MB: int = 600

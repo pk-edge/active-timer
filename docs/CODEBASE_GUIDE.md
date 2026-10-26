@@ -35,6 +35,7 @@ main stack).
 |---|---|
 | `agent/` | Desktop agent — single Python codebase for Windows + macOS, packaged via PyInstaller (`timetracker.spec`) |
 | `agent/main.py` | Process entrypoint: wires DB, capture, sync, lock detection, updater, policy, config workers together |
+| `agent/macosRuntime.py` | macOS-only lifecycle hardening: flock single-instance guard, worker supervisor (restart on crash), Qt quit on `stop_event` (+10 s hard-exit), App Nap opt-out — see "macOS agent lifecycle" |
 | `agent/capture/` | `window_watcher`, `screenshotter`, `input_monitor`, `url_watcher` — the actual telemetry sources |
 | `agent/sync/sync_worker.py` | Pushes queued events to `POST /v1/ingest`, exponential backoff offline |
 | `agent/db/local_db.py` | SQLite (`queue.db`) offline event queue + local timer state |
@@ -79,7 +80,7 @@ main stack).
 | `dashboard/src/hooks/` | `useAuth`, `useUser`, `useRealtimeStream` (SSE), `useDevicesPush`, `useDebouncedValue`, `useStartReportJob` (optimistic report-job start) |
 | `dashboard/src/components/ExportReportDialog.tsx`, `lib/reportRange.ts` | Shared date-ranged report export dialog (Devices + Reports pages) and its range rules (UTC normalization, 732-day cap) |
 | `dashboard/src/contexts/ReportJobsContext.tsx` | Async report-generation job tracking (client state) |
-| `installer/macos/`, `installer/windows/` | Platform installer build scripts; company token + API base URL are baked in at build time (not runtime-configurable) |
+| `installer/macos/`, `installer/windows/` | Platform installer build scripts; company token + API base URL are baked in at build time (not runtime-configurable). macOS: `build_macos.sh` → universal2 `.app` → product-archive `.pkg` (hostArchitectures arm64+x86_64, macOS ≥ 12) inside a `.dmg` |
 | `agent-simulator/` | Standalone Dockerized load simulator (default 2000 simulated agents) — independent `docker-compose.yml`, does not touch the main stack |
 | `DEPLOY.md` | End-to-end deployment/build/install walkthrough — read this before touching the release flow |
 | `Desktop_Agent_Auto-Update_Architecture.md` | Full auto-update design (signed manifests, resumable downloads, atomic replace, rollback) — read before touching `updater.py`/`update_verify.py`/`backend/app/core/update_signing.py`/`manifest.py` |
@@ -504,6 +505,34 @@ an older matching event on a busy device isn't discarded by the per-device
 recency cap before search ever sees it. Only `build_search()`'s WHERE half is
 used; the existing `timestamp DESC, id DESC` ordering is unchanged by
 searching, since this is a chronological feed, not a relevance-ranked search.
+
+**Device presence (Online/Offline)**: a device is online when `devices.last_seen`
+(or the live `ingest_queue.device_cache` entry) is within `ONLINE_CUTOFF_SECS`
+(90). `last_seen` moves only on ingest traffic, so an agent with nothing to
+report sends an **empty `POST /v1/ingest` as a heartbeat**: the endpoint calls
+`IngestQueue.touch()`, which writes no activity row, bumps an existing cache
+entry's presence to server time without changing `latest_type`/`current_app`
+(an idle/locked device stays "passive"), never creates an entry for an unknown
+device, never pushes to `DeviceStateSync`, and queues one `UPDATE … last_seen`
+for the next flush (failures re-arm). Cache ordering uses the event timestamp
+(`event_ts`), so a heartbeat's server-time stamp never hides a later real event.
+Only the macOS agent sends heartbeats today (`SyncWorker._maybe_heartbeat`, every
+20 s when the queue is empty); deploy the backend before such an agent.
+
+**macOS agent lifecycle** (all `sys.platform == "darwin"`-gated; Windows paths
+untouched). The pkg's postinstall writes `~/Library/LaunchAgents/com.timetracker.agent.plist`
+for every logged-in GUI user and starts the agent with `launchctl bootstrap`
+(not `open -a`), so launchd owns it: `KeepAlive{SuccessfulExit:false}` restarts a
+crash, a clean exit (SIGTERM, tray quit) stays down. preinstall boots the job
+out and SIGTERMs every agent except `timetracker --update`, force-killing
+stragglers. In the process: `macosRuntime.acquire_single_instance` (flock on
+`agent.lock`; a duplicate exits 0), `run_supervised` restarts any worker that
+dies (fresh instance), and `install_qt_shutdown_watcher` turns `stop_event`
+into `app.quit()` — without it SIGTERM stopped every worker but left the Qt
+process alive, tracking nothing (PRD-3738). The self-updater runs in its own
+session (`start_new_session`, so the job bootout cannot kill it) and the agent
+keeps tracking until the pkg's preinstall replaces it; a failed/cancelled
+install relaunches via `launchctl kickstart`.
 
 **Realtime updates**: dashboard device/status changes fan out via Redis
 pub/sub (`broadcaster.py`) to Server-Sent Events, consumed client-side by

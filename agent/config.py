@@ -199,6 +199,11 @@ class Config:
     SYNC_BATCH_SIZE:          int   = 100
     SYNC_BACKOFF_BASE:        float = 2.0
     SYNC_BACKOFF_CAP:         int   = 300
+    # macOS only: presence heartbeat when the queue is empty (idle / locked), and
+    # a tighter retry cap so a Mac that just regained network or woke from sleep
+    # reappears Online within a minute instead of up to 5.
+    HEARTBEAT_SECS:           int   = 20
+    HEARTBEAT_BACKOFF_CAP_SECS: int = 60
     SCREENSHOT_SYNC_SECS:     int   = 60   # screenshots sync on their own longer interval
 
     # ── Local retention ──────────────────────────────────────────────────────

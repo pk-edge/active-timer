@@ -85,6 +85,7 @@ class UpdateWorker:
         self._shared = shared
         self._stop   = shared["stop_event"]
         self._http   = httpx.Client(timeout=httpx.Timeout(connect=10, read=60, write=60, pool=10))
+        self._updater_proc = None   # macOS: the in-flight `--update` subprocess, if any
 
     def run(self) -> None:
         if not Config.AUTO_UPDATE_ENABLED:
@@ -114,6 +115,11 @@ class UpdateWorker:
             log.info("UpdateWorker stopped")
 
     def _check_once(self) -> None:
+        if self._updater_proc is not None and self._updater_proc.poll() is None:
+            # macOS keeps the agent running during an install: never start a second
+            # updater (and a second admin prompt) while the first is still waiting.
+            log.info("Updater from a previous check is still running — skipping this check")
+            return
         headers = _auth_headers()
         if headers is None:
             return
@@ -213,6 +219,20 @@ class UpdateWorker:
         exit so its binary can be replaced."""
         try:
             uv.write_state(STATE_FILE, status="INSTALLING")
+            if sys.platform == "darwin":
+                # Own session/process group: the pkg's preinstall boots the agent's
+                # launchd job out, and launchd kills the whole job process group —
+                # the updater (and the installer it is driving) must not be in it.
+                self._updater_proc = subprocess.Popen(
+                    [sys.executable, "--update"], close_fds=True, start_new_session=True,
+                )
+                # macOS: the pkg's preinstall stops this agent itself, and the install
+                # starts with an admin prompt the user may dismiss. Stopping first
+                # (the old behaviour) left a Mac with NO tracking whenever that
+                # install didn't complete (PRD-3738) — keep tracking until the
+                # installer actually replaces us.
+                log.info("Spawned updater subprocess for %s; agent keeps running until the installer replaces it", target)
+                return
             subprocess.Popen([sys.executable, "--update"], close_fds=True)
             log.info("Spawned updater subprocess for %s; agent shutting down", target)
             self._stop.set()  # begin clean agent shutdown
@@ -239,7 +259,8 @@ def run_update_install() -> int:
         log.warning("Updater: nothing staged — abort"); _clear_lock(); return 0
 
     _report("INSTALL_STARTED", target, from_version=state.get("from_version"))
-    _wait_for_pid_exit(agent_pid, timeout=60)   # ensure the old agent is gone first
+    if plat != "darwin":
+        _wait_for_pid_exit(agent_pid, timeout=60)   # ensure the old agent is gone first
 
     try:
         if plat == "darwin":
@@ -265,6 +286,11 @@ def run_update_install() -> int:
         log.error("Install failed: %s", e)
         _report("INSTALL_FAILED", target, error_code=str(e), from_version=state.get("from_version"))
         uv.clear_state(STATE_FILE); _clear_lock()
+        if plat == "darwin":
+            # The admin prompt was dismissed or the pkg failed. The agent is normally
+            # still running (it is only stopped by a successful install's preinstall);
+            # if the installer got far enough to stop it, bring it back.
+            _relaunch(plat)
         return 1
 
 
@@ -330,7 +356,15 @@ def _install_windows(msi_path: str) -> None:
 
 def _relaunch(plat: str) -> None:
     if plat == "darwin":
-        subprocess.Popen(["open", str(_macos_app_path())], close_fds=True)
+        # Prefer the LaunchAgent: a no-op when launchd already runs the agent (the
+        # pkg's postinstall bootstraps it), and keeps restart-on-crash. `open` would
+        # race that launch; it is only the fallback when the job isn't loaded.
+        r = subprocess.run(
+            ["launchctl", "kickstart", f"gui/{os.getuid()}/com.timetracker.agent"],
+            capture_output=True, check=False,
+        )
+        if r.returncode != 0:
+            subprocess.Popen(["open", str(_macos_app_path())], close_fds=True)
     elif plat == "win32":
         exe = Path(os.environ.get("LOCALAPPDATA", "")) / "TimeTracker" / "timetracker.exe"
         if exe.exists():

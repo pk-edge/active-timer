@@ -17,6 +17,7 @@ Architecture:
 """
 
 import logging
+import sys
 import time
 
 import httpx
@@ -39,6 +40,7 @@ class SyncWorker:
         self._last_screenshot_sync = 0.0
         self._last_policy_sync     = 0.0
         self._last_purge           = 0.0
+        self._last_contact         = 0.0   # last successful POST (events or heartbeat)
 
         # Persistent HTTP client — TCP connection reused across every sync call.
         self._http = httpx.Client(
@@ -71,7 +73,7 @@ class SyncWorker:
         if self._fails > 0:
             delay = min(
                 Config.SYNC_INTERVAL_SECS * (Config.SYNC_BACKOFF_BASE ** self._fails),
-                Config.SYNC_BACKOFF_CAP,
+                Config.HEARTBEAT_BACKOFF_CAP_SECS if sys.platform == "darwin" else Config.SYNC_BACKOFF_CAP,
             )
             # Wake early only for clean shutdown — do not hammer a broken backend.
             self._stop.wait(timeout=delay)
@@ -112,7 +114,11 @@ class SyncWorker:
 
         batch = self._db.get_unsynced_events(Config.SYNC_BATCH_SIZE)
         if not batch:
-            self._shared["sync_status"] = "ok"
+            # macOS: while recovering from failures the heartbeat decides the
+            # status — don't flash "ok" before it has actually reached the server.
+            if sys.platform != "darwin" or self._fails == 0:
+                self._shared["sync_status"] = "ok"
+            self._maybe_heartbeat(headers)
             return
 
         payload = {
@@ -140,6 +146,7 @@ class SyncWorker:
             r.raise_for_status()
             self._db.mark_events_synced([e["id"] for e in batch])
             self._fails = 0
+            self._last_contact = time.time()
             self._shared["sync_status"] = "ok"
             log.debug("Synced %d events", len(batch))
 
@@ -152,6 +159,37 @@ class SyncWorker:
             self._fails += 1
             self._shared["sync_status"] = "offline" if self._fails > 5 else "syncing"
             log.warning("Sync failed (attempt %d): %s", self._fails, e)
+
+    # ── Presence heartbeat (macOS) ───────────────────────────────────────────
+
+    def _maybe_heartbeat(self, headers: dict) -> None:
+        """Tell the backend we're alive when there is nothing else to send.
+
+        devices.last_seen is refreshed by ingest traffic only, and an idle or
+        screen-locked agent emits no events — so a healthy, connected Mac showed
+        Offline (PRD-3738). An empty ingest POST refreshes presence server-side
+        without writing an activity row. Runs only on macOS; the empty-queue path
+        stays a no-op elsewhere. Failures feed the normal backoff.
+        """
+        if sys.platform != "darwin":
+            return
+        if time.time() - self._last_contact < Config.HEARTBEAT_SECS:
+            return
+        try:
+            r = self._http.post(Config.INGEST_ENDPOINT, json={"events": []}, headers=headers)
+            if r.status_code == 401:
+                self._handle_unauthorized()
+                self._fails += 1
+                self._shared["sync_status"] = "offline" if self._fails > 5 else "syncing"
+                return
+            r.raise_for_status()
+            self._fails = 0
+            self._last_contact = time.time()
+            self._shared["sync_status"] = "ok"
+        except Exception as e:
+            self._fails += 1
+            self._shared["sync_status"] = "offline" if self._fails > 5 else "syncing"
+            log.warning("Heartbeat failed (attempt %d): %s", self._fails, e)
 
     # ── Screenshot sync ──────────────────────────────────────────────────────
 
