@@ -65,6 +65,9 @@ async def ingest_events(
     dedicated ingest worker pool.
     """
     if not payload.events:
+        # Empty POST = presence heartbeat (idle / locked / nothing-to-report
+        # agents). Refreshes last_seen only; writes no activity row.
+        ingest_queue.touch(device_id)
         return IngestResponse(received=0, skipped=0)
 
     rows, skipped = [], 0
@@ -92,6 +95,7 @@ async def ingest_events(
         })
 
     if not rows:
+        ingest_queue.touch(device_id)   # authenticated + reachable even if nothing usable
         return IngestResponse(received=0, skipped=skipped)
 
     # ── Enqueue each row ──────────────────────────────────────────────────────

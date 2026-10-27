@@ -1,4 +1,5 @@
 import logging
+import os
 import signal
 import sys
 import threading
@@ -138,7 +139,7 @@ def _preflight_macos_permissions() -> None:
         log.debug("Screen-capture preflight unavailable: %s", e)
 
 
-def main() -> None:
+def main() -> int:
     log.info("TimeTracker agent starting")
     _preflight_macos_permissions()
 
@@ -171,19 +172,33 @@ def main() -> None:
     autostart.install()
 
     # 4. Daemon worker threads (silently skip DB writes until enrolled)
-    workers = [
-        WindowWatcher(shared),
-        InputMonitor(shared),
-        UrlWatcher(shared),
-        SyncWorker(shared),
-        UpdateWorker(shared),
-        ConfigWorker(shared),
+    worker_classes = [
+        WindowWatcher,
+        InputMonitor,
+        UrlWatcher,
+        SyncWorker,
+        UpdateWorker,
+        ConfigWorker,
     ]
     if Config.SCREENSHOTS_ENABLED:
-        workers.insert(1, Screenshotter(shared))
-    for w in workers:
-        t = threading.Thread(target=w.run, name=w.__class__.__name__, daemon=True)
-        t.start()
+        worker_classes.insert(1, Screenshotter)
+    if sys.platform == "darwin":
+        # macOS: a worker that dies must come back — a dead SyncWorker/
+        # WindowWatcher on a still-running process is the "Offline, no activity"
+        # state of PRD-3738. Each restart builds a fresh instance.
+        import macosRuntime
+        for cls in worker_classes:
+            if cls is UpdateWorker and not Config.AUTO_UPDATE_ENABLED:
+                continue   # returns at once by design — nothing to supervise
+            threading.Thread(
+                target=macosRuntime.run_supervised,
+                args=(lambda c=cls: c(shared), stop_event, cls.__name__),
+                name=cls.__name__, daemon=True,
+            ).start()
+    else:
+        for w in [cls(shared) for cls in worker_classes]:
+            t = threading.Thread(target=w.run, name=w.__class__.__name__, daemon=True)
+            t.start()
 
     # 5. First-run only: silently detect employee email from browser profiles.
     # Already-enrolled devices skip this entirely.
@@ -220,6 +235,7 @@ def main() -> None:
     # If Qt unavailable keep main alive
     while not stop_event.is_set():
         time.sleep(1)
+    return int(shared.get("exit_code") or 0)
 
 
 def _run_widget(shared: dict) -> None:
@@ -237,6 +253,12 @@ def _run_widget(shared: dict) -> None:
         app = QApplication.instance() or QApplication(sys.argv)
         # Don't quit when the floating window is closed — it just hides.
         app.setQuitOnLastWindowClosed(False)
+
+        if sys.platform == "darwin":
+            # SIGTERM / SIGINT / updater only set stop_event; without this the Qt
+            # loop never exits and the process lingers with every worker stopped.
+            import macosRuntime
+            _shutdown_watcher = macosRuntime.install_qt_shutdown_watcher(app, stop_event)  # noqa: F841 — keep referenced
 
         widget = FloatingWidget(shared)
         # Start hidden if the device is already known headless (avoids a flash);
@@ -324,6 +346,9 @@ if __name__ == "__main__":
     # health-check, rollback. Runs as its OWN process while the agent exits, so it
     # skips the single-instance guard below. Additive — normal launch is unaffected.
     if "--update" in sys.argv:
+        if sys.platform == "darwin":
+            import macosRuntime
+            macosRuntime.redact_request_logs()
         from updater import run_update_install
         sys.exit(run_update_install())
 
@@ -333,5 +358,14 @@ if __name__ == "__main__":
             sys.exit(0)
         protect_process()
         install_watchdog()
+    elif sys.platform == "darwin":
+        # open -a + the login LaunchAgent can otherwise run two agents at once.
+        import macosRuntime
+        # launchd sets XPC_SERVICE_NAME to the job label for the copy it starts.
+        launchd_copy = os.environ.get("XPC_SERVICE_NAME") == "com.timetracker.agent"
+        if not macosRuntime.acquire_single_instance(Config.BASE_DIR, wait=launchd_copy):
+            sys.exit(0)
+        macosRuntime.begin_activity()
+        macosRuntime.redact_request_logs()
 
-    main()
+    sys.exit(main())

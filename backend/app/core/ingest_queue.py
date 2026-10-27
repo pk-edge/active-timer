@@ -130,6 +130,9 @@ class IngestQueue:
         # Read by the realtime SSE endpoint — updated at enqueue time, never
         # delayed by the flush interval.
         self.device_cache: dict[str, dict] = {}
+        # Devices that sent a bare presence heartbeat (empty ingest POST) since
+        # the last flush — their devices.last_seen is refreshed in one UPDATE.
+        self._touched: set[str] = set()
         # Optional hook(device_id, state) fired on every cache update — wired in
         # main.py to DeviceStateSync so sibling uvicorn workers see the state.
         self.on_state_update = None
@@ -179,6 +182,32 @@ class IngestQueue:
         except asyncio.QueueFull:
             return False
 
+    def touch(self, device_id: str) -> None:
+        """Record "this device is alive right now" without any activity event.
+
+        Agents that are idle, screen-locked or simply have nothing queued send an
+        empty ingest POST as a heartbeat. The authoritative effect is the
+        devices.last_seen UPDATE at the next flush (every reader's online check
+        honours it, on every worker). Locally, an EXISTING cache entry also gets
+        its presence bumped to server time so this worker's realtime view reacts
+        immediately — its latest_type / current_app are left alone, so an
+        idle/locked device stays "passive".
+
+        Deliberately not done: creating a cache entry for an unknown device
+        (there is no state to show — it would read as "active") and pushing to
+        DeviceStateSync (a heartbeat carries no state, so it must never
+        overwrite a sibling's newer latest_type in Redis).
+        """
+        self._touched.add(device_id)
+        existing = self.device_cache.get(device_id)
+        if existing is None:
+            return
+        now = datetime.now(timezone.utc)
+        cached_ts = existing.get("last_seen")
+        if cached_ts is None or now > cached_ts:
+            existing["last_seen"] = now
+            existing["updated_at"] = time.time()
+
     # ── Timer loop ────────────────────────────────────────────────────────────
 
     async def _flusher_loop(self) -> None:
@@ -205,11 +234,17 @@ class IngestQueue:
             except asyncio.QueueEmpty:
                 break
 
+        touched, self._touched = self._touched, set()
+
         if not batch:
+            if touched and await self._touch_to_db(touched):
+                from app.core import broadcaster
+                await broadcaster.publish("devices_updated")
             return
 
         rows       = [b["row"]       for b in batch]
-        device_ids = list({b["device_id"] for b in batch})
+        # Heartbeat-only devices ride the same transaction's last_seen UPDATE.
+        device_ids = list({b["device_id"] for b in batch} | touched)
 
         log.debug("[%s] flushing %d events, %d devices", label, len(rows), len(device_ids))
 
@@ -222,6 +257,7 @@ class IngestQueue:
         except asyncio.CancelledError:
             # The DB write was interrupted (shutdown during flush).
             # Put everything back so the final stop() flush can write it.
+            self._touched |= touched
             for item in reversed(batch):
                 try:
                     self._q.put_nowait(item)
@@ -230,7 +266,33 @@ class IngestQueue:
             raise
 
         except Exception as exc:
+            self._touched |= touched     # heartbeat-only devices retry next flush
             await self._handle_write_failure(batch, exc)
+
+    async def _touch_to_db(self, device_ids: set[str]) -> bool:
+        """Presence-only write: one UPDATE for every heartbeat-only device.
+
+        Best-effort — a failure re-arms the ids for the next flush. Returns True
+        when the UPDATE committed.
+        """
+        from app.db.base import ingest_engine
+
+        try:
+            async with ingest_engine.connect() as conn:
+                raw = await conn.get_raw_connection()
+                pg = raw.driver_connection  # asyncpg.Connection
+                await pg.execute(
+                    _LAST_SEEN_SQL,
+                    [uuid.UUID(d) if isinstance(d, str) else d for d in device_ids],
+                )
+        except asyncio.CancelledError:
+            self._touched |= device_ids
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._touched |= device_ids
+            log.warning("Heartbeat last_seen update failed (%d device(s)): %s", len(device_ids), exc)
+            return False
+        return True
 
     # ── PostgreSQL COPY write ─────────────────────────────────────────────────
 
@@ -399,11 +461,15 @@ class IngestQueue:
         row = item["row"]
         existing   = self.device_cache.get(did, {})
         ts         = row.get("timestamp")
-        cached_ts  = existing.get("last_seen")
+        # Order by EVENT time. last_seen may hold a heartbeat's server-time stamp
+        # (touch()), which must not make a newer real event look stale.
+        cached_ts  = existing.get("event_ts") or existing.get("last_seen")
 
         if ts and (cached_ts is None or ts > cached_ts):
+            seen = existing.get("last_seen")
             self.device_cache[did] = {
-                "last_seen":   ts,
+                "last_seen":   ts if seen is None or ts > seen else seen,
+                "event_ts":    ts,
                 "latest_type": row.get("event_type"),
                 "current_app": (
                     row.get("app_name")
