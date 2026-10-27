@@ -13,6 +13,7 @@ run fully unattended after login with no keychain prompts.
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -60,8 +61,19 @@ def save(
 
     _IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = _IDENTITY_FILE.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f)
+    if sys.platform == "darwin":
+        # macOS: the JWT is never readable by others, not even for an instant —
+        # create the temp file owner-only instead of chmod-ing afterwards.
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    else:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f)
     os.replace(tmp, _IDENTITY_FILE)
 
     try:

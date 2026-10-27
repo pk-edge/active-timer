@@ -15,6 +15,10 @@ pywin32==308; sys_platform == "win32"
 # macOS — installed automatically by pip on macOS
 pyobjc-framework-Cocoa==10.3.2; sys_platform == "darwin"
 pyobjc-framework-Quartz==10.3.2; sys_platform == "darwin"
+# cryptography's cffi dependency, pinned on macOS to a release that ships BOTH
+# arm64 and x86_64 wheels — build_macos.sh fuses them into the universal2 .so the
+# one-size-fits-every-Mac bundle needs (2.1+ has no x86_64 macOS wheel).
+cffi==2.0.0; sys_platform == "darwin"
 
 # Packaging
 pyinstaller==6.13.0

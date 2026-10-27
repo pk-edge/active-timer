@@ -128,10 +128,19 @@ class LockDetector:
         # starts while the screen is already locked, pause_event is set
         # immediately — not 2 seconds later — preventing the WindowWatcher
         # from tracking loginwindow during that gap.
+        def _fire(cb) -> None:
+            # A failing handler (e.g. a locked queue.db) must not kill this thread:
+            # it is the only thing that ever clears pause_event, so a dead detector
+            # would leave every capture thread paused for good.
+            try:
+                cb()
+            except Exception as e:  # noqa: BLE001
+                log.warning("Lock/unlock handler failed — detector keeps running: %s", e)
+
         was_locked = _read_locked()
         if was_locked:
             log.info("Screen already locked at agent start")
-            self._on_lock()
+            _fire(self._on_lock)
 
         log.info("LockDetector polling CGSession every 2 s")
         while True:
@@ -141,11 +150,11 @@ class LockDetector:
             if locked and not was_locked:
                 was_locked = True
                 log.info("Screen locked")
-                self._on_lock()
+                _fire(self._on_lock)
             elif not locked and was_locked:
                 was_locked = False
                 log.info("Screen unlocked")
-                self._on_unlock()
+                _fire(self._on_unlock)
 
     # ── Linux ──────────────────────────────────────────────────────────────
 

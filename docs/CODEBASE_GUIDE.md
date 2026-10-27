@@ -35,6 +35,7 @@ main stack).
 |---|---|
 | `agent/` | Desktop agent — single Python codebase for Windows + macOS, packaged via PyInstaller (`timetracker.spec`) |
 | `agent/main.py` | Process entrypoint: wires DB, capture, sync, lock detection, updater, policy, config workers together |
+| `agent/macosRuntime.py` | macOS-only lifecycle hardening: flock single-instance guard, worker supervisor (restart on crash), Qt quit on `stop_event` (+10 s hard-exit), App Nap opt-out — see "macOS agent lifecycle" |
 | `agent/capture/` | `window_watcher`, `screenshotter`, `input_monitor`, `url_watcher` — the actual telemetry sources |
 | `agent/sync/sync_worker.py` | Pushes queued events to `POST /v1/ingest`, exponential backoff offline |
 | `agent/db/local_db.py` | SQLite (`queue.db`) offline event queue + local timer state |
@@ -79,7 +80,7 @@ main stack).
 | `dashboard/src/hooks/` | `useAuth`, `useUser`, `useRealtimeStream` (SSE), `useDevicesPush`, `useDebouncedValue`, `useStartReportJob` (optimistic report-job start) |
 | `dashboard/src/components/ExportReportDialog.tsx`, `lib/reportRange.ts` | Shared date-ranged report export dialog (Devices + Reports pages) and its range rules (UTC normalization, 732-day cap) |
 | `dashboard/src/contexts/ReportJobsContext.tsx` | Async report-generation job tracking (client state) |
-| `installer/macos/`, `installer/windows/` | Platform installer build scripts; company token + API base URL are baked in at build time (not runtime-configurable) |
+| `installer/macos/`, `installer/windows/` | Platform installer build scripts; company token + API base URL are baked in at build time (not runtime-configurable). macOS: `build_macos.sh` → universal2 `.app` → per-user product-archive `.pkg` (~/Applications, no admin password, hostArchitectures arm64+x86_64, macOS ≥ 12) inside a `.dmg` |
 | `agent-simulator/` | Standalone Dockerized load simulator (default 2000 simulated agents) — independent `docker-compose.yml`, does not touch the main stack |
 | `DEPLOY.md` | End-to-end deployment/build/install walkthrough — read this before touching the release flow |
 | `Desktop_Agent_Auto-Update_Architecture.md` | Full auto-update design (signed manifests, resumable downloads, atomic replace, rollback) — read before touching `updater.py`/`update_verify.py`/`backend/app/core/update_signing.py`/`manifest.py` |
@@ -504,6 +505,60 @@ an older matching event on a busy device isn't discarded by the per-device
 recency cap before search ever sees it. Only `build_search()`'s WHERE half is
 used; the existing `timestamp DESC, id DESC` ordering is unchanged by
 searching, since this is a chronological feed, not a relevance-ranked search.
+
+**Device presence (Online/Offline)**: a device is online when `devices.last_seen`
+(or the live `ingest_queue.device_cache` entry) is within `ONLINE_CUTOFF_SECS`
+(90). `last_seen` moves only on ingest traffic, so an agent with nothing to
+report sends an **empty `POST /v1/ingest` as a heartbeat**: the endpoint calls
+`IngestQueue.touch()`, which writes no activity row, bumps an existing cache
+entry's presence to server time without changing `latest_type`/`current_app`
+(an idle/locked device stays "passive"), never creates an entry for an unknown
+device, never pushes to `DeviceStateSync`, and queues one `UPDATE … last_seen`
+for the next flush (failures re-arm). Cache ordering uses the event timestamp
+(`event_ts`), so a heartbeat's server-time stamp never hides a later real event.
+Only the macOS agent sends heartbeats today (`SyncWorker._maybe_heartbeat`, every
+20 s when the queue is empty); deploy the backend before such an agent.
+
+**macOS agent lifecycle** (all `sys.platform == "darwin"`-gated; Windows paths
+untouched). The macOS pkg is a **per-user** install (Distribution enables only
+`currentUserHome`): the app lands in `~/Applications/TimeTracker.app`, Installer
+runs the scripts **as the user** (they refuse root), and no admin password is
+ever needed. preinstall boots the `com.timetracker.agent` LaunchAgent out,
+SIGTERMs this user's agents except `timetracker --update` (force-killing
+stragglers) and clears `identity.json` (re-enroll → server-side `agent_version`
+refresh). postinstall writes `~/Library/LaunchAgents/com.timetracker.agent.plist`,
+`launchctl enable`s the job (one switched off in Login Items refuses to load) and
+starts it with `launchctl bootstrap` (not `open -a`), so launchd owns it:
+`KeepAlive{SuccessfulExit:false}` restarts a crash, a clean exit (SIGTERM, tray
+quit) stays down; a system-requested quit (power-off/logout notification — also
+what "Quit & Reopen" after a Screen Recording grant looks like) exits 75 so
+launchd restarts the agent if the session continues. In the process:
+`macosRuntime.acquire_single_instance` (flock on `agent.lock`; a duplicate exits 0,
+except the launchd-started copy — `XPC_SERVICE_NAME=com.timetracker.agent` — which
+waits as a standby and takes over when the other copy exits), `run_supervised` restarts any worker that
+dies (fresh instance), and `install_qt_shutdown_watcher` turns `stop_event` into
+`app.quit()` — without it SIGTERM stopped every worker but left the Qt process
+alive, tracking nothing (PRD-3738).
+
+**macOS self-update** (dashboard Agents page → upload `.dmg` → **Activate**;
+`mandatory` skips the "defer while the user is active" rule). `UpdateWorker`
+checks `/v1/updates/check` 30 s + 0–300 s after start, then every 6 h; downloads
+the presigned URL **without** the device JWT (sent only to the API host — S3/MinIO
+reject dual auth and it must not leak), rejects an offer whose version /
+installer_type are not plain values or do not match the signed manifest
+(platform, expiry included), verifies sha256 — and the Ed25519 signature
+**strictly** when `build_macos.sh` embedded a key via `UPDATE_PUBLIC_KEY_FILE`
+(macOS trusts only a key inside the bundle; without one it is sha256-only) — then spawns
+`timetracker --update` in its own session (survives the job bootout) while the
+agent keeps tracking. The updater mounts the DMG read-only via `hdiutil attach
+-plist` into a private temp dir, runs `installer -pkg … -target
+CurrentUserHomeDirectory` (silent, no password) after re-checking the staged
+file's sha256, always detaches, and reports `INSTALL_SUCCESS`/`INSTALL_FAILED`
+with credentials captured before preinstall deletes them (retrying with the
+re-enrolled token on a 401); a failure relaunches via `launchctl kickstart`.
+httpx request logs have presigned query strings redacted; `identity.json` is
+created 0600. The version typed on
+upload must equal the uploaded build's `agent/version.py`.
 
 **Realtime updates**: dashboard device/status changes fan out via Redis
 pub/sub (`broadcaster.py`) to Server-Sent Events, consumed client-side by

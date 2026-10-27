@@ -9,8 +9,20 @@ _win_imports = [
 ] if sys.platform == "win32" else []
 
 _mac_imports = [
-    "AppKit", "Foundation", "Quartz", "objc",
+    "AppKit", "Foundation", "Quartz", "objc", "macosRuntime",
 ] if sys.platform == "darwin" else []
+
+# macOS ships ONE universal2 bundle that runs natively on Apple Silicon and
+# Intel Macs. That needs every bundled binary to be fat: psutil and Pillow only
+# publish single-arch macOS wheels and are not used on macOS at runtime
+# (psutil serves the Windows/Linux window lookup; screenshots go through mss),
+# so they are kept out of the macOS build.
+_IS_MAC = sys.platform == "darwin"
+_mac_excludes = ["psutil", "PIL"] if _IS_MAC else []
+
+if _IS_MAC:
+    sys.path.insert(0, str(Path(".").resolve()))
+    from version import __version__ as _VERSION
 
 a = Analysis(
     ["main.py"],
@@ -30,7 +42,7 @@ a = Analysis(
         "protection.win_admin",
         "policy.policy_manager",
         # Cross-platform
-        "psutil",
+        *([] if _IS_MAC else ["psutil"]),
         "mss",
         "mss.tools",
         "pynput.keyboard",
@@ -51,6 +63,7 @@ a = Analysis(
         "ftplib",
         "imaplib",
         "smtplib",
+        *_mac_excludes,
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -69,10 +82,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=not _IS_MAC,        # UPX breaks arm64 code signatures — never on macOS
     console=False,          # no console window — runs silently in background
     disable_windowed_traceback=False,
-    target_arch=None,
+    target_arch="universal2" if _IS_MAC else None,
     codesign_identity=None,
     entitlements_file=None,
     icon=None,              # replace with "assets/icon.ico" (Windows) when available
@@ -84,7 +97,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=not _IS_MAC,
     upx_exclude=[],
     name="timetracker",
 )
@@ -97,9 +110,16 @@ if sys.platform == "darwin":
         icon=None,          # replace with "assets/icon.icns" when available
         bundle_identifier="com.timetracker.agent",
         info_plist={
-            "CFBundleShortVersionString": "1.1.3",
-            "CFBundleVersion":            "1.1.3",
+            "CFBundleShortVersionString": _VERSION,
+            "CFBundleVersion":            _VERSION,
             "NSHighResolutionCapable":    True,
+            # PySide6 6.8 (Qt 6.8) wheels require macOS 12 Monterey or later.
+            "LSMinimumSystemVersion":     "12.0",
+            # A windowless background agent must not be napped or auto-terminated
+            # by macOS — that silently stops capture/sync (PRD-3738).
+            "NSAppSleepDisabled":                True,
+            "NSSupportsAutomaticTermination":    False,
+            "NSSupportsSuddenTermination":       False,
             "NSAppleEventsUsageDescription":
                 "TimeTracker reads the active window to track application usage.",
         },

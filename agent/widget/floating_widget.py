@@ -201,6 +201,11 @@ class FloatingWidget(QWidget):
         # promptly so the agent never blocks the power action. aboutToQuit runs
         # the final daily flush + session end; autostart relaunches on next login.
         log.info("macOS power-off/logout detected — quitting agent cleanly")
+        # Non-zero exit: on a real logout launchd tears the session down anyway,
+        # but when the system quit us and the session CONTINUES (e.g. "Quit &
+        # Reopen" after a Screen Recording grant) launchd restarts the agent
+        # (KeepAlive{SuccessfulExit:false}) instead of leaving it unsupervised.
+        self._shared["exit_code"] = 75   # EX_TEMPFAIL
         self._allow_close = True
         QApplication.quit()
 

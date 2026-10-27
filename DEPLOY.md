@@ -47,20 +47,28 @@ The enrollment token is what links each laptop to your company in the backend.
 
 ## Step 3 — Build the installer
 
-### macOS → `TimeTracker.dmg`
+### macOS → `TimeTracker-<version>.dmg`
 
-**Build machine needs:** macOS, Python 3.11+ with venv set up (`agent/.venv`)
+**Build machine needs:** macOS with Xcode command-line tools, and `agent/.venv`
+created from the **python.org universal2** Python (Homebrew/pyenv builds are
+single-arch and the build refuses them):
+
+```bash
+cd agent
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
 
 ```bash
 cd installer/macos
-COMPANY_TOKEN="paste-your-token-here" \
-API_BASE="http://localhost:8000" \
-./build_dmg.sh
+./build_macos.sh                          # token + URL from agent/backends.json
+./build_macos.sh "<token>" "<api_url>"    # or embed explicit values
 ```
 
-Output: `installer/macos/TimeTracker.dmg` (~190 MB, fully self-contained)
-
-PyInstaller runs automatically if needed. No other prerequisites.
+Output: `installer/macos/TimeTracker-<version>.dmg` (~80 MB, containing a `.pkg`).
+One build runs natively on every supported Mac — Apple Silicon and Intel,
+macOS 12 Monterey or later (the build fails if any bundled binary is not
+universal2).
 
 ---
 
@@ -90,11 +98,15 @@ WiX Toolset v4 is downloaded and installed automatically via `dotnet tool instal
 
 ### macOS
 
-1. Copy `TimeTracker.dmg` to the laptop (email, USB, shared drive — any way)
-2. Open the DMG → drag **TimeTracker** into **Applications**
-3. Launch **TimeTracker** once from Applications
-4. The floating timer appears — agent is running and enrolled
-5. **Auto-starts on every login automatically** (LaunchAgent registered on first run)
+1. Copy `TimeTracker-<version>.dmg` to the laptop (email, USB, shared drive — any way)
+2. Open the DMG → double-click the `.pkg` → **Install** — installs for the current
+   user into `~/Applications`, **no admin password needed**
+3. The installer starts the agent immediately under launchd — no manual launch
+4. **Auto-starts on every login** and is restarted automatically if it ever crashes
+   (LaunchAgent `com.timetracker.agent`)
+5. **Updates are silent**: upload the new `.dmg` on the dashboard's Agents page and
+   click **Activate** (mark it *mandatory* to roll out within one check). The
+   version you type must equal `agent/version.py` of that build.
 
 ### Windows
 
@@ -117,7 +129,7 @@ into the installer at build time — no configuration needed on the target lapto
 
 ```bash
 # macOS — rebuild
-COMPANY_TOKEN="new-token" API_BASE="https://api.prod.example.com" ./build_dmg.sh
+./build_macos.sh "new-token" "https://api.prod.example.com"
 
 # Windows — rebuild (re-use existing PyInstaller output)
 .\build_msi.ps1 -CompanyToken "new-token" -ApiBase "https://api.prod.example.com" -SkipPyInstaller
