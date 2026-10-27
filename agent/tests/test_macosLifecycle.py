@@ -560,6 +560,27 @@ def test_presigned_signature_is_redacted_from_logs():
     assert "X-Amz-Signature" not in rec.getMessage() and "<redacted>" in rec.getMessage()
 
 
+def test_redaction_covers_exception_text_from_other_loggers():
+    import logging
+    msg = "download attempt 1/3 failed: Client error '403' for url 'https://s3.example/k?X-Amz-Signature=abc&X-Amz-Credential=x'"
+    rec = logging.LogRecord("updater", logging.WARNING, "", 0, "%s", (msg,), None)
+    macosRuntime._RedactQuery().filter(rec)
+    out = rec.getMessage()
+    assert "X-Amz-Signature" not in out and "X-Amz-Credential" not in out and "https://s3.example/k?<redacted>" in out
+
+
+def test_strict_mode_refuses_an_omitted_signature_when_a_key_is_bundled(tmp_path):
+    import update_verify as uv
+    f = tmp_path / "x.dmg"
+    f.write_bytes(b"payload")
+    m = {"files": [{"sha256": uv.sha256_file(str(f)), "size": 7}], "version": "9.9.9"}
+    key = {"key_id": "v1", "public_key": "AAAA"}
+    ok, why = uv.verify_download(manifest=m, signature=None, file_path=str(f), trust_key=key, strict=True)
+    assert ok is False and "missing signature" in why
+    ok, _ = uv.verify_download(manifest=m, signature=None, file_path=str(f), trust_key=None, strict=True)
+    assert ok is True                                    # no key bundled: sha256-only, unchanged
+
+
 @mac_only
 def test_launchd_copy_waits_as_standby_and_takes_over(tmp_path):
     code = ("import sys; sys.path.insert(0, %r); import macosRuntime, pathlib; "

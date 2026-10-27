@@ -148,22 +148,38 @@ def run_supervised(
 
 # ── Log hygiene ──────────────────────────────────────────────────────────────
 
+import re as _re
+
+# Any http(s) URL with a query string: presigned S3/CDN links carry a live
+# signature there, and exception text (e.g. HTTPStatusError) embeds the URL.
+_URL_QUERY = _re.compile(r"(https?://[^\s'\"<>]+?)\?[^\s'\"<>]*")
+
+
+def redact_text(text: str) -> str:
+    return _URL_QUERY.sub(lambda m: m.group(1) + "?<redacted>", text)
+
+
 class _RedactQuery(logging.Filter):
-    """httpx logs every request URL at INFO. Presigned S3 download URLs carry a
-    live signature in their query string — keep it out of agent.log."""
+    """Redacts URL query strings from the FORMATTED message of every record that
+    passes through a handler — httpx request logs, exception text, anything."""
 
     def filter(self, record):  # noqa: A003
         try:
-            args = record.args if isinstance(record.args, tuple) else ()
-            if args and "?" in str(args[1] if len(args) > 1 else ""):
-                record.args = (args[0], str(args[1]).split("?", 1)[0] + "?<redacted>") + args[2:]
+            msg = record.getMessage()
+            if "?" in msg:
+                record.msg = redact_text(msg)
+                record.args = ()
         except Exception:  # noqa: BLE001 — never drop a log line over this
             pass
         return True
 
 
 def redact_request_logs() -> None:
-    logging.getLogger("httpx").addFilter(_RedactQuery())
+    f = _RedactQuery()
+    root = logging.getLogger()
+    for h in root.handlers:
+        if not any(isinstance(x, _RedactQuery) for x in h.filters):
+            h.addFilter(f)
 
 
 # ── Qt shutdown ──────────────────────────────────────────────────────────────

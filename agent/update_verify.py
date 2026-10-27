@@ -89,6 +89,11 @@ def verify_download(*, manifest: dict, signature: str | None, file_path: str,
     if actual.lower() != expected.lower():
         return False, f"sha256 mismatch ({actual} != {expected})"
 
+    if strict and trust_key and not signature:
+        # A bundled publisher key means signatures are mandatory: an omitted
+        # signature must not downgrade the install to sha256-only.
+        return False, "missing signature (strict)"
+
     if trust_key and signature:
         if verify_signature(canonical_manifest(manifest), signature, trust_key["public_key"]):
             return True, "verified: sha256 + signature"
