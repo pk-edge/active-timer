@@ -38,13 +38,18 @@ _activity_token = None   # NSProcessInfo activity token — must stay referenced
 
 # ── Single instance ──────────────────────────────────────────────────────────
 
-def acquire_single_instance(base_dir: Path) -> bool:
-    """Take an exclusive, non-blocking flock on <base_dir>/agent.lock.
+def acquire_single_instance(base_dir: Path, wait: bool = False) -> bool:
+    """Take an exclusive flock on <base_dir>/agent.lock.
 
     Returns False when another agent already holds it (caller exits 0 — with
     launchd's KeepAlive{SuccessfulExit:false} that is not respawned). The kernel
     drops the lock when the process dies for any reason, so a crashed agent can
     never leave a stale lock behind.
+
+    wait=True (the copy launchd started, while another copy — e.g. one macOS
+    relaunched itself after "Quit & Reopen" — is running): stay as a STANDBY that
+    blocks on the lock and takes over the moment the other copy exits, so the
+    agent is always back under launchd supervision.
     """
     global _lock_fh
     try:
@@ -56,8 +61,17 @@ def acquire_single_instance(base_dir: Path) -> bool:
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        fh.close()
-        return False          # genuinely held by another running agent
+        if not wait:
+            fh.close()
+            return False      # genuinely held by another running agent
+        log.info("Another agent is running — launchd copy waiting as standby")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)   # blocks until it is released
+        except OSError as e:
+            log.warning("Standby wait failed (%s) — exiting", e)
+            fh.close()
+            return False
+        log.info("Standby took over the agent lock")
     except OSError as e:
         # e.g. a network home folder without flock support: run unguarded rather
         # than exit and never track at all.
@@ -130,6 +144,26 @@ def run_supervised(
             return
         # A worker that stayed up for a while was healthy: reset the backoff.
         delay = backoff if time.monotonic() - started > 5 * max_backoff else min(delay * 2, max_backoff)
+
+
+# ── Log hygiene ──────────────────────────────────────────────────────────────
+
+class _RedactQuery(logging.Filter):
+    """httpx logs every request URL at INFO. Presigned S3 download URLs carry a
+    live signature in their query string — keep it out of agent.log."""
+
+    def filter(self, record):  # noqa: A003
+        try:
+            args = record.args if isinstance(record.args, tuple) else ()
+            if args and "?" in str(args[1] if len(args) > 1 else ""):
+                record.args = (args[0], str(args[1]).split("?", 1)[0] + "?<redacted>") + args[2:]
+        except Exception:  # noqa: BLE001 — never drop a log line over this
+            pass
+        return True
+
+
+def redact_request_logs() -> None:
+    logging.getLogger("httpx").addFilter(_RedactQuery())
 
 
 # ── Qt shutdown ──────────────────────────────────────────────────────────────

@@ -1,4 +1,5 @@
 import logging
+import os
 import signal
 import sys
 import threading
@@ -138,7 +139,7 @@ def _preflight_macos_permissions() -> None:
         log.debug("Screen-capture preflight unavailable: %s", e)
 
 
-def main() -> None:
+def main() -> int:
     log.info("TimeTracker agent starting")
     _preflight_macos_permissions()
 
@@ -234,6 +235,7 @@ def main() -> None:
     # If Qt unavailable keep main alive
     while not stop_event.is_set():
         time.sleep(1)
+    return int(shared.get("exit_code") or 0)
 
 
 def _run_widget(shared: dict) -> None:
@@ -344,6 +346,9 @@ if __name__ == "__main__":
     # health-check, rollback. Runs as its OWN process while the agent exits, so it
     # skips the single-instance guard below. Additive — normal launch is unaffected.
     if "--update" in sys.argv:
+        if sys.platform == "darwin":
+            import macosRuntime
+            macosRuntime.redact_request_logs()
         from updater import run_update_install
         sys.exit(run_update_install())
 
@@ -356,8 +361,11 @@ if __name__ == "__main__":
     elif sys.platform == "darwin":
         # open -a + the login LaunchAgent can otherwise run two agents at once.
         import macosRuntime
-        if not macosRuntime.acquire_single_instance(Config.BASE_DIR):
+        # launchd sets XPC_SERVICE_NAME to the job label for the copy it starts.
+        launchd_copy = os.environ.get("XPC_SERVICE_NAME") == "com.timetracker.agent"
+        if not macosRuntime.acquire_single_instance(Config.BASE_DIR, wait=launchd_copy):
             sys.exit(0)
         macosRuntime.begin_activity()
+        macosRuntime.redact_request_logs()
 
-    main()
+    sys.exit(main())

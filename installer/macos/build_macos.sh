@@ -5,7 +5,8 @@
 #   1. Open the DMG
 #   2. Double-click TimeTracker-<version>.pkg
 #   3. Click through the installer wizard → Install
-#   4. TimeTracker is copied to /Applications and launches immediately
+#   4. TimeTracker is installed for the current user (~/Applications, no
+#      admin password) and starts immediately under launchd
 #
 # Usage:
 #   ./build_macos.sh                       — uses enrollment_token.txt + backends.json if present
@@ -127,6 +128,24 @@ elif [ -f "$AGENT_DIR/backends.json" ]; then
     echo "Embedded backends.json."
 fi
 
+# Optional publisher key for update signatures. When UPDATE_PUBLIC_KEY_FILE
+# points at an update_keys.json holding the PRODUCTION Ed25519 public key (the
+# pair of the backend's AGENT_SIGNING_PRIVATE_KEY), the macOS agent requires a
+# valid manifest signature before installing any update. Never embed the repo's
+# DEV key: with a key the backend does not sign with, every update is refused.
+if [ -n "${UPDATE_PUBLIC_KEY_FILE:-}" ]; then
+    "$VENV/bin/python" - "$UPDATE_PUBLIC_KEY_FILE" << 'PYKEY'
+import base64, json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+assert "DEV public key" not in d.get("_comment", ""), "refusing to embed the DEV update key"
+assert len(base64.b64decode(d["public_key"])) == 32, "public_key must be a base64 Ed25519 key"
+PYKEY
+    cp "$UPDATE_PUBLIC_KEY_FILE" "$RESOURCES/update_keys.json"
+    echo "Embedded update signing public key (updates require a valid signature)."
+else
+    echo "No UPDATE_PUBLIC_KEY_FILE — updates are verified by sha256 only."
+fi
+
 # Re-seal the bundle: PyInstaller ad-hoc signed it before backends.json was
 # written into Resources, which invalidates the seal ("a sealed resource is
 # missing or invalid") — a broken seal makes Gatekeeper/TCC treat the app as
@@ -137,24 +156,32 @@ codesign --verify --deep --strict "$AGENT_DIR/dist/TimeTracker.app"
 echo "Bundle re-signed (ad-hoc) and verified."
 
 # ── 3. Installer scripts ──────────────────────────────────────────────────────
+# PER-USER install ("Install for me only"): the payload lands in ~/Applications
+# and Installer runs these scripts AS THE USER with $HOME set — no admin
+# password, no root, and therefore no privileged writes into a user-controlled
+# home. The same pkg is what the agent's self-updater runs
+# (`installer -target CurrentUserHomeDirectory`), so updates are silent too.
 
-# preinstall: stop the running agent (for real) + clear stale localhost identity
+# preinstall: stop this user's running agent (for real) + clear the identity so
+# the agent re-enrolls against the backend baked into this build.
 cat > "$SCRIPTS_DIR/preinstall" << 'EOF'
 #!/bin/bash
-# 1. Unload the LaunchAgent of every logged-in GUI user first, so launchd cannot
-#    respawn the old binary while the payload is being replaced (postinstall
-#    loads it again for each of them).
-for USER_UID in $(ps -axo uid=,comm= | awk '$2 ~ /loginwindow$/ && $1 != 0 {print $1}' | sort -u); do
-    launchctl bootout "gui/$USER_UID/com.timetracker.agent" 2>/dev/null || true
-done
+USER_UID=$(id -u)
+if [ "$USER_UID" = 0 ]; then
+    echo "TimeTracker installs per user — refusing to run as root." >&2
+    exit 1
+fi
 
-# 2. Stop every running agent, but NOT the self-updater (`timetracker --update`)
-#    that may be the process running this very installer. Wait for a real exit
-#    and force-kill a straggler — an old agent that ignored SIGTERM used to
-#    survive here and was merely re-activated by postinstall's `open -a`,
-#    leaving a Mac with a live process that tracked nothing (PRD-3738).
+# 1. Unload the LaunchAgent first so launchd cannot respawn the old binary
+#    while the payload is being replaced.
+launchctl bootout "gui/$USER_UID/com.timetracker.agent" 2>/dev/null || true
+
+# 2. Stop this user's agents, but NOT the self-updater (`timetracker --update`)
+#    that is driving this very install. Wait for a real exit and force-kill a
+#    straggler — an old agent that ignored SIGTERM used to survive here and was
+#    merely re-activated afterwards, tracking nothing (PRD-3738).
 agent_pids() {
-    for PID in $(pgrep -x timetracker 2>/dev/null); do
+    for PID in $(pgrep -x -u "$USER_UID" timetracker 2>/dev/null); do
         case " $(ps -o args= -p "$PID" 2>/dev/null) " in
             *" --update "*) ;;
             *) echo "$PID" ;;
@@ -172,52 +199,39 @@ if [ -n "$PIDS" ]; then
     [ -n "$PIDS" ] && kill -KILL $PIDS 2>/dev/null || true
 fi
 
-# Clear the stored identity on every install so the agent re-enrolls fresh
-# against the backend configured in backends.json. This ensures a URL or token
-# change in backends.json always takes effect without manual cleanup.
-for HOME_DIR in /Users/*/; do
-    IDENTITY="$HOME_DIR/Library/Application Support/TimeTracker/identity.json"
-    if [ -f "$IDENTITY" ]; then
-        rm -f "$IDENTITY"
-        echo "Cleared identity at $IDENTITY (will re-enroll on next launch)"
-    fi
-done
+# 3. Clear the stored identity so the agent re-enrolls fresh against the
+#    backend configured in backends.json (also refreshes the server-side
+#    agent_version after an update).
+rm -f "$HOME/Library/Application Support/TimeTracker/identity.json"
 
 exit 0
 EOF
 
-# postinstall: register the LaunchAgent with launchd and let launchd start it,
-# for EVERY logged-in GUI user (preinstall stopped all of their agents).
+# postinstall: register the LaunchAgent with launchd and let launchd start it.
 cat > "$SCRIPTS_DIR/postinstall" << 'EOF'
 #!/bin/bash
-# Installer runs as root. A logged-in GUI user owns a loginwindow process; the
-# login screen's loginwindow is root's (uid 0) and is skipped.
-GUI_UIDS=$(ps -axo uid=,comm= | awk '$2 ~ /loginwindow$/ && $1 != 0 {print $1}' | sort -u)
+USER_UID=$(id -u)
+[ "$USER_UID" = 0 ] && exit 1
 
-setup_user() {
-    local USER_UID="$1" USER_NAME USER_HOME PLIST_DIR PLIST LOG_FILE D
-    USER_NAME=$(id -un "$USER_UID" 2>/dev/null) || return 0
-    # dscacheutil keeps spaces in the path ("/Users/John Smith").
-    USER_HOME=$(dscacheutil -q user -a name "$USER_NAME" 2>/dev/null | sed -n 's/^dir: //p' | head -1)
-    [ -z "$USER_HOME" ] && USER_HOME="/Users/$USER_NAME"
-    [ -d "$USER_HOME" ] || return 0
+# $2 = where Installer put the payload (~/Applications for a per-user install).
+APP="${2%/}/TimeTracker.app"
+[ -x "$APP/Contents/MacOS/timetracker" ] || APP="$HOME/Applications/TimeTracker.app"
 
-    # LaunchAgent for auto-start on login (idempotent). Same content the agent's
-    # autostart.install() writes, so its per-launch rewrite is a no-op.
-    PLIST_DIR="$USER_HOME/Library/LaunchAgents"
-    PLIST="$PLIST_DIR/com.timetracker.agent.plist"
-    LOG_FILE="$USER_HOME/Library/Logs/TimeTracker.log"
+PLIST_DIR="$HOME/Library/LaunchAgents"
+PLIST="$PLIST_DIR/com.timetracker.agent.plist"
+LOG_FILE="$HOME/Library/Logs/TimeTracker.log"
+mkdir -p "$PLIST_DIR" "$HOME/Library/Logs"
 
-    # SECURITY: this script runs as root, but $USER_HOME is user-controlled — a
-    # symlink planted at the plist path (or its directories) would make a root
-    # write/chown hit an arbitrary file. Every per-user file operation therefore
-    # runs AS THE USER (as_user), so symlinks can only reach what they could
-    # already write. Root only renders the content into its own private temp file.
-    as_user() { sudo -u "$USER_NAME" "$@"; }
-    as_user mkdir -p "$PLIST_DIR" "$USER_HOME/Library/Logs" || return 0
+# Paths go into XML: escape &, < and > (a home folder may legally contain them).
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+APP_XML=$(xml_escape "$APP")
+LOG_XML=$(xml_escape "$LOG_FILE")
 
-    PLIST_TMP=$(mktemp)
-    cat > "$PLIST_TMP" << PLIST
+# Same content the agent's autostart.install() writes, so its per-launch
+# rewrite is a no-op. Written via a temp file + mv so a half-written plist is
+# never loaded.
+TMP=$(mktemp "$PLIST_DIR/.com.timetracker.agent.XXXXXX")
+cat > "$TMP" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -226,7 +240,7 @@ setup_user() {
     <string>com.timetracker.agent</string>
     <key>ProgramArguments</key>
     <array>
-      <string>/Applications/TimeTracker.app/Contents/MacOS/timetracker</string>
+      <string>$APP_XML/Contents/MacOS/timetracker</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -236,37 +250,32 @@ setup_user() {
       <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>$LOG_FILE</string>
+    <string>$LOG_XML</string>
     <key>StandardErrorPath</key>
-    <string>$LOG_FILE</string>
+    <string>$LOG_XML</string>
     <key>ProcessType</key>
     <string>Interactive</string>
   </dict>
 </plist>
 PLIST
-    # stdin is opened by root, the write happens as the user.
-    as_user tee "$PLIST" < "$PLIST_TMP" > /dev/null || { rm -f "$PLIST_TMP"; return 0; }
-    rm -f "$PLIST_TMP"
-    as_user chmod 644 "$PLIST"
+chmod 644 "$TMP"
+mv -f "$TMP" "$PLIST"
 
-    # Start the agent UNDER launchd (RunAtLoad), not via `open -a`: launchd then
-    # restarts it if it ever crashes, and there is exactly one launch path.
-    # Bootout first so a re-install replaces a loaded job; a job still tearing
-    # down makes bootstrap fail with EIO (5), so retry briefly.
-    launchctl bootout "gui/$USER_UID/com.timetracker.agent" 2>/dev/null || true
-    for _ in 1 2 3 4 5; do
-        launchctl bootstrap "gui/$USER_UID" "$PLIST" 2>/dev/null && return 0
-        sleep 1
-    done
-    # No launchd GUI domain reachable (rare) — plain launch; the LaunchAgent
-    # takes over from the next login.
-    launchctl asuser "$USER_UID" open -a /Applications/TimeTracker.app || true
-}
-
-for U in $GUI_UIDS; do
-    setup_user "$U"
+# Start the agent UNDER launchd (RunAtLoad): launchd restarts it if it ever
+# crashes, and there is exactly one launch path. A job still tearing down makes
+# bootstrap fail with EIO (5), so retry briefly.
+launchctl bootout "gui/$USER_UID/com.timetracker.agent" 2>/dev/null || true
+# A job switched off in System Settings › Login Items (or `unload -w`) is marked
+# disabled and refuses to load (bootstrap → EIO), so the agent would never start
+# again — not even at login. Installing is the explicit request to run it.
+launchctl enable "gui/$USER_UID/com.timetracker.agent" 2>/dev/null || true
+for _ in 1 2 3 4 5; do
+    launchctl bootstrap "gui/$USER_UID" "$PLIST" 2>/dev/null && exit 0
+    sleep 1
 done
-
+# No launchd GUI domain reachable (rare) — plain launch; the LaunchAgent takes
+# over from the next login.
+open "$APP" || true
 exit 0
 EOF
 
@@ -274,15 +283,16 @@ chmod +x "$SCRIPTS_DIR/preinstall" "$SCRIPTS_DIR/postinstall"
 
 # ── 4. Build the .pkg installer ───────────────────────────────────────────────
 # pkgbuild --root copies everything from ROOT_DIR into --install-location.
-# So we place TimeTracker.app inside ROOT_DIR → it lands at /Applications/TimeTracker.app.
+# So we place TimeTracker.app inside ROOT_DIR → it lands at ~/Applications/TimeTracker.app
+# (per-user install: Installer resolves /Applications against the user's home).
 cp -R "$AGENT_DIR/dist/TimeTracker.app" "$ROOT_DIR/"
 
 PKG_PATH="$AGENT_DIR/dist/TimeTracker-${VERSION}.pkg"
 COMPONENT_PKG="$STAGING_PKG_DIR/TimeTracker-component.pkg"
 
 # Non-relocatable: otherwise Installer "updates" any other copy of
-# com.timetracker.agent it finds (a dev build, a dragged copy in ~/Applications)
-# and /Applications — the path the LaunchAgent runs — stays empty or stale.
+# com.timetracker.agent it finds (a dev build, a dragged copy) and
+# ~/Applications — the path the LaunchAgent runs — stays empty or stale.
 pkgbuild --analyze --root "$ROOT_DIR" "$STAGING_PKG_DIR/component.plist" >/dev/null
 plutil -replace 0.BundleIsRelocatable -bool NO "$STAGING_PKG_DIR/component.plist"
 
@@ -298,15 +308,15 @@ pkgbuild \
 
 # Product archive with an explicit distribution: hostArchitectures declares the
 # package native on BOTH Apple Silicon and Intel (without it, Installer on an
-# Apple Silicon Mac asks to install Rosetta first), and the OS-version check
-# refuses cleanly on a Mac too old for the bundled Qt instead of installing an
-# app that cannot launch.
+# Apple Silicon Mac asks to install Rosetta first); the OS-version check
+# refuses cleanly on a Mac too old for the bundled Qt; and the domains line
+# makes it a per-user install (~/Applications, no admin password).
 cat > "$STAGING_PKG_DIR/distribution.xml" << DIST
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>TimeTracker ${VERSION}</title>
     <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
-    <domains enable_localSystem="true"/>
+    <domains enable_localSystem="false" enable_currentUserHome="true" enable_anywhere="false"/>
     <allowed-os-versions>
         <os-version min="${MIN_MACOS}"/>
     </allowed-os-versions>

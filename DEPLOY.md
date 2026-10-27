@@ -99,10 +99,14 @@ WiX Toolset v4 is downloaded and installed automatically via `dotnet tool instal
 ### macOS
 
 1. Copy `TimeTracker-<version>.dmg` to the laptop (email, USB, shared drive — any way)
-2. Open the DMG → double-click the `.pkg` → **Install** (admin password)
+2. Open the DMG → double-click the `.pkg` → **Install** — installs for the current
+   user into `~/Applications`, **no admin password needed**
 3. The installer starts the agent immediately under launchd — no manual launch
 4. **Auto-starts on every login** and is restarted automatically if it ever crashes
    (LaunchAgent `com.timetracker.agent`)
+5. **Updates are silent**: upload the new `.dmg` on the dashboard's Agents page and
+   click **Activate** (mark it *mandatory* to roll out within one check). The
+   version you type must equal `agent/version.py` of that build.
 
 ### Windows
 

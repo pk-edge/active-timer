@@ -266,10 +266,12 @@ def test_failed_mac_install_relaunches_and_does_not_wait_on_the_agent(monkeypatc
     monkeypatch.setattr(updater, "STATE_FILE", str(tmp_path / "state.json"))
     monkeypatch.setattr(updater, "LOCK_FILE", str(tmp_path / "update.lock"))
     uv.write_state(updater.STATE_FILE, status="INSTALLING", version="9.9.9",
-                   staged_path=str(staged), platform="darwin", agent_pid=os.getpid())
+                   staged_path=str(staged), platform="darwin", agent_pid=os.getpid(),
+                   sha256=uv.sha256_file(str(staged)))
     waited, relaunched = [], []
     monkeypatch.setattr(updater, "_wait_for_pid_exit", lambda *a, **k: waited.append(a))
     monkeypatch.setattr(updater, "_report", lambda *a, **k: None)
+    monkeypatch.setattr(updater, "_report_outcome", lambda *a, **k: None)
 
     def _fail(_p):
         raise RuntimeError("User canceled")
@@ -357,3 +359,259 @@ def test_relaunch_prefers_launchd_kickstart(monkeypatch):
     updater._relaunch("darwin")
     assert runs and runs[0][:2] == ["launchctl", "kickstart"]
     assert opens == []
+
+
+# ── Per-user silent update (no password) ─────────────────────────────────────
+
+@mac_only
+def test_download_never_sends_device_jwt_to_s3_or_cdn(monkeypatch):
+    import identity
+    import updater
+    monkeypatch.setattr(identity, "load", lambda: {"jwt_token": "secret", "api_base": "https://api.tracker.onedge.co"})
+    s3 = "https://bucket.s3.amazonaws.com/installers/x/TimeTracker.dmg?X-Amz-Signature=abc"
+    assert updater._download_headers(s3) == {}
+    assert updater._download_headers("https://cdn.tracker.onedge.co/installers/x.dmg") == {}
+    api = "https://api.tracker.onedge.co/v1/updates/file/1"
+    assert updater._download_headers(api) == {"Authorization": "Bearer secret"}
+
+
+def test_download_headers_unchanged_off_macos(monkeypatch):
+    import identity
+    import updater
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(identity, "load", lambda: {"jwt_token": "secret"})
+    assert updater._download_headers("https://bucket.s3.amazonaws.com/x?X-Amz-Signature=1") == \
+        {"Authorization": "Bearer secret"}               # Windows production behaviour untouched
+
+
+@mac_only
+def test_install_macos_finds_the_pkg_installs_per_user_and_always_detaches(monkeypatch, tmp_path):
+    import updater
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "TimeTracker-9.9.9.pkg").write_bytes(b"not really a pkg")
+    dmg = tmp_path / "TimeTracker.dmg"
+    subprocess.run(["hdiutil", "create", "-quiet", "-srcfolder", str(src), "-size", "5m",
+                    "-format", "UDZO", "-ov", str(dmg)], check=True)
+
+    real_run = subprocess.run
+    calls = []
+
+    class _R:
+        returncode = 0
+        stdout = stderr = ""
+
+    def fake_run(cmd, *a, **k):
+        if cmd[0] == "installer":                          # never really install in a test
+            calls.append(cmd)
+            assert os.path.exists(cmd[2]), "pkg must be on the mounted volume"
+            return _R()
+        return real_run(cmd, *a, **k)
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+    updater._install_macos(str(dmg))
+    assert calls and calls[0][-2:] == ["-target", "CurrentUserHomeDirectory"]
+    assert calls[0][2].endswith("TimeTracker-9.9.9.pkg")
+    mounted = real_run(["hdiutil", "info"], capture_output=True, text=True).stdout
+    assert str(tmp_path) not in mounted and "tt-update-" not in mounted, "DMG left mounted"
+
+
+@mac_only
+def test_failed_per_user_install_raises_with_installer_output(monkeypatch, tmp_path):
+    import updater
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "TimeTracker.pkg").write_bytes(b"x")
+    dmg = tmp_path / "t.dmg"
+    subprocess.run(["hdiutil", "create", "-quiet", "-srcfolder", str(src), "-size", "5m",
+                    "-format", "UDZO", "-ov", str(dmg)], check=True)
+    real_run = subprocess.run
+
+    class _R:
+        returncode = 1
+        stdout = ""
+        stderr = "installer: Error - the package path specified was invalid"
+
+    monkeypatch.setattr(updater.subprocess, "run",
+                        lambda cmd, *a, **k: _R() if cmd[0] == "installer" else real_run(cmd, *a, **k))
+    with pytest.raises(RuntimeError, match="installer exit 1"):
+        updater._install_macos(str(dmg))
+    assert "tt-update-" not in real_run(["hdiutil", "info"], capture_output=True, text=True).stdout
+
+
+@mac_only
+def test_install_outcome_is_reported_with_credentials_captured_before_install(monkeypatch, tmp_path):
+    import identity
+    import updater
+    import update_verify as uv
+    staged = tmp_path / "TimeTracker.dmg"
+    staged.write_bytes(b"x")
+    monkeypatch.setattr(updater, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(updater, "LOCK_FILE", str(tmp_path / "update.lock"))
+    monkeypatch.setattr(updater, "LAST_OK_FILE", str(tmp_path / "ok.txt"))
+    uv.write_state(updater.STATE_FILE, status="INSTALLING", version="9.9.9",
+                   staged_path=str(staged), platform="darwin", from_version="1.1.3",
+                   sha256=uv.sha256_file(str(staged)))
+    ident = {"jwt_token": "tok", "api_base": "https://api.example"}
+    monkeypatch.setattr(identity, "load", lambda: dict(ident))
+    sent = []
+
+    class _Ok:
+        status_code = 202
+    monkeypatch.setattr(updater.httpx, "post", lambda url, headers=None, json=None, timeout=None:
+                        sent.append((url, headers, json["status"])) or _Ok())
+
+    def install(_p):
+        ident.clear()                                    # preinstall deletes identity.json
+    monkeypatch.setattr(updater, "_install_macos", install)
+    monkeypatch.setattr(updater, "_relaunch", lambda plat: None)
+    assert updater.run_update_install() == 0
+    assert ("https://api.example/v1/updates/report", {"Authorization": "Bearer tok"}, "INSTALL_SUCCESS") in sent
+
+
+# ── Security hardening (review follow-ups) ───────────────────────────────────
+
+@mac_only
+@pytest.mark.parametrize("version,itype", [
+    ("9.0.0/../../../Library/LaunchAgents", "dmg"),
+    ("../../x", "dmg"),
+    ("9.9.9", "../../evil"),
+    ("9.9.9", "sh"),
+    ("", "dmg"),
+])
+def test_unsafe_release_fields_are_rejected(version, itype):
+    import updater
+    assert updater._safe_macos_release(version, itype) is False
+
+
+@mac_only
+def test_normal_release_fields_are_accepted():
+    import updater
+    assert updater._safe_macos_release("1.1.4", "dmg") is True
+    assert updater._safe_macos_release("2.0.10.3", "dmg") is True
+
+
+@mac_only
+def test_tampered_staged_file_is_never_installed(monkeypatch, tmp_path):
+    import updater
+    import update_verify as uv
+    staged = tmp_path / "TimeTracker.dmg"
+    staged.write_bytes(b"original")
+    monkeypatch.setattr(updater, "STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setattr(updater, "LOCK_FILE", str(tmp_path / "update.lock"))
+    uv.write_state(updater.STATE_FILE, status="INSTALLING", version="9.9.9", staged_path=str(staged),
+                   platform="darwin", sha256=uv.sha256_file(str(staged)))
+    staged.write_bytes(b"swapped after verification")
+    installed = []
+    monkeypatch.setattr(updater, "_install_macos", lambda p: installed.append(p))
+    monkeypatch.setattr(updater, "_report", lambda *a, **k: None)
+    monkeypatch.setattr(updater, "_report_outcome", lambda *a, **k: None)
+    monkeypatch.setattr(updater, "_relaunch", lambda plat: None)
+    assert updater.run_update_install() == 1
+    assert installed == []
+
+
+@mac_only
+def test_frozen_mac_trusts_only_the_bundled_key(monkeypatch, tmp_path):
+    import updater
+    app = tmp_path / "TimeTracker.app" / "Contents"
+    (app / "MacOS").mkdir(parents=True)
+    monkeypatch.setattr(updater.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(updater.sys, "executable", str(app / "MacOS" / "timetracker"))
+    assert updater._trust_key_dirs() == [str(app / "Resources")]
+
+
+@mac_only
+def test_offer_must_match_the_signed_manifest():
+    import updater
+    good = {"version": "1.1.4", "platform": "macos", "installer_type": "dmg", "expires_at": None}
+    assert updater._manifest_matches_offer(good, "1.1.4", "dmg") is None
+    assert updater._manifest_matches_offer({**good, "version": "1.0.0"}, "1.1.4", "dmg")    # replayed old build
+    assert updater._manifest_matches_offer({**good, "platform": "windows"}, "1.1.4", "dmg")
+    assert updater._manifest_matches_offer({**good, "installer_type": "msi"}, "1.1.4", "dmg")
+    assert updater._manifest_matches_offer({**good, "expires_at": "2000-01-01T00:00:00+00:00"}, "1.1.4", "dmg")
+    assert updater._manifest_matches_offer(None, "1.1.4", "dmg")
+
+
+@mac_only
+def test_jwt_never_goes_to_the_api_host_over_plain_http(monkeypatch):
+    import identity
+    import updater
+    monkeypatch.setattr(identity, "load", lambda: {"jwt_token": "secret", "api_base": "https://api.tracker.onedge.co"})
+    assert updater._download_headers("http://api.tracker.onedge.co/v1/x") == {}
+
+
+@mac_only
+def test_identity_file_is_owner_only(monkeypatch, tmp_path):
+    import stat
+    import identity
+    monkeypatch.setattr(identity, "_IDENTITY_FILE", tmp_path / "identity.json")
+    identity.save(device_id="d", jwt_token="t")
+    assert stat.S_IMODE((tmp_path / "identity.json").stat().st_mode) == 0o600
+    assert identity.load()["jwt_token"] == "t"
+    identity.save(device_id="d", jwt_token="t2")            # overwrite path (stale tmp handled)
+    assert identity.load()["jwt_token"] == "t2"
+
+
+def test_presigned_signature_is_redacted_from_logs():
+    import logging
+    rec = logging.LogRecord("httpx", logging.INFO, "", 0, 'HTTP Request: %s %s "%s %d %s"',
+                            ("GET", "https://s3.example/k.dmg?X-Amz-Signature=abc", "HTTP/1.1", 200, "OK"), None)
+    macosRuntime._RedactQuery().filter(rec)
+    assert "X-Amz-Signature" not in rec.getMessage() and "<redacted>" in rec.getMessage()
+
+
+@mac_only
+def test_launchd_copy_waits_as_standby_and_takes_over(tmp_path):
+    code = ("import sys; sys.path.insert(0, %r); import macosRuntime, pathlib; "
+            "ok = macosRuntime.acquire_single_instance(pathlib.Path(%r), wait=%s); print(ok, flush=True)")
+    holder = subprocess.Popen([sys.executable, "-u", "-c", code % (str(AGENT_DIR), str(tmp_path), False)
+                               + "; import time; time.sleep(30)"], stdout=subprocess.PIPE, text=True)
+    standby = None
+    try:
+        assert holder.stdout.readline().strip() == "True"
+        standby = subprocess.Popen([sys.executable, "-u", "-c", code % (str(AGENT_DIR), str(tmp_path), True)],
+                                   stdout=subprocess.PIPE, text=True)
+        time.sleep(2)
+        assert standby.poll() is None, "standby must block while the other copy runs"
+        holder.kill()
+        holder.wait()
+        out, _ = standby.communicate(timeout=15)
+        assert out.strip() == "True", "standby must take over once the lock is released"
+    finally:
+        for p in (holder, standby):
+            if p and p.poll() is None:
+                p.kill()
+
+
+@mac_only
+def test_system_quit_exits_non_zero_so_launchd_restarts(tmp_path):
+    """macOS power-off/quit notification while the session continues → exit 75."""
+    script = (
+        "import sys, os; sys.path.insert(0, %r); os.environ['QT_QPA_PLATFORM']='offscreen';"
+        "import threading; from PySide6.QtWidgets import QApplication; app = QApplication([]);"
+        "from widget.floating_widget import FloatingWidget;"
+        "shared = {'db': None, 'headless': True, 'stop_event': threading.Event(), 'pause_event': threading.Event()};"
+        "w = FloatingWidget(shared); w._on_macos_power_off(); print(shared.get('exit_code'))"
+    ) % str(AGENT_DIR)
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60,
+                       env={**os.environ, "HOME": str(tmp_path)})
+    assert r.stdout.strip().splitlines()[-1] == "75", r.stderr[-500:]
+
+
+@mac_only
+def test_outcome_report_retries_with_the_re_enrolled_token(monkeypatch):
+    import updater
+    calls = []
+
+    class _R:
+        def __init__(self, code):
+            self.status_code = code
+
+    def post(url, headers=None, json=None, timeout=None):
+        calls.append(headers["Authorization"])
+        return _R(401 if headers["Authorization"] == "Bearer old" else 202)
+    monkeypatch.setattr(updater.httpx, "post", post)
+    monkeypatch.setattr(updater, "_auth_headers", lambda: {"Authorization": "Bearer new"})
+    monkeypatch.setattr(updater.time, "sleep", lambda s: None)
+    updater._report_outcome("INSTALL_SUCCESS", "9.9.9", ({"Authorization": "Bearer old"}, "https://api/x"))
+    assert calls == ["Bearer old", "Bearer new"]

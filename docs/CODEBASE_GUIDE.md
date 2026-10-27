@@ -80,7 +80,7 @@ main stack).
 | `dashboard/src/hooks/` | `useAuth`, `useUser`, `useRealtimeStream` (SSE), `useDevicesPush`, `useDebouncedValue`, `useStartReportJob` (optimistic report-job start) |
 | `dashboard/src/components/ExportReportDialog.tsx`, `lib/reportRange.ts` | Shared date-ranged report export dialog (Devices + Reports pages) and its range rules (UTC normalization, 732-day cap) |
 | `dashboard/src/contexts/ReportJobsContext.tsx` | Async report-generation job tracking (client state) |
-| `installer/macos/`, `installer/windows/` | Platform installer build scripts; company token + API base URL are baked in at build time (not runtime-configurable). macOS: `build_macos.sh` → universal2 `.app` → product-archive `.pkg` (hostArchitectures arm64+x86_64, macOS ≥ 12) inside a `.dmg` |
+| `installer/macos/`, `installer/windows/` | Platform installer build scripts; company token + API base URL are baked in at build time (not runtime-configurable). macOS: `build_macos.sh` → universal2 `.app` → per-user product-archive `.pkg` (~/Applications, no admin password, hostArchitectures arm64+x86_64, macOS ≥ 12) inside a `.dmg` |
 | `agent-simulator/` | Standalone Dockerized load simulator (default 2000 simulated agents) — independent `docker-compose.yml`, does not touch the main stack |
 | `DEPLOY.md` | End-to-end deployment/build/install walkthrough — read this before touching the release flow |
 | `Desktop_Agent_Auto-Update_Architecture.md` | Full auto-update design (signed manifests, resumable downloads, atomic replace, rollback) — read before touching `updater.py`/`update_verify.py`/`backend/app/core/update_signing.py`/`manifest.py` |
@@ -520,19 +520,45 @@ Only the macOS agent sends heartbeats today (`SyncWorker._maybe_heartbeat`, ever
 20 s when the queue is empty); deploy the backend before such an agent.
 
 **macOS agent lifecycle** (all `sys.platform == "darwin"`-gated; Windows paths
-untouched). The pkg's postinstall writes `~/Library/LaunchAgents/com.timetracker.agent.plist`
-for every logged-in GUI user and starts the agent with `launchctl bootstrap`
-(not `open -a`), so launchd owns it: `KeepAlive{SuccessfulExit:false}` restarts a
-crash, a clean exit (SIGTERM, tray quit) stays down. preinstall boots the job
-out and SIGTERMs every agent except `timetracker --update`, force-killing
-stragglers. In the process: `macosRuntime.acquire_single_instance` (flock on
-`agent.lock`; a duplicate exits 0), `run_supervised` restarts any worker that
-dies (fresh instance), and `install_qt_shutdown_watcher` turns `stop_event`
-into `app.quit()` — without it SIGTERM stopped every worker but left the Qt
-process alive, tracking nothing (PRD-3738). The self-updater runs in its own
-session (`start_new_session`, so the job bootout cannot kill it) and the agent
-keeps tracking until the pkg's preinstall replaces it; a failed/cancelled
-install relaunches via `launchctl kickstart`.
+untouched). The macOS pkg is a **per-user** install (Distribution enables only
+`currentUserHome`): the app lands in `~/Applications/TimeTracker.app`, Installer
+runs the scripts **as the user** (they refuse root), and no admin password is
+ever needed. preinstall boots the `com.timetracker.agent` LaunchAgent out,
+SIGTERMs this user's agents except `timetracker --update` (force-killing
+stragglers) and clears `identity.json` (re-enroll → server-side `agent_version`
+refresh). postinstall writes `~/Library/LaunchAgents/com.timetracker.agent.plist`,
+`launchctl enable`s the job (one switched off in Login Items refuses to load) and
+starts it with `launchctl bootstrap` (not `open -a`), so launchd owns it:
+`KeepAlive{SuccessfulExit:false}` restarts a crash, a clean exit (SIGTERM, tray
+quit) stays down; a system-requested quit (power-off/logout notification — also
+what "Quit & Reopen" after a Screen Recording grant looks like) exits 75 so
+launchd restarts the agent if the session continues. In the process:
+`macosRuntime.acquire_single_instance` (flock on `agent.lock`; a duplicate exits 0,
+except the launchd-started copy — `XPC_SERVICE_NAME=com.timetracker.agent` — which
+waits as a standby and takes over when the other copy exits), `run_supervised` restarts any worker that
+dies (fresh instance), and `install_qt_shutdown_watcher` turns `stop_event` into
+`app.quit()` — without it SIGTERM stopped every worker but left the Qt process
+alive, tracking nothing (PRD-3738).
+
+**macOS self-update** (dashboard Agents page → upload `.dmg` → **Activate**;
+`mandatory` skips the "defer while the user is active" rule). `UpdateWorker`
+checks `/v1/updates/check` 30 s + 0–300 s after start, then every 6 h; downloads
+the presigned URL **without** the device JWT (sent only to the API host — S3/MinIO
+reject dual auth and it must not leak), rejects an offer whose version /
+installer_type are not plain values or do not match the signed manifest
+(platform, expiry included), verifies sha256 — and the Ed25519 signature
+**strictly** when `build_macos.sh` embedded a key via `UPDATE_PUBLIC_KEY_FILE`
+(macOS trusts only a key inside the bundle; without one it is sha256-only) — then spawns
+`timetracker --update` in its own session (survives the job bootout) while the
+agent keeps tracking. The updater mounts the DMG read-only via `hdiutil attach
+-plist` into a private temp dir, runs `installer -pkg … -target
+CurrentUserHomeDirectory` (silent, no password) after re-checking the staged
+file's sha256, always detaches, and reports `INSTALL_SUCCESS`/`INSTALL_FAILED`
+with credentials captured before preinstall deletes them (retrying with the
+re-enrolled token on a 401); a failure relaunches via `launchctl kickstart`.
+httpx request logs have presigned query strings redacted; `identity.json` is
+created 0600. The version typed on
+upload must equal the uploaded build's `agent/version.py`.
 
 **Realtime updates**: dashboard device/status changes fan out via Redis
 pub/sub (`broadcaster.py`) to Server-Sent Events, consumed client-side by
