@@ -270,6 +270,11 @@ class AuditLog(Base):
     target_type:       Mapped[str | None]       = mapped_column(String, nullable=True)
     target_id:         Mapped[str | None]       = mapped_column(String, nullable=True)
     audit_metadata:    Mapped[dict | None]      = mapped_column("metadata", JSON, nullable=True)
+    # Set only when the action was performed inside a Super-Admin impersonation
+    # session: actor_* is the employee whose identity was worn, these two are the
+    # admin who was actually driving. NULL for ordinary actions.
+    impersonator_id:    Mapped[uuid.UUID | None] = mapped_column(UUID, nullable=True)
+    impersonator_email: Mapped[str | None]       = mapped_column(String, nullable=True)
     created_at:        Mapped[datetime]         = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 

@@ -13,6 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # can observe — a cached auth result would leak across those mutations.
 # Must be set BEFORE the first get_settings() call (i.e. before app imports).
 os.environ.setdefault("ADMIN_AUTH_CACHE_TTL_SECS", "0")
+# The suite fires hundreds of requests from one test client/identity; the global
+# API rate limiter (production default: ON) would 429 them. Tests that exercise
+# the limiter construct RateLimitMiddleware with an explicit config instead.
+os.environ["RATE_LIMIT_ENABLED"] = "false"   # unconditional: compose passes RATE_LIMIT_ENABLED=true
 
 pytest_plugins = ("pytest_asyncio",)
 

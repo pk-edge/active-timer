@@ -14,7 +14,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import select, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_user, get_db, forbid_impersonation
 from app.core.config import get_settings
 from app.core.secrets import load_google_credentials
 from app.core.security import create_admin_token, hash_password_async
@@ -346,7 +346,9 @@ class SetPasswordRequest(BaseModel):
 @router.post("/set-password", status_code=status.HTTP_204_NO_CONTENT)
 async def set_password(
     body: SetPasswordRequest,
-    user: Employee = Depends(get_current_user),
+    # forbid_impersonation, not get_current_user: an impersonated session must
+    # never be able to set the credentials of the account it is wearing.
+    user: Employee = Depends(forbid_impersonation),
     db:   AsyncSession = Depends(get_db),
 ):
     # Explicit UPDATE: get_current_user returns a DETACHED instance (see

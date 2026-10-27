@@ -28,6 +28,7 @@ AWS cost notes
 import hashlib
 import logging
 import time
+import uuid
 from typing import Any, Optional
 
 import orjson
@@ -132,3 +133,181 @@ async def cache_delete(key: tuple) -> None:
         await r.delete(_build_key(key))
     except Exception as exc:
         log.warning("redis_cache.delete error: %s", exc)
+
+
+# ── Single-flight ─────────────────────────────────────────────────────────────
+# A cold cache key is normally requested by several callers at once: the Tech
+# Utilization page mounts ten SWR calls, and changing a filter re-keys them
+# simultaneously across every open tab. Without a guard each of those recomputes
+# the same multi-second aggregation. SET NX gives us a cross-worker lock (an
+# in-process asyncio.Lock would only collapse duplicates within one worker).
+#
+# The lock is strictly an optimisation: if Redis is down, or the holder dies, or
+# the wait times out, every caller simply computes its own value as before. It
+# must never be able to make a request fail or hang.
+
+LOCK_TTL_SECS  = 30     # holder crash ceiling — must exceed a slow recompute
+LOCK_WAIT_SECS = 5.0    # how long a loser waits for the winner's result
+_LOCK_POLL     = 0.05
+_LOCK_POLL_MAX = 0.25   # polling backs off to this, so a long wait stays cheap
+
+# Compare-and-delete: only the holder that wrote the token may remove the lock.
+# An unconditional DEL would let a holder whose TTL already expired delete the
+# lock of the caller that legitimately took over after it.
+_RELEASE_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('del', KEYS[1]) else return 0 end"
+)
+
+
+def _lock_name(key: tuple) -> str:
+    return _PREFIX + "lock:" + _build_key(key)
+
+
+async def try_acquire(key: tuple, ttl: int = LOCK_TTL_SECS):
+    """Try to take the single-flight lock for `key`.
+
+    Returns the holder's unique token (a truthy str) when this caller won, False
+    when somebody else holds it, and True when Redis is unavailable — with no
+    lock service the safe behaviour is "everyone computes", never "nobody
+    computes". Pass the return value back to release(); True needs no release.
+    """
+    r = get_client()
+    if r is None:
+        return True
+    token = uuid.uuid4().hex
+    try:
+        won = await r.set(_lock_name(key), token.encode(), nx=True, ex=ttl)
+        return token if won else False
+    except Exception as exc:
+        log.warning("redis_cache.lock error: %s", exc)
+        return True
+
+
+async def release(key: tuple, token=None) -> None:
+    """Release the lock taken by try_acquire. With the holder's `token` the
+    delete is token-checked (atomic Lua compare-and-delete), so a holder whose
+    lock already expired and was re-acquired by someone else cannot remove that
+    caller's lock. `True` (the fail-open "no lock service" result) is a no-op;
+    no token at all keeps the legacy unconditional DEL."""
+    if token is True:
+        return
+    r = get_client()
+    if r is None:
+        return
+    try:
+        if token:
+            await r.eval(_RELEASE_LUA, 1, _lock_name(key), str(token).encode())
+        else:
+            await r.delete(_lock_name(key))
+    except Exception as exc:
+        log.warning("redis_cache.unlock error: %s", exc)
+
+
+async def wait_or_take(key: tuple, timeout: float = LOCK_WAIT_SECS, *,
+                       check_failure: bool = False, ttl: int = LOCK_TTL_SECS):
+    """Wait for the lock winner's value, or take over if the winner vanishes.
+
+    Returns (data, token):
+      (data, None)   the winner cached a value — use it
+      (None, token)  the lock disappeared without a value (the winner was
+                     cancelled / crashed / released after an error) and THIS
+                     caller re-acquired it: compute, cache, then release(token)
+      (None, None)   timed out, or — with check_failure — the winner recorded a
+                     failure marker; the caller re-checks cache_get_failure() to
+                     tell those apart and otherwise computes without the lock
+    """
+    import asyncio
+    deadline = time.time() + timeout
+    delay = _LOCK_POLL
+    while time.time() < deadline:
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.5, _LOCK_POLL_MAX)
+        data, _ = await cache_get(key)
+        if data is not None:
+            return data, None
+        if check_failure and await cache_get_failure(key) is not None:
+            return None, None
+        token = await try_acquire(key, ttl=ttl)
+        if token:
+            # The lock was free. The value may have landed between our read and
+            # the acquire (winners cache BEFORE releasing), so look once more.
+            data, _ = await cache_get(key)
+            if data is not None:
+                await release(key, token)
+                return data, None
+            return None, token
+    return None, None
+
+
+async def wait_for(key: tuple, timeout: float = LOCK_WAIT_SECS, *, check_failure: bool = False):
+    """Poll for the lock winner's value. Returns the data, or None on timeout.
+
+    None means "compute it yourself" — a slow path, not an error. With
+    check_failure=True the wait also ends early (returning None) the moment the
+    winner records a failure marker for `key`, so losers don't sit out the whole
+    timeout behind a query that already died; the caller re-checks
+    cache_get_failure() to tell that apart from a plain timeout. (Callers that
+    want to take over a vanished lock use wait_or_take instead.)
+    """
+    import asyncio
+    deadline = time.time() + timeout
+    delay = _LOCK_POLL
+    while time.time() < deadline:
+        await asyncio.sleep(delay)
+        delay = min(delay * 1.5, _LOCK_POLL_MAX)
+        data, _ = await cache_get(key)
+        if data is not None:
+            return data
+        if check_failure and await cache_get_failure(key) is not None:
+            return None
+    return None
+
+
+# ── Negative caching of failures ──────────────────────────────────────────────
+# A heavy aggregation that times out will time out again for the identical
+# request, and every retry (the dashboard polls, users re-click, several tabs)
+# burns another full statement_timeout of DB time. A short-lived marker per exact
+# cache key lets the endpoint answer 503 immediately instead. Like the lock it is
+# best-effort: with Redis down no marker is ever seen and requests just compute.
+
+FAILURE_TTL = 30    # seconds an identical request is refused after a failure
+
+
+async def cache_set_failure(key: tuple, ttl: int = FAILURE_TTL) -> None:
+    """Record that computing `key` just failed, for `ttl` seconds."""
+    r = get_client()
+    if r is None:
+        return
+    try:
+        await r.setex(_PREFIX + "fail:" + _build_key(key), ttl, b"1")
+    except Exception as exc:
+        log.warning("redis_cache.set_failure error: %s", exc)
+
+
+async def cache_get_failure(key: tuple) -> Optional[int]:
+    """Seconds (>= 1) until the failure marker for `key` expires, or None when
+    there is no marker (or Redis is down)."""
+    r = get_client()
+    if r is None:
+        return None
+    try:
+        name = _PREFIX + "fail:" + _build_key(key)
+        if not await r.exists(name):
+            return None
+        ttl = await r.ttl(name)
+        return max(int(ttl), 1) if ttl and ttl > 0 else 1
+    except Exception as exc:
+        log.warning("redis_cache.get_failure error: %s", exc)
+        return None
+
+
+async def cache_clear_failure(key: tuple) -> None:
+    """Drop the failure marker (a later success supersedes it)."""
+    r = get_client()
+    if r is None:
+        return
+    try:
+        await r.delete(_PREFIX + "fail:" + _build_key(key))
+    except Exception as exc:
+        log.warning("redis_cache.clear_failure error: %s", exc)

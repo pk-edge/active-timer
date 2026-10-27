@@ -23,6 +23,7 @@ from app.api.deps import get_db, require
 # host the browser can reach; public=False uses the internal endpoint.
 from app.api.v1.endpoints.screenshots import _s3_client
 from app.core.config import get_settings
+from app.core.search import build_search
 from app.db.models import Employee, SharedFile
 
 log = logging.getLogger(__name__)
@@ -150,20 +151,17 @@ async def list_shared_files(
 
     Each space-separated word in `q` must independently match at least one
     searchable field — so "john pdf" returns PDFs uploaded by John. All tokens
-    are applied as AND conditions; matching is case-insensitive and partial.
+    are applied as AND conditions; matching is case- and accent-insensitive,
+    wildcard-safe, and partial (see app/core/search.py). Results are ranked by
+    relevance against the whole query when a search is active.
     """
     params: dict = {"cid": str(admin.company_id), "limit": limit, "offset": offset}
     filters = ["sf.company_id = :cid"]
 
-    tokens = [t.strip() for t in (q or "").split() if t.strip()]
-    for i, tok in enumerate(tokens[:8]):
-        key = f"tok{i}"
-        params[key] = f"%{tok}%"
-        filters.append(f"""(
-            sf.original_filename ILIKE :{key}
-            OR e.name ILIKE :{key}
-            OR sf.mime_type ILIKE :{key}
-        )""")
+    sc = build_search(q, ["sf.original_filename", "e.name", "sf.mime_type"], prefix="fsearch")
+    if sc.where:
+        filters.append(sc.where)
+        params.update(sc.params)
 
     where = " AND ".join(filters)
 
@@ -178,6 +176,7 @@ async def list_shared_files(
     )
     total = int(count_res.scalar() or 0)
 
+    order_by = f"{sc.order_by}, sf.created_at DESC" if sc.order_by else "sf.created_at DESC"
     rows_res = await db.execute(
         text(f"""
             SELECT sf.id, sf.original_filename, sf.mime_type, sf.file_size_bytes,
@@ -185,7 +184,7 @@ async def list_shared_files(
             FROM shared_files sf
             LEFT JOIN employees e ON e.id = sf.uploaded_by
             WHERE {where}
-            ORDER BY sf.created_at DESC
+            ORDER BY {order_by}
             LIMIT :limit OFFSET :offset
         """),
         params,

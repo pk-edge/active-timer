@@ -1,15 +1,24 @@
 "use client";
 import PageLoader from "@/components/PageLoader";
-import PageSkeleton from "@/components/PageSkeleton";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import useSWR from "swr";
+import { format, subDays, differenceInCalendarDays } from "date-fns";
+import type { ReportDateRange } from "@/lib/api";
 import {
-  getCompanySummary, getTopApps, getDevices,
+  getCompanySummary, getTopApps, getDevices, getUsers,
   getDeviceSummary, getDeviceTopApps, fmtSeconds,
 } from "@/lib/api";
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { smartSort } from "@/lib/smartSearch";
+import { platformLabel } from "@/lib/devicePlatform";
+import TalentSearchBar, { type TalentSearchResult } from "@/components/TalentSearchBar";
 import { AccessDenied } from "@/components/AccessDenied";
+import DateRangePicker, { type DateRange } from "@/components/DateRangePicker";
+import ExportReportDialog from "@/components/ExportReportDialog";
+import { normalizeReportRange, utcToday } from "@/lib/reportRange";
+import { ReportErrorPanel, ReportEmptyPanel, isAbortError } from "./_components/ReportCardStates";
 
 // Lazy: the per-day bar chart pulls in recharts only when it actually renders.
 const DailyActiveBarChart = dynamic(() => import("./_components/DailyActiveBarChart"), {
@@ -22,109 +31,383 @@ const DailyActiveBarChart = dynamic(() => import("./_components/DailyActiveBarCh
     </div>
   ),
 });
-import { Search, X, ChevronDown } from "lucide-react";
-import type { CompanyDay, AppUsage, Device } from "@/types";
+import { Download, Search, X } from "lucide-react";
+import type { CompanyDay, AppUsage, Device, User } from "@/types";
 
-const PERIODS = [
-  { label: "7 days",  value: 7  },
-  { label: "14 days", value: 14 },
-  { label: "30 days", value: 30 },
-];
+// Company-wide top-apps caps at 100 server-side (backend/app/api/v1/endpoints/
+// reports.py). Ask for the max so the in-card search box has more than the
+// top 20 to search over — otherwise anything ranked below #20 is invisible
+// to the search box and looks like a false "no match".
+const APP_SEARCH_LIMIT = 100;
+
+// Formats a DateRange for the header subtitle / stat card — honest about the
+// ACTUAL active range instead of a hardcoded "last N days" that used to be
+// true by construction (days-only) but no longer is once Custom/Last Month/
+// Last Year ranges are possible.
+function describeRange(range: DateRange): string {
+  return range.since === range.until ? range.since : `${range.since} – ${range.until}`;
+}
+
+// Company summary/top-apps are two of the heaviest dashboard endpoints, which
+// is why the backend keeps a pre-aggregated per-day cache. A range ending
+// today that fits the `days` model (≤90 days) is sent as plain `days`: the
+// server resolves `days=N` to exactly the calendar days [today-(N-1), today]
+// (UTC) — the same rows as the equivalent since/until, and the shape its
+// top-apps cache is keyed by. Anything else (a past end date, >90 days) is
+// sent as since/until. Either way the window equals what "Export report"
+// covers for the same range, so the numbers match. `range` must already be
+// normalized (normalizeReportRange) so "today" means the server's UTC today.
+function reportRangeArg(range: DateRange): { days: number; range?: ReportDateRange } {
+  const days = differenceInCalendarDays(new Date(range.until), new Date(range.since)) + 1;
+  if (range.until === utcToday() && days <= 90) {
+    return { days };
+  }
+  return { days, range };
+}
 
 export default function ReportsPage() {
   const { loading, can } = useUser();
-  const [days, setDays]         = useState(7);
+  const [dateRange, setDateRange] = useState<DateRange>(() => ({
+    since: format(subDays(new Date(), 6), "yyyy-MM-dd"),
+    until: format(new Date(), "yyyy-MM-dd"),
+  }));
   const [deviceId, setDeviceId] = useState("");
   const [appSearch, setAppSearch] = useState("");
+  const [talentQuery, setTalentQuery] = useState("");
+  const [deviceQuery, setDeviceQuery] = useState("");
+  const [exportOpen, setExportOpen] = useState(false);
+  const debouncedAppSearch = useDebouncedValue(appSearch, 200);
 
   const { data: devices } = useSWR<Device[]>("devices", getDevices);
   const selectedDevice = devices?.find(d => d.id === deviceId);
 
-  const summaryKey = deviceId ? ["device-summary", deviceId, days] : ["summary", days];
-  const appsKey    = deviceId ? ["device-apps",   deviceId, days]  : ["top-apps", days];
+  // Devices are gated on `reports:view` (this page's own permission), but
+  // employee email lives behind `users:view` — a separate module. Fetch it
+  // only when the caller actually holds that permission; unconditionally
+  // calling getUsers() here would 403 for any reports-only role. When it's
+  // not available, the talent search bar falls back to hostname(s) alone as
+  // the disambiguator, which the PRD explicitly allows ("email or devices").
+  const canViewUsers = can("users", "view");
+  const { data: users } = useSWR<User[]>(canViewUsers ? "reports-talent-emails" : null, () => getUsers());
+  const emailByEmployeeId = useMemo(() => {
+    const map = new Map<string, string>();
+    users?.forEach(u => map.set(u.id, u.email));
+    return map;
+  }, [users]);
 
-  const { data: summary, isLoading: summaryLoading } = useSWR<CompanyDay[]>(
+  // The only person-shaped data this page has is `devices`, which is
+  // device-keyed: a talent with two laptops appears twice, and an unassigned
+  // device has no person at all. Group by employee_id so each PERSON shows up
+  // once in the search results (with their device hostnames folded into the
+  // detail line) instead of once per device — that's what actually resolves
+  // "three Mohammads" into distinct, pickable rows. Unassigned devices have no
+  // employee to group under, so they're deliberately left out of this list;
+  // they remain reachable exactly as before via the plain `<select>` below.
+  const talentPeople = useMemo(() => {
+    const map = new Map<string, { id: string; name: string; deviceIds: string[]; hostnames: string[] }>();
+    for (const d of devices ?? []) {
+      if (!d.employee_id) continue;
+      const existing = map.get(d.employee_id);
+      if (existing) {
+        existing.deviceIds.push(d.id);
+        existing.hostnames.push(d.hostname);
+      } else {
+        map.set(d.employee_id, {
+          id: d.employee_id,
+          name: d.employee_name ?? d.hostname,
+          deviceIds: [d.id],
+          hostnames: [d.hostname],
+        });
+      }
+    }
+    return Array.from(map.values());
+  }, [devices]);
+
+  const talentResults: TalentSearchResult[] = useMemo(() => {
+    return smartSort(
+      talentQuery,
+      talentPeople,
+      p => [p.name, emailByEmployeeId.get(p.id), ...p.hostnames],
+    ).map(p => {
+      const email = emailByEmployeeId.get(p.id);
+      const hostList = p.hostnames.join(", ");
+      // Email + hostname together when we have both (the PRD's ideal
+      // disambiguator); hostname alone stands in for email when `users:view`
+      // isn't held.
+      return email
+        ? { id: p.id, name: p.name, email, detail: hostList }
+        : { id: p.id, name: p.name, email: hostList };
+    });
+  }, [talentQuery, talentPeople, emailByEmployeeId]);
+
+  function handleSelectTalent(result: TalentSearchResult) {
+    const person = talentPeople.find(p => p.id === result.id);
+    if (person && person.deviceIds.length > 0) {
+      // A person with multiple devices lands on their first one; the device
+      // search bar below still finds every individual device, so switching
+      // to a specific one of their other machines stays possible.
+      setDeviceId(person.deviceIds[0]);
+    }
+    setTalentQuery("");
+  }
+
+  // Device search bar — a proper searchable picker (hostname/employee/
+  // platform), in place of the old plain "All users / devices" <select>,
+  // which only offered first-letter browser type-ahead over a concatenated
+  // string. Lists every device individually (including unassigned ones,
+  // which the talent search above deliberately omits), so it's still the
+  // tool for picking a specific machine rather than a person.
+  const debouncedDeviceQuery = useDebouncedValue(deviceQuery, 200);
+  const deviceResults: TalentSearchResult[] = useMemo(
+    () => smartSort(
+      debouncedDeviceQuery, devices ?? [], d => [d.hostname, d.employee_name, d.platform],
+    ).map(d => ({
+      id: d.id,
+      name: d.hostname,
+      email: d.employee_name ?? "Unassigned",
+      detail: platformLabel(d.platform),
+    })),
+    [debouncedDeviceQuery, devices],
+  );
+
+  function handleSelectDevice(result: TalentSearchResult) {
+    setDeviceId(result.id);
+    setDeviceQuery(result.name);
+  }
+
+  // Keep both search boxes' text in sync whenever deviceId changes from
+  // elsewhere (picking a talent above sets deviceId to their first device;
+  // clearing either box clears deviceId directly) — neither box should keep
+  // showing stale text for a filter that's no longer actually applied.
+  useEffect(() => {
+    if (!deviceId) { setDeviceQuery(""); return; }
+    const match = devices?.find(d => d.id === deviceId);
+    if (match) setDeviceQuery(match.hostname);
+  }, [deviceId, devices]);
+
+  // What the server actually reports on (picker dates shifted to the UTC
+  // day when the local date is ahead) — drives the queries, the subtitle and
+  // the export's initial range, so all three describe the same window.
+  const effectiveRange = useMemo(() => normalizeReportRange(dateRange), [dateRange]);
+  const { days: rangeArgDays, range: rangeArg } = reportRangeArg(effectiveRange);
+  // Length of the window the server actually reports on (not the raw picker value).
+  const effectiveRangeDays = differenceInCalendarDays(new Date(effectiveRange.until), new Date(effectiveRange.since)) + 1;
+
+  const summaryKey = deviceId
+    ? ["device-summary", deviceId, effectiveRange.since, effectiveRange.until]
+    : ["summary", effectiveRange.since, effectiveRange.until];
+  const appsKey = deviceId
+    ? ["device-apps", deviceId, effectiveRange.since, effectiveRange.until]
+    : ["top-apps", effectiveRange.since, effectiveRange.until];
+
+  const {
+    data: summary, error: summaryRawError, isLoading: summaryLoading,
+    isValidating: summaryValidating, mutate: mutateSummary,
+  } = useSWR<CompanyDay[]>(
     summaryKey,
-    () => deviceId ? getDeviceSummary(deviceId, days) : getCompanySummary(days),
+    () => deviceId
+      ? getDeviceSummary(deviceId, rangeArgDays, rangeArg)
+      : getCompanySummary(rangeArgDays, rangeArg),
   );
-  const { data: apps } = useSWR<AppUsage[]>(
+  const {
+    data: apps, error: appsRawError, isLoading: appsLoading,
+    isValidating: appsValidating, mutate: mutateApps,
+  } = useSWR<AppUsage[]>(
     appsKey,
-    () => deviceId ? getDeviceTopApps(deviceId, days) : getTopApps(days),
+    () => deviceId
+      ? getDeviceTopApps(deviceId, rangeArgDays, rangeArg)
+      : getTopApps(rangeArgDays, APP_SEARCH_LIMIT, rangeArg),
   );
+
+  // A navigation-aborted request is not a failure (and SWR may have cached it as
+  // one for this key) — never surface it.
+  const summaryError = isAbortError(summaryRawError) ? undefined : summaryRawError;
+  const appsError = isAbortError(appsRawError) ? undefined : appsRawError;
+
+  // Per-card state machine (same for stat cards + chart, which share the summary
+  // query, and for Top applications):
+  //   cold       isLoading with no data at all            -> skeleton
+  //   error      the CURRENT key's request failed         -> inline error panel
+  //              (shown even though keepPreviousData still hands us the previous
+  //              range's rows — those must never pass as this filter's data)
+  //   refreshing validating, data present, no error       -> data dimmed + "Updating…"
+  //   empty      data present but nothing in the range    -> actionable empty state
+  //   success    data present                             -> as before
+  // isValidating is true during background revalidation (stale data is still
+  // shown, per the global keepPreviousData config) — a filter/date-range/
+  // device change re-keys both SWR calls above, but without this the old
+  // numbers just sit there with no indication a new fetch is in flight until
+  // they silently swap. Same "Updating…" convention as Organization Overview.
+  const summaryRefreshing = summaryValidating && !!summary && !summaryError;
+  const appsRefreshing = appsValidating && !!apps && !appsError;
+  const isRefreshing = summaryRefreshing || appsRefreshing;
+
+  // The chart is keyed by the range+device its data was actually fetched for, so
+  // recharts remounts (and replays its entry animation) when new data lands
+  // instead of carrying the old series' animation state. The key only advances
+  // once that fetch settles — while refreshing, the old data keeps the old key
+  // rather than re-animating stale bars.
+  const chartKey = `${deviceId || "all"}|${effectiveRange.since}|${effectiveRange.until}`;
+  const settledChartKeyRef = useRef(chartKey);
+  // Day count of the window the DISPLAYED summary belongs to. While refreshing, the
+  // stat cards still show the previous range's totals, so their "over N days"
+  // label must keep describing that window, not the newly picked one.
+  const settledRangeDaysRef = useRef(effectiveRangeDays);
+  if (summary && !summaryValidating && !summaryError) {
+    settledChartKeyRef.current = chartKey;
+    settledRangeDaysRef.current = effectiveRangeDays;
+  }
+  const shownRangeDays = settledRangeDaysRef.current;
+
+  // Empty-state escape hatches: widen to the last 30 days (only offered when the
+  // current range is shorter), and drop the device filter.
+  function widenRange() {
+    setDateRange({
+      since: format(subDays(new Date(), 29), "yyyy-MM-dd"),
+      until: format(new Date(), "yyyy-MM-dd"),
+    });
+  }
+  const onWiden = effectiveRangeDays < 30 ? widenRange : undefined;
+  const onClearDevice = deviceId ? () => { setDeviceId(""); setDeviceQuery(""); } : undefined;
 
   const filteredApps = useMemo(() => {
     if (!apps) return [];
-    if (!appSearch.trim()) return apps;
-    const q = appSearch.toLowerCase();
-    return apps.filter(a => a.app_name.toLowerCase().includes(q));
-  }, [apps, appSearch]);
+    return smartSort(debouncedAppSearch, apps, a => [a.app_name]);
+  }, [apps, debouncedAppSearch]);
 
   const totalActive = summary?.reduce((sum, d) => sum + d.active_seconds, 0) ?? 0;
 
   if (loading) return <PageLoader />;
   if (!can("reports", "view")) return <AccessDenied label="Reports" />;
-  if (summaryLoading && !summary) return <PageSkeleton variant="dashboard" cards={2} />;
+
+  // Cold load only — keepPreviousData means these go false again the instant
+  // ANY data exists, even for a different filter, so this never re-fires on a
+  // filter change (isRefreshing above covers that case instead). Deliberately
+  // NOT an early return: the header, date picker, and both search bars render
+  // immediately either way, so the page is interactive before the first
+  // response ever lands instead of being replaced by a full-page placeholder.
+  const summaryColdLoading = summaryLoading && !summary && !summaryError;
+  const appsColdLoading = appsLoading && !apps && !appsError;
 
   return (
     /* Outer: fills the flex-col main, no overflow — all scroll happens inside */
     <div className="flex-1 min-h-0 flex flex-col gap-3">
 
+      {/* Exports exactly what the filters above show. The dialog gets a copy of
+          the range, so changing it there never touches the page filter. */}
+      {exportOpen && can("reports", "view") && (
+        <ExportReportDialog
+          initialRange={effectiveRange}
+          target={selectedDevice
+            ? { kind: "device", deviceId: selectedDevice.id, hostname: selectedDevice.hostname, employeeName: selectedDevice.employee_name }
+            : { kind: "fleet" }}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
+
       {/* ── Header + filters — fixed height, never scrolls away ── */}
-      <div className="shrink-0 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">Reports</h1>
-          <p className="text-gray-600 text-xs sm:text-sm mt-0.5">
-            {selectedDevice
-              ? `${selectedDevice.hostname}${selectedDevice.employee_name ? ` · ${selectedDevice.employee_name}` : ""}`
-              : "Company-wide"}
-            {" · "}last {days} days
-          </p>
+      <div className="shrink-0 flex flex-col gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl sm:text-2xl font-semibold text-gray-900 leading-tight">Reports</h1>
+              {isRefreshing && (
+                <span role="status" className="text-xs text-gray-400 animate-pulse motion-reduce:animate-none">Updating…</span>
+              )}
+            </div>
+            <p className="text-gray-600 text-xs sm:text-sm mt-0.5">
+              {selectedDevice
+                ? `${selectedDevice.hostname}${selectedDevice.employee_name ? ` · ${selectedDevice.employee_name}` : ""}`
+                : "Company-wide"}
+              {" · "}{describeRange(effectiveRange)}
+            </p>
+          </div>
+
+          {/* Date range picker — kept up here, next to the title, so the primary
+              talent search below reads as the page's main filter. Supports real
+              calendar ranges (This/Last Month, This/Last Year, Custom), not just
+              a rolling N-days-ending-today window. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <DateRangePicker value={dateRange} onChange={setDateRange} />
+            {can("reports", "view") && (
+              <button
+                type="button"
+                onClick={() => setExportOpen(true)}
+                // A device filter whose device isn't resolved yet must not fall
+                // back to a fleet export.
+                disabled={!!deviceId && !selectedDevice}
+                title="Export what these filters show"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg border border-brand-200 bg-brand-50 text-brand-700 hover:border-brand-300 hover:bg-brand-100 shadow-sm transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Download size={14} />
+                Export report
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-          {/* Device / User filter */}
-          <div className="relative">
-            <select
-              value={deviceId}
-              onChange={e => setDeviceId(e.target.value)}
-              className="appearance-none bg-white border border-gray-300 rounded-lg pl-3 pr-8 py-1.5 sm:py-2 text-xs sm:text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-brand-300 focus:border-brand-400 cursor-pointer"
-            >
-              <option value="">All users / devices</option>
-              {devices?.map(d => (
-                <option key={d.id} value={d.id}>
-                  {d.employee_name ? `${d.employee_name} (${d.hostname})` : d.hostname}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
-          </div>
+        <div className="flex flex-wrap items-start gap-2 sm:gap-3">
+          {/* Prominent talent search — find the right person even when several
+              share a name, disambiguated by email (when permitted) and/or
+              device hostname. */}
+          <TalentSearchBar
+            value={talentQuery}
+            onChange={setTalentQuery}
+            results={talentResults}
+            onSelect={handleSelectTalent}
+            placeholder="Find a talent by name or email…"
+            label="Find a talent to filter reports"
+            className="w-full sm:w-80"
+          />
 
-          {/* Period toggle */}
-          <div className="flex items-center bg-white border border-gray-300 rounded-lg overflow-hidden">
-            {PERIODS.map(p => (
-              <button
-                key={p.value}
-                onClick={() => setDays(p.value)}
-                className={`px-2.5 sm:px-3 py-1.5 sm:py-2 text-xs sm:text-sm transition ${
-                  days === p.value
-                    ? "bg-brand-600 text-white font-medium"
-                    : "text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
+          {/* Device search — proper search bar, not a runtime-search dropdown.
+              Lists every device individually (including unassigned ones), so
+              picking a specific machine (e.g. for a talent with more than
+              one) still works. */}
+          <TalentSearchBar
+            value={deviceQuery}
+            onChange={v => { setDeviceQuery(v); if (!v) setDeviceId(""); }}
+            results={deviceResults}
+            onSelect={handleSelectDevice}
+            placeholder="All users / devices — search hostname…"
+            label="Find a device to filter reports"
+            className="w-full sm:w-72"
+          />
         </div>
       </div>
 
       {/* ── Stat cards — fixed height row, shrinks if no data ── */}
-      {totalActive > 0 && (
-        <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3">
+      {summaryColdLoading ? (
+        <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3" aria-busy="true" aria-label="Loading stats">
+          {[0, 1].map(i => (
+            <div key={i} className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
+              <div className="h-3 w-24 bg-gray-200 rounded animate-pulse mb-2" />
+              <div className="h-6 w-20 bg-gray-200 rounded animate-pulse mb-2" />
+              <div className="h-3 w-28 bg-gray-200 rounded animate-pulse" />
+            </div>
+          ))}
+        </div>
+      ) : summaryError ? (
+        // The numbers below would describe a different range (or nothing), so show
+        // placeholders — the chart card carries the error message and Retry.
+        <div className="shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3" aria-label="Stats unavailable">
+          {["Total active time", "Avg per day"].map(label => (
+            <div key={label} className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
+              <p className="text-xs text-gray-600 mb-0.5">{label}</p>
+              <p className="text-lg sm:text-xl font-semibold text-gray-400 leading-tight">—</p>
+              <p className="text-xs text-gray-600 mt-0.5">unavailable</p>
+            </div>
+          ))}
+        </div>
+      ) : totalActive > 0 && (
+        <div
+          className={`shrink-0 grid grid-cols-2 sm:grid-cols-3 gap-3 transition-opacity motion-reduce:transition-none ${summaryRefreshing ? "opacity-60 pointer-events-none" : ""}`}
+          aria-busy={summaryRefreshing}
+        >
           <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
             <p className="text-xs text-gray-600 mb-0.5">Total active time</p>
             <p className="text-lg sm:text-xl font-semibold text-gray-900 leading-tight">{fmtSeconds(totalActive)}</p>
-            <p className="text-xs text-gray-600 mt-0.5">over {days} days</p>
+            <p className="text-xs text-gray-600 mt-0.5">over {shownRangeDays} {shownRangeDays === 1 ? "day" : "days"}</p>
           </div>
           {summary && summary.length > 0 && (
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
@@ -139,21 +422,100 @@ export default function ReportsPage() {
       )}
 
       {/* ── Chart — fixed height, never grows ── */}
-      {summary && (
+      {summaryColdLoading ? (
+        <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 pt-4 pb-3 shadow-sm" aria-busy="true" aria-label="Loading chart">
+          <div className="h-4 w-40 bg-gray-200 rounded animate-pulse mb-3" />
+          {/* Matches DailyActiveBarChart's own h-32/h-40 footprint exactly, so
+              nothing shifts when the real chart mounts in its place. */}
+          <div className="h-32 sm:h-40 bg-gray-50 rounded animate-pulse" />
+        </div>
+      ) : summaryError ? (
         <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 pt-4 pb-3 shadow-sm">
           <p className="text-sm font-semibold text-gray-800 mb-2">Active time per day</p>
-          {/* h-32 on mobile (128px), h-40 on sm+ (160px) */}
-          <DailyActiveBarChart data={summary} />
+          <ReportErrorPanel
+            error={summaryError}
+            what="the daily chart"
+            onRetry={() => { void mutateSummary(); }}
+            retrying={summaryValidating}
+          />
+        </div>
+      ) : summary && (
+        <div
+          className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 pt-4 pb-3 shadow-sm"
+          aria-busy={summaryRefreshing}
+        >
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-sm font-semibold text-gray-800">Active time per day</p>
+            {summaryRefreshing && (
+              <span role="status" className="text-xs text-gray-400 animate-pulse motion-reduce:animate-none">Updating…</span>
+            )}
+          </div>
+          {totalActive > 0 ? (
+            // h-32 on mobile (128px), h-40 on sm+ (160px). While refreshing the
+            // old range's bars stay visible but dimmed and inert (no tooltips),
+            // so they can't be read as the new range's data.
+            <div
+              className={`transition-opacity motion-reduce:transition-none ${summaryRefreshing ? "opacity-50 pointer-events-none" : ""}`}
+            >
+              <DailyActiveBarChart key={settledChartKeyRef.current} data={summary} />
+            </div>
+          ) : (
+            <ReportEmptyPanel onWiden={onWiden} onClearDevice={onClearDevice} />
+          )}
         </div>
       )}
 
       {/* ── Top applications — fills ALL remaining vertical space, own scroller ── */}
-      {apps && apps.length > 0 && (
-        <div className="flex-1 min-h-0 flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+      {appsColdLoading ? (
+        <div className="flex-1 min-h-0 flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden" aria-busy="true" aria-label="Loading top applications">
+          <div className="shrink-0 px-4 sm:px-5 pt-4 pb-3 border-b border-gray-100">
+            <div className="h-4 w-32 bg-gray-200 rounded animate-pulse mb-3" />
+            <div className="h-8 w-full bg-gray-100 rounded-lg animate-pulse" />
+          </div>
+          <div className="flex-1 min-h-0 overflow-hidden px-4 sm:px-5 py-3 space-y-3">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-2 sm:gap-3">
+                <div className="h-3 w-5 bg-gray-200 rounded animate-pulse shrink-0" />
+                <div className="h-3 w-28 sm:w-40 bg-gray-200 rounded animate-pulse shrink-0" />
+                <div className="flex-1 h-2 bg-gray-100 rounded-full animate-pulse" />
+                <div className="h-3 w-12 bg-gray-200 rounded animate-pulse shrink-0" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : appsError ? (
+        <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 sm:px-5 pt-4 pb-4 shadow-sm">
+          <p className="text-sm font-semibold text-gray-800 mb-3">Top applications</p>
+          <ReportErrorPanel
+            error={appsError}
+            what="top applications"
+            onRetry={() => { void mutateApps(); }}
+            retrying={appsValidating}
+          />
+        </div>
+      ) : apps && apps.length === 0 ? (
+        <div className="shrink-0 bg-white border border-gray-200 rounded-xl px-4 sm:px-5 pt-4 pb-2 shadow-sm">
+          <p className="text-sm font-semibold text-gray-800">Top applications</p>
+          <ReportEmptyPanel
+            hint="No applications were used in this range. Try a wider date range, or pick a different device."
+            onWiden={onWiden}
+            onClearDevice={onClearDevice}
+          />
+        </div>
+      ) : apps && (
+        <div
+          className="flex-1 min-h-0 flex flex-col bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden"
+          aria-busy={appsRefreshing}
+        >
 
           {/* Card header + search — sticky at top of card, never scrolls */}
           <div className="shrink-0 px-4 sm:px-5 pt-4 pb-3 border-b border-gray-100">
-            <p className="text-sm font-semibold text-gray-800 mb-3">Top applications</p>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <p className="text-sm font-semibold text-gray-800">Top applications</p>
+              {appsRefreshing && (
+                <span role="status" className="text-xs text-gray-400 animate-pulse motion-reduce:animate-none">Updating…</span>
+              )}
+            </div>
             <div className="relative">
               <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
               <input
@@ -175,7 +537,11 @@ export default function ReportsPage() {
           </div>
 
           {/* Scrollable rows — this is the ONLY element that scrolls */}
-          <div className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-5 py-3 space-y-2.5">
+          {/* While refreshing, the previous range's rows stay but are dimmed and
+              inert so they can't be mistaken for the new range's ranking. */}
+          <div
+            className={`flex-1 min-h-0 overflow-y-auto px-4 sm:px-5 py-3 space-y-2.5 transition-opacity motion-reduce:transition-none ${appsRefreshing ? "opacity-50 pointer-events-none" : ""}`}
+          >
             {filteredApps.map((app, i) => {
               const pct = Math.round((app.seconds / (apps[0]?.seconds || 1)) * 100);
               return (
@@ -195,7 +561,11 @@ export default function ReportsPage() {
               );
             })}
             {filteredApps.length === 0 && (
-              <p className="text-sm text-gray-600 py-6 text-center">No applications match your search.</p>
+              <p className="text-sm text-gray-600 py-6 text-center">
+                {debouncedAppSearch.trim()
+                  ? `No matches for "${debouncedAppSearch.trim()}" in the top ${apps.length} applications.`
+                  : "No applications match your search."}
+              </p>
             )}
           </div>
         </div>

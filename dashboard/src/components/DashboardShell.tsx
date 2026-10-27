@@ -5,6 +5,8 @@ import { useSWRConfig } from "swr";
 import { format } from "date-fns";
 import Sidebar from "@/components/Sidebar";
 import NotificationBell from "@/components/NotificationBell";
+import ProfileMenu from "@/components/ProfileMenu";
+import ImpersonationBanner from "@/components/ImpersonationBanner";
 import EdgeLogo from "@/components/EdgeLogo";
 import { useUser } from "@/hooks/useUser";
 
@@ -36,7 +38,13 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
   const todayLabel = format(new Date(), "EEEE, MMMM d");
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-50">
+    // Column, not a row: the impersonation banner is a full-width sibling ABOVE
+    // the sidebar+content row. It has to displace them rather than overlay, and
+    // this container owns the only h-screen, so the row below takes the rest.
+    <div className="flex flex-col h-screen overflow-hidden bg-gray-50">
+      <ImpersonationBanner />
+
+      <div className="flex flex-1 min-h-0">
       <Sidebar open={open} onClose={() => setOpen(false)} />
 
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
@@ -85,6 +93,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
               <RefreshCw size={18} className={spinning ? "animate-spin" : ""} />
             </button>
             <NotificationBell />
+            <ProfileMenu />
           </div>
         </header>
 
@@ -92,6 +101,7 @@ export default function DashboardShell({ children }: { children: ReactNode }) {
         <main className="flex-1 overflow-hidden p-3 sm:p-4 lg:p-6 flex flex-col">
           {children}
         </main>
+      </div>
       </div>
     </div>
   );

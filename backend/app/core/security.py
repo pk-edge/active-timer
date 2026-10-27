@@ -57,6 +57,34 @@ def create_admin_token(user_id: str, role: str, company_id: str) -> str:
     })
 
 
+def create_impersonation_token(
+    target_id: str, company_id: str, act_by: str, act_email: str, jti: str,
+) -> str:
+    """Mint a Super-Admin impersonation token.
+
+    `type` stays "admin" on purpose: every auth path already accepts that type,
+    so the impersonated session flows through the normal dependency and inherits
+    the TARGET's permissions and data scope with no parallel auth path to keep in
+    sync. The `imp` flag is what makes it special, and `app/api/deps.py` reads it.
+
+    `act_by`/`act_email` carry the real admin so the session can be handed back on
+    exit and every audit row written during it can be attributed. `jti` keys the
+    Redis registry that makes revocation (i.e. a working Exit button) possible.
+    Short-lived by design — see settings.IMPERSONATION_TTL_MINUTES.
+    """
+    return _encode({
+        "sub":        target_id,
+        "company_id": company_id,
+        "type":       "admin",
+        "imp":        True,
+        "act_by":     act_by,
+        "act_email":  act_email,
+        "jti":        jti,
+        "exp":        datetime.now(timezone.utc)
+                      + timedelta(minutes=settings.IMPERSONATION_TTL_MINUTES),
+    })
+
+
 def decode_token(token: str) -> dict:
     # require exp: every token we mint carries one, so a token WITHOUT it is
     # forged/foreign — without this option such a token would validate forever.

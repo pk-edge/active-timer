@@ -26,6 +26,11 @@ class RoleOut(BaseModel):
     permissions: list[PermissionItem]
 
 
+class ImpersonatorOut(BaseModel):
+    id: str
+    email: Optional[str] = None
+
+
 class MeOut(BaseModel):
     id: str
     name: str
@@ -33,6 +38,21 @@ class MeOut(BaseModel):
     role_name: Optional[str] = None
     scope_type: str
     permissions: list[PermissionItem]
+    # Impersonation. `can_impersonate` is the ONLY signal the dashboard gets that
+    # the feature exists — it is false for every non-Super-Admin, so the menu
+    # never renders for them.
+    can_impersonate: bool = False
+    impersonating: bool = False
+    impersonator: Optional[ImpersonatorOut] = None
+
+
+class ImpersonationCandidateOut(BaseModel):
+    """Deliberately narrower than UserOut — the picker needs identification only."""
+    id: str
+    name: str
+    email: str
+    role_name: Optional[str] = None
+    user_kind: str = "team"
 
 
 # ── Users ───────────────────────────────────────────────────────────────────

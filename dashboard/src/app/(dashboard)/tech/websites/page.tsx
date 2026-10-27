@@ -14,11 +14,14 @@ const UsageLineChart = dynamic(() => import("./_components/UsageLineChart"), {
   loading: () => <div className="h-[220px] animate-pulse bg-gray-50 rounded-lg" />,
 });
 import { useUser } from "@/hooks/useUser";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { AccessDenied } from "@/components/AccessDenied";
 import {
   SmartSearchBar, FilterBar, QuickStats, DetailTabs,
   DurationRow, ProdIcon, fmtDur, exportCsv, Pager, LIST_PAGE_SIZE,
+  ListSkeletonRows, DetailSkeletonRows,
   type DateRange } from "@/components/UsagePageShell";
+import { smartSort } from "@/lib/smartSearch";
 import type { WebsiteItem, WebsiteDetailOut } from "@/types";
 
 const DETAIL_TABS = ["Titles", "Subpages", "Users", "Usage"];
@@ -26,13 +29,21 @@ const DETAIL_TABS = ["Titles", "Subpages", "Users", "Usage"];
 // ── Right panel ───────────────────────────────────────────────────────────────
 
 function DetailPanel({
-  item, since, until, groupId, employeeId }: { item: WebsiteItem; since: string; until: string; groupId: string; employeeId: string }) {
+  item, since, until, groupId, employeeId, deviceId }: {
+    item: WebsiteItem; since: string; until: string;
+    groupId: string; employeeId: string; deviceId: string;
+  }) {
   const [tab, setTab] = useState("Titles");
 
-  const { data, isLoading } = useSWR<WebsiteDetailOut>(
-    ["website-detail", item.host, tab.toLowerCase(), since, until, groupId, employeeId],
-    () => getWebsiteDetail(item.host, tab.toLowerCase(), since, until, groupId || undefined, employeeId || undefined),
+  const { data, isLoading, isValidating } = useSWR<WebsiteDetailOut>(
+    ["website-detail", item.host, tab.toLowerCase(), since, until, groupId, employeeId, deviceId],
+    () => getWebsiteDetail(item.host, tab.toLowerCase(), since, until,
+                           { group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
+  // Cold load only — keepPreviousData means isLoading goes false the instant
+  // any data exists, even for a different tab/filter key. isValidating covers
+  // the background-refetch case (switching tabs, changing filters) instead.
+  const isRefreshing = isValidating && !!data;
 
   return (
     <div className="flex flex-col h-full">
@@ -43,6 +54,9 @@ function DetailPanel({
             <Globe size={12} className="text-gray-600" />
           </div>
           <p className="font-semibold text-gray-900 text-sm truncate">{item.host}</p>
+          {isRefreshing && (
+            <span className="text-xs text-gray-400 animate-pulse shrink-0">Updating…</span>
+          )}
           <a href={`https://${item.host}`} target="_blank" rel="noreferrer"
              className="text-gray-600 hover:text-brand-500 ml-auto shrink-0">
             <ExternalLink size={13} />
@@ -61,7 +75,7 @@ function DetailPanel({
       {/* Tab content */}
       <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {isLoading ? (
-          <p className="text-sm text-gray-600 py-8 text-center">Loading…</p>
+          <DetailSkeletonRows />
         ) : tab === "Titles" ? (
           <>
             {(data?.titles ?? []).length === 0
@@ -118,27 +132,33 @@ export default function WebsiteUsagePage() {
   const [dateRange, setDateRange] = useState<DateRange>({ since: format(new Date(), 'yyyy-MM-dd'), until: format(new Date(), 'yyyy-MM-dd') });
   const [groupId,      setGroupId]      = useState("");
   const [employeeId,   setEmployeeId]   = useState("");
+  const [deviceId,     setDeviceId]     = useState("");
   const [productivity, setProductivity] = useState("");
   const [summaryMode,  setSummaryMode]  = useState(true);
   const [selected,     setSelected]     = useState<WebsiteItem | null>(null);
 
-  const { data, isLoading } = useSWR(
-    ["websites", dateRange.since, dateRange.until, productivity, groupId, employeeId],
-    () => getWebsites(dateRange.since, dateRange.until, productivity || undefined, groupId || undefined, employeeId || undefined),
+  const { data, isLoading, isValidating } = useSWR(
+    ["websites", dateRange.since, dateRange.until, productivity, groupId, employeeId, deviceId],
+    () => getWebsites(dateRange.since, dateRange.until,
+                      { productivity, group_id: groupId, employee_id: employeeId, device_id: deviceId }),
   );
+  // isValidating is true during background revalidation (stale data is still
+  // shown, per the global keepPreviousData config) — a filter change re-keys
+  // this call, but without this the old list just sits there with no
+  // indication a new fetch is running until it silently swaps. Same
+  // "Updating…" convention as Organization Overview.
+  const isRefreshing = isValidating && !!data;
+
+  const debouncedSearch = useDebouncedValue(search, 200);
 
   const filtered = useMemo(() => {
     const items = data?.items ?? [];
-    if (!search.trim()) return items;
-    const q = search.toLowerCase();
-    return items.filter(i =>
-      i.host.toLowerCase().includes(q) || (i.category_name ?? "").toLowerCase().includes(q)
-    );
-  }, [data, search]);
+    return smartSort(debouncedSearch, items, i => [i.host, i.category_name]);
+  }, [data, debouncedSearch]);
 
   // Client-side pagination over the (today-scoped) list — keeps the DOM light.
   const [page, setPage] = useState(1);
-  useEffect(() => { setPage(1); }, [search, dateRange.since, dateRange.until, groupId, employeeId, productivity]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, dateRange.since, dateRange.until, groupId, employeeId, deviceId, productivity]);
   const paged = useMemo(
     () => filtered.slice((page - 1) * LIST_PAGE_SIZE, page * LIST_PAGE_SIZE),
     [filtered, page],
@@ -171,7 +191,12 @@ export default function WebsiteUsagePage() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-2 mb-4 shrink-0">
         <div>
-          <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Website Usage</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl sm:text-2xl font-semibold text-gray-900">Website Usage</h1>
+            {isRefreshing && (
+              <span className="text-xs text-gray-400 animate-pulse">Updating…</span>
+            )}
+          </div>
           <p className="text-sm text-gray-600 mt-0.5">Browser activity from all devices</p>
         </div>
         <div className="flex items-center gap-2">
@@ -193,6 +218,7 @@ export default function WebsiteUsagePage() {
           dateRange={dateRange} setDateRange={setDateRange}
           groupId={groupId} setGroupId={setGroupId}
           employeeId={employeeId} setEmployeeId={setEmployeeId}
+          deviceId={deviceId} setDeviceId={setDeviceId}
           productivity={productivity} setProductivity={setProductivity}
           summaryMode={summaryMode} setSummaryMode={setSummaryMode}
         />
@@ -219,9 +245,13 @@ export default function WebsiteUsagePage() {
           </div>
 
           {/* Rows */}
-          <div className="flex-1 overflow-y-auto min-h-0">
+          <div className="flex-1 overflow-y-auto min-h-0" aria-busy={isLoading || undefined}>
             {isLoading ? (
-              <p className="text-sm text-gray-600 py-12 text-center animate-pulse">Loading…</p>
+              <ListSkeletonRows
+                gridClassName="grid-cols-[28px_1fr_90px_52px_28px] sm:grid-cols-[32px_1fr_110px_60px_32px]"
+                rowClassName="gap-2 px-3 sm:px-4 py-3"
+                columns={["icon", "text", "duration", "pct", "menu"]}
+              />
             ) : filtered.length === 0 ? (
               <p className="text-sm text-gray-600 py-12 text-center">No websites found.</p>
             ) : paged.map(item => (
@@ -258,7 +288,8 @@ export default function WebsiteUsagePage() {
             >
               <ChevronLeft size={16} /> Back to list
             </button>
-            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until} groupId={groupId} employeeId={employeeId} />
+            <DetailPanel item={selected} since={dateRange.since} until={dateRange.until}
+                         groupId={groupId} employeeId={employeeId} deviceId={deviceId} />
           </div>
         )}
       </div>

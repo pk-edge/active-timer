@@ -12,12 +12,13 @@ from app.core.group_tree import descendant_group_ids, devices_for_groups
 from app.core import audit
 from app.core.app_normalizer import normalize_app_name
 from app.core.scoping import visible_device_ids, ALL
-from app.core.RedisCache import cache_get, cache_set, FRESH_ANALYTICS, STALE_ANALYTICS, FRESH_DETAIL, STALE_DETAIL
-from app.db.models import AppCategory, AppCategoryRule, Employee, EmployeeGroupAccess, Group, GroupMember
+from app.core.RedisCache import cache_get, cache_set, cache_delete, FRESH_ANALYTICS, STALE_ANALYTICS, FRESH_DETAIL, STALE_DETAIL
+from app.core.analytics_cache import cached_or_compute, ttl_for_range
+from app.db.models import AppCategory, AppCategoryRule, Device, Employee, EmployeeGroupAccess, Group, GroupMember
 from app.schemas.rbac import GroupOut
 from app.schemas.tech import (
     CategoryOut, CategoryRuleOut, CategoryCreate, CategoryUpdate, RuleCreate, CategoriesPageOut,
-    TechFilterUserOut,
+    TechFilterUserOut, TechFilterDeviceOut,
     CategoryAllocationItem, AppTrendsOut, AppTrendItem, TechSummaryOut,
     AppDetailItem, AdoptionOut,
     WebsiteItem, WebsiteListOut, WebsiteDetailOut, WebsiteDetailTitle,
@@ -213,6 +214,7 @@ async def create_category(
     await db.flush()
     await audit.record(db, admin, "category.create", "category", str(cat.id), {"name": cat.name})
     await db.commit()
+    await _evict_prod_map(admin.company_id)
     await db.refresh(cat)
     return CategoryOut(id=cat.id, name=cat.name, color=cat.color,
                        description=cat.description, is_system=cat.is_system,
@@ -244,6 +246,7 @@ async def update_category(
         cat.description = body.description
     await audit.record(db, admin, "category.update", "category", cat_id, {"name": cat.name})
     await db.commit()
+    await _evict_prod_map(admin.company_id)
     await db.refresh(cat)
     rules_res = await db.execute(select(AppCategoryRule).where(AppCategoryRule.category_id == cat.id))
     rules = rules_res.scalars().all()
@@ -275,6 +278,7 @@ async def delete_category(
     cat.is_deleted = True
     await audit.record(db, admin, "category.delete", "category", cat_id, {"name": cat.name})
     await db.commit()
+    await _evict_prod_map(admin.company_id)
 
 
 # ── Category Rules CRUD ───────────────────────────────────────────────────────
@@ -312,6 +316,7 @@ async def add_rule(
     rule = AppCategoryRule(category_id=cid, company_id=admin.company_id, app_pattern=pattern)
     db.add(rule)
     await db.commit()
+    await _evict_prod_map(admin.company_id)
     await db.refresh(rule)
     return CategoryRuleOut(id=rule.id, app_pattern=rule.app_pattern, created_at=rule.created_at)
 
@@ -337,9 +342,28 @@ async def delete_rule(
         raise HTTPException(status_code=404, detail="Rule not found")
     await db.delete(rule)
     await db.commit()
+    await _evict_prod_map(admin.company_id)
 
 
 # ── Filter lookups ────────────────────────────────────────────────────────────
+# ── Filter-lookup cache ───────────────────────────────────────────────────────
+# The three lookups below run on EVERY Tech page mount (four pages, so four
+# times per visit) and one of them serialises the whole device roster — 2,003
+# rows on the reference dataset. None of it changes minute to minute, so it is
+# Redis-backed with the same stale-while-revalidate helper the analytics
+# endpoints use. The key includes the caller and their scope because the result
+# is scope-dependent: `own`, `groups` and `all` see different sets, and sharing
+# one key across them would leak rows across scopes.
+
+FILTER_FRESH = 5 * 60    # 5 min
+FILTER_STALE = 30 * 60   # 30 min
+
+
+async def _filter_lookup(key: tuple, compute, db):
+    return await cached_or_compute(key, compute, db,
+                                   fresh=FILTER_FRESH, stale=FILTER_STALE)
+
+
 # Group/employee lookups scoped by tech.view alone (not groups.view/users.view),
 # so a role that only grants Technology & AI access can still populate the
 # page's own filter dropdowns. Visibility mirrors visible_device_ids' scope_type
@@ -354,20 +378,27 @@ async def tech_filter_groups(
     scope = getattr(admin, "_scope_type", "own")
     if scope == "own":
         return []
+    # Bind the primitives NOW, not inside the lambda: a background refresh calls
+    # it on a different session, where touching the ORM-bound `admin` is unsafe.
+    cid, aid = admin.company_id, admin.id
+    return await _filter_lookup(("tech:f:groups", str(cid), str(aid), scope),
+                                lambda db: _groups_lookup(cid, aid, scope, db), db)
 
+
+async def _groups_lookup(company_id, admin_id, scope, db):
     filters = [
-        Group.company_id == admin.company_id,
+        Group.company_id == company_id,
         Group.is_deleted == False,   # noqa: E712
         Group.is_archived == False,  # noqa: E712
     ]
     if scope == "groups":
         gid_rows = await db.execute(
-            select(EmployeeGroupAccess.group_id).where(EmployeeGroupAccess.employee_id == admin.id)
+            select(EmployeeGroupAccess.group_id).where(EmployeeGroupAccess.employee_id == admin_id)
         )
         my_gids = [g[0] for g in gid_rows.all()]
         if not my_gids:
             return []
-        visible = await descendant_group_ids(my_gids, admin.company_id, db)
+        visible = await descendant_group_ids(my_gids, company_id, db)
         if not visible:
             return []
         filters.append(Group.id.in_(visible))
@@ -382,7 +413,7 @@ async def tech_filter_groups(
             path=None, is_archived=g.is_archived,
             member_count=0, child_count=0,
             created_at=g.created_at.isoformat() if g.created_at else None,
-        )
+        ).model_dump()
         for g in groups
     ]
 
@@ -395,11 +426,16 @@ async def tech_filter_users(
     scope = getattr(admin, "_scope_type", "own")
     if scope == "own":
         return []
+    cid, aid = admin.company_id, admin.id
+    return await _filter_lookup(("tech:f:users", str(cid), str(aid), scope),
+                                lambda db: _users_lookup(cid, aid, scope, db), db)
 
+
+async def _users_lookup(company_id, admin_id, scope, db):
     q = (
         select(Employee.id, Employee.name, Employee.email, Employee.is_active)
         .where(
-            Employee.company_id == admin.company_id,
+            Employee.company_id == company_id,
             Employee.is_deleted == False,  # noqa: E712
             Employee.is_approved == True,  # noqa: E712
         )
@@ -407,12 +443,12 @@ async def tech_filter_users(
     )
     if scope == "groups":
         gid_rows = await db.execute(
-            select(EmployeeGroupAccess.group_id).where(EmployeeGroupAccess.employee_id == admin.id)
+            select(EmployeeGroupAccess.group_id).where(EmployeeGroupAccess.employee_id == admin_id)
         )
         my_gids = [g[0] for g in gid_rows.all()]
         if not my_gids:
             return []
-        visible = await descendant_group_ids(my_gids, admin.company_id, db)
+        visible = await descendant_group_ids(my_gids, company_id, db)
         if not visible:
             return []
         q = q.where(
@@ -427,7 +463,61 @@ async def tech_filter_users(
 
     rows = await db.execute(q)
     return [
-        TechFilterUserOut(id=str(r.id), name=r.name, email=r.email, is_active=r.is_active)
+        TechFilterUserOut(id=str(r.id), name=r.name, email=r.email, is_active=r.is_active).model_dump()
+        for r in rows.all()
+    ]
+
+
+@router.get("/filters/devices", response_model=List[TechFilterDeviceOut])
+async def tech_filter_devices(
+    admin: Employee = Depends(require("tech", "view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Devices the caller may filter the Tech & AI pages by.
+
+    Unlike groups/users above, this reuses `visible_device_ids` verbatim rather
+    than re-deriving the group tree — device visibility IS what that helper
+    computes, and `_device_clause` below validates against the same set, so the
+    list and the filter can never disagree. `own`-scoped callers do get a list
+    here (their own machines), because someone with several devices still has a
+    meaningful choice to make; that is the one place this differs from
+    `/filters/users`, where "own" leaves nothing to pick between.
+    """
+    # `visible_device_ids` only reads `.id` and `._scope_type`, so hand it a
+    # detached stand-in rather than the session-bound Employee — the background
+    # refresh runs on its own session.
+    from types import SimpleNamespace
+    cid, scope = admin.company_id, getattr(admin, "_scope_type", "own")
+    scope_user = SimpleNamespace(id=admin.id, _scope_type=scope)
+    return await _filter_lookup(
+        ("tech:f:devices", str(cid), str(scope_user.id), scope),
+        lambda db: _devices_lookup(scope_user, cid, db), db)
+
+
+async def _devices_lookup(scope_user, company_id, db):
+    ids = await visible_device_ids(scope_user, db)
+
+    q = (
+        select(Device.id, Device.hostname, Device.platform, Device.is_active, Employee.name)
+        .outerjoin(Employee, Employee.id == Device.employee_id)
+        .where(
+            Device.company_id == company_id,
+            Device.is_deleted == False,   # noqa: E712
+            Device.is_archived == False,  # noqa: E712
+        )
+        .order_by(Device.hostname.asc())
+    )
+    if ids is not ALL:
+        if not ids:
+            return []
+        q = q.where(Device.id.in_(ids))
+
+    rows = await db.execute(q)
+    return [
+        TechFilterDeviceOut(
+            id=str(r.id), hostname=r.hostname, employee_name=r.name,
+            platform=r.platform, is_active=r.is_active,
+        ).model_dump()
         for r in rows.all()
     ]
 
@@ -441,6 +531,7 @@ async def tech_summary(
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -449,90 +540,92 @@ async def tech_summary(
     sc, sp = await _scope_clause(admin, db)
     gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
-    clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
-    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
-    _ckey = ("tech:summary", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt))
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
+    # Hoisted to plain values BEFORE _compute closes over them: the background
+    # refresh runs on a different session, and touching an ORM-bound `admin`
+    # there raises MissingGreenlet once the request session has gone.
+    cid, company_uuid = str(admin.company_id), admin.company_id
+    _ckey = ("tech:summary", cid, _scope_fp, str(since_dt), str(until_dt))
 
-    # Fast path: full-scope admin with no group/employee filter reads from pg cache.
-    if not clause:
-        from app.core import tech_cache
-        cached = await tech_cache.summary_from_cache(db, admin.company_id, since_dt, until_dt)
-        if cached is not None:
-            totals, users, top_cat, top_app = cached
-            _result = TechSummaryOut(
-                total_hours=round((totals.total_seconds or 0) / 3600, 1),
-                total_apps=int(totals.total_apps or 0),
-                total_users=int(users.total_users or 0) if users else 0,
-                top_category=top_cat.category_name if top_cat else None,
-                top_category_color=top_cat.color if top_cat else "#6366f1",
-                top_app=top_app.app_name if top_app else None,
-            )
-            await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-            return _result
+    async def _compute(db):
+        # Fast path: full-scope admin with no group/employee filter reads from pg cache.
+        if not clause:
+            from app.core import tech_cache
+            cached = await tech_cache.summary_from_cache(db, company_uuid, since_dt, until_dt)
+            if cached is not None:
+                totals, users, top_cat, top_app = cached
+                return TechSummaryOut(
+                    total_hours=round((totals.total_seconds or 0) / 3600, 1),
+                    total_apps=int(totals.total_apps or 0),
+                    total_users=int(users.total_users or 0) if users else 0,
+                    top_category=top_cat.category_name if top_cat else None,
+                    top_category_color=top_cat.color if top_cat else "#6366f1",
+                    top_app=top_app.app_name if top_app else None,
+                ).model_dump()
 
-    # Fallback: live aggregation (filtered requests or cache miss/stale).
-    total_res = await db.execute(text(f"""
-        SELECT
-            COALESCE(SUM(ae.duration), 0)                    AS total_seconds,
-            COUNT(DISTINCT normalize_app_name(ae.app_name)) AS total_apps,
-            COUNT(DISTINCT d.employee_id)                   AS total_users
-        FROM activity_events ae
-        JOIN devices d ON d.id = ae.device_id
-        WHERE d.company_id = :company_id
-          AND ae.event_type = 'window_change'
-          AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-          {clause}
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
-    row = total_res.fetchone()
+        # Fallback: live aggregation (filtered requests or cache miss/stale).
+        total_res = await db.execute(text(f"""
+            SELECT
+                COALESCE(SUM(ae.duration), 0)                    AS total_seconds,
+                COUNT(DISTINCT normalize_app_name(ae.app_name)) AS total_apps,
+                COUNT(DISTINCT d.employee_id)                   AS total_users
+            FROM activity_events ae
+            JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'window_change'
+              AND ae.app_name IS NOT NULL
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+              {clause}
+        """), {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, **sparams})
+        row = total_res.fetchone()
 
-    cat_res = await db.execute(text(f"""
-        SELECT c.name, c.color, SUM(ae.duration) AS seconds
-        FROM activity_events ae
-        JOIN devices d ON d.id = ae.device_id
-        JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
-        JOIN app_categories c ON c.id = r.category_id
-        WHERE d.company_id = :company_id
-          AND ae.event_type = 'window_change'
-          AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-          {clause}
-        GROUP BY c.name, c.color
-        ORDER BY seconds DESC
-        LIMIT 1
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
-    top_cat = cat_res.fetchone()
+        cat_res = await db.execute(text(f"""
+            SELECT c.name, c.color, SUM(ae.duration) AS seconds
+            FROM activity_events ae
+            JOIN devices d ON d.id = ae.device_id
+            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
+            JOIN app_categories c ON c.id = r.category_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'window_change'
+              AND ae.app_name IS NOT NULL
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+              {clause}
+            GROUP BY c.name, c.color
+            ORDER BY seconds DESC
+            LIMIT 1
+        """), {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, **sparams})
+        top_cat = cat_res.fetchone()
 
-    app_res = await db.execute(text(f"""
-        SELECT normalize_app_name(ae.app_name) AS app_name,
-               SUM(ae.duration) AS seconds
-        FROM activity_events ae
-        JOIN devices d ON d.id = ae.device_id
-        WHERE d.company_id = :company_id
-          AND ae.event_type = 'window_change'
-          AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-          {clause}
-        GROUP BY normalize_app_name(ae.app_name)
-        ORDER BY seconds DESC
-        LIMIT 1
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
-    top_app = app_res.fetchone()
+        app_res = await db.execute(text(f"""
+            SELECT normalize_app_name(ae.app_name) AS app_name,
+                   SUM(ae.duration) AS seconds
+            FROM activity_events ae
+            JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'window_change'
+              AND ae.app_name IS NOT NULL
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+              {clause}
+            GROUP BY normalize_app_name(ae.app_name)
+            ORDER BY seconds DESC
+            LIMIT 1
+        """), {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, **sparams})
+        top_app = app_res.fetchone()
 
-    _result = TechSummaryOut(
-        total_hours=round((row.total_seconds or 0) / 3600, 1),
-        total_apps=int(row.total_apps or 0),
-        total_users=int(row.total_users or 0),
-        top_category=top_cat.name if top_cat else None,
-        top_category_color=top_cat.color if top_cat else "#6366f1",
-        top_app=top_app.app_name if top_app else None,
-    )
-    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-    return _result
+        return TechSummaryOut(
+            total_hours=round((row.total_seconds or 0) / 3600, 1),
+            total_apps=int(row.total_apps or 0),
+            total_users=int(row.total_users or 0),
+            top_category=top_cat.name if top_cat else None,
+            top_category_color=top_cat.color if top_cat else "#6366f1",
+            top_app=top_app.app_name if top_app else None,
+        ).model_dump()
+
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 @router.get("/utilization/category-allocation", response_model=List[CategoryAllocationItem])
@@ -543,6 +636,7 @@ async def category_allocation(
     compare_days: int           = Query(default=30, ge=1, le=365),
     group_id:     Optional[str] = Query(default=None),
     employee_id:  Optional[str] = Query(default=None),
+    device_id:    Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -552,158 +646,162 @@ async def category_allocation(
     sc, sp = await _scope_clause(admin, db)
     gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
-    clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
-    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
+    # Hoisted to plain values BEFORE _compute closes over them: the background
+    # refresh runs on a different session, and touching an ORM-bound `admin`
+    # there raises MissingGreenlet once the request session has gone.
+    cid, company_uuid = str(admin.company_id), admin.company_id
     _ckey = ("tech:catalloc", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt), compare_days)
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    # Fast path: full-scope admin with no group/employee filter reads from pg cache.
-    if not clause:
-        from app.core import tech_cache
-        cached = await tech_cache.category_allocation_from_cache(
-            db, admin.company_id, since_dt, until_dt, prev_since_dt, prev_until_dt
-        )
-        if cached is not None:
-            current_rows_raw, prev_rows = cached
-            result = []
-            for cur in current_rows_raw:
-                prev = prev_rows.get(cur.category_name)
-                cur_pct   = float(cur.pct or 0)
-                prev_pct  = float(prev.pct if prev else 0)
-                cur_users = int(cur.users or 0)
-                prev_users = int(prev.users if prev else 0)
-                result.append(CategoryAllocationItem(
-                    category_id=cur.category_id,
-                    category_name=cur.category_name,
-                    color=cur.color,
-                    seconds=int(cur.seconds or 0),
-                    pct=cur_pct,
-                    prev_seconds=int(prev.seconds if prev else 0),
-                    prev_pct=prev_pct,
-                    pct_change=round(cur_pct - prev_pct, 1),
-                    hours=round((cur.seconds or 0) / 3600, 1),
-                    user_change=cur_users - prev_users,
-                ))
-            await cache_set(_ckey, [i.model_dump() for i in result], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-            return result
+    async def _compute(db):
+        # Fast path: full-scope admin with no group/employee filter reads from pg cache.
+        if not clause:
+            from app.core import tech_cache
+            cached = await tech_cache.category_allocation_from_cache(
+                db, company_uuid, since_dt, until_dt, prev_since_dt, prev_until_dt
+            )
+            if cached is not None:
+                current_rows_raw, prev_rows = cached
+                result = []
+                for cur in current_rows_raw:
+                    prev = prev_rows.get(cur.category_name)
+                    cur_pct   = float(cur.pct or 0)
+                    prev_pct  = float(prev.pct if prev else 0)
+                    cur_users = int(cur.users or 0)
+                    prev_users = int(prev.users if prev else 0)
+                    result.append(CategoryAllocationItem(
+                        category_id=cur.category_id,
+                        category_name=cur.category_name,
+                        color=cur.color,
+                        seconds=int(cur.seconds or 0),
+                        pct=cur_pct,
+                        prev_seconds=int(prev.seconds if prev else 0),
+                        prev_pct=prev_pct,
+                        pct_change=round(cur_pct - prev_pct, 1),
+                        hours=round((cur.seconds or 0) / 3600, 1),
+                        user_change=cur_users - prev_users,
+                    ))
+                return [i.model_dump() for i in result]
 
-    # Fallback: live aggregation (filtered requests or cache miss/stale).
-    current_res = await db.execute(text(f"""
-        WITH categorized AS (
-            SELECT
-                c.id::text AS category_id,
-                c.name     AS category_name,
-                c.color,
-                SUM(ae.duration) AS seconds,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
-            JOIN app_categories c ON c.id = r.category_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {clause}
-            GROUP BY c.id, c.name, c.color
-        ),
-        uncategorized AS (
-            SELECT
-                NULL::text AS category_id,
-                'Uncategorized' AS category_name,
-                '#94a3b8' AS color,
-                SUM(ae.duration) AS seconds,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              AND NOT EXISTS (
-                  SELECT 1 FROM app_category_rules r2
-                  WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
-              )
-              {clause}
-            GROUP BY category_name, color
-        ),
-        combined AS (SELECT * FROM categorized UNION ALL SELECT * FROM uncategorized),
-        total AS (SELECT SUM(seconds) AS t FROM combined)
-        SELECT c.*, ROUND(100.0 * c.seconds / NULLIF(t.t, 0), 1) AS pct
-        FROM combined c, total t
-        ORDER BY seconds DESC
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
-    current_rows = {r.category_name: r for r in current_res.fetchall()}
+        # Fallback: live aggregation (filtered requests or cache miss/stale).
+        current_res = await db.execute(text(f"""
+            WITH categorized AS (
+                SELECT
+                    c.id::text AS category_id,
+                    c.name     AS category_name,
+                    c.color,
+                    SUM(ae.duration) AS seconds,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
+                JOIN app_categories c ON c.id = r.category_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {clause}
+                GROUP BY c.id, c.name, c.color
+            ),
+            uncategorized AS (
+                SELECT
+                    NULL::text AS category_id,
+                    'Uncategorized' AS category_name,
+                    '#94a3b8' AS color,
+                    SUM(ae.duration) AS seconds,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM app_category_rules r2
+                      WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
+                  )
+                  {clause}
+                GROUP BY category_name, color
+            ),
+            combined AS (SELECT * FROM categorized UNION ALL SELECT * FROM uncategorized),
+            total AS (SELECT SUM(seconds) AS t FROM combined)
+            SELECT c.*, ROUND(100.0 * c.seconds / NULLIF(t.t, 0), 1) AS pct
+            FROM combined c, total t
+            ORDER BY seconds DESC
+        """), {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, **sparams})
+        current_rows = {r.category_name: r for r in current_res.fetchall()}
 
-    prev_res = await db.execute(text(f"""
-        WITH categorized AS (
-            SELECT
-                c.name AS category_name,
-                SUM(ae.duration) AS seconds,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
-            JOIN app_categories c ON c.id = r.category_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
-              {clause}
-            GROUP BY c.name
-        ),
-        uncategorized AS (
-            SELECT
-                'Uncategorized' AS category_name,
-                SUM(ae.duration) AS seconds,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
-              AND NOT EXISTS (
-                  SELECT 1 FROM app_category_rules r2
-                  WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
-              )
-              {clause}
-            GROUP BY category_name
-        ),
-        combined AS (SELECT * FROM categorized UNION ALL SELECT * FROM uncategorized),
-        total AS (SELECT SUM(seconds) AS t FROM combined)
-        SELECT c.category_name,
-               c.seconds,
-               c.users,
-               ROUND(100.0 * c.seconds / NULLIF(t.t, 0), 1) AS pct
-        FROM combined c, total t
-    """), {"company_id": str(admin.company_id), "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams})
-    prev_rows = {r.category_name: r for r in prev_res.fetchall()}
+        prev_res = await db.execute(text(f"""
+            WITH categorized AS (
+                SELECT
+                    c.name AS category_name,
+                    SUM(ae.duration) AS seconds,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
+                JOIN app_categories c ON c.id = r.category_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
+                  {clause}
+                GROUP BY c.name
+            ),
+            uncategorized AS (
+                SELECT
+                    'Uncategorized' AS category_name,
+                    SUM(ae.duration) AS seconds,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM app_category_rules r2
+                      WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
+                  )
+                  {clause}
+                GROUP BY category_name
+            ),
+            combined AS (SELECT * FROM categorized UNION ALL SELECT * FROM uncategorized),
+            total AS (SELECT SUM(seconds) AS t FROM combined)
+            SELECT c.category_name,
+                   c.seconds,
+                   c.users,
+                   ROUND(100.0 * c.seconds / NULLIF(t.t, 0), 1) AS pct
+            FROM combined c, total t
+        """), {"company_id": cid, "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams})
+        prev_rows = {r.category_name: r for r in prev_res.fetchall()}
 
-    result = []
-    for name, cur in current_rows.items():
-        prev = prev_rows.get(name)
-        cur_pct   = float(cur.pct or 0)
-        prev_pct  = float(prev.pct if prev else 0)
-        cur_users = int(cur.users or 0)
-        prev_users = int(prev.users if prev else 0)
-        result.append(CategoryAllocationItem(
-            category_id=cur.category_id,
-            category_name=name,
-            color=cur.color,
-            seconds=int(cur.seconds or 0),
-            pct=cur_pct,
-            prev_seconds=int(prev.seconds if prev else 0),
-            prev_pct=prev_pct,
-            pct_change=round(cur_pct - prev_pct, 1),
-            hours=round((cur.seconds or 0) / 3600, 1),
-            user_change=cur_users - prev_users,
-        ))
-    await cache_set(_ckey, [i.model_dump() for i in result], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-    return result
+        result = []
+        for name, cur in current_rows.items():
+            prev = prev_rows.get(name)
+            cur_pct   = float(cur.pct or 0)
+            prev_pct  = float(prev.pct if prev else 0)
+            cur_users = int(cur.users or 0)
+            prev_users = int(prev.users if prev else 0)
+            result.append(CategoryAllocationItem(
+                category_id=cur.category_id,
+                category_name=name,
+                color=cur.color,
+                seconds=int(cur.seconds or 0),
+                pct=cur_pct,
+                prev_seconds=int(prev.seconds if prev else 0),
+                prev_pct=prev_pct,
+                pct_change=round(cur_pct - prev_pct, 1),
+                hours=round((cur.seconds or 0) / 3600, 1),
+                user_change=cur_users - prev_users,
+            ))
+        return [i.model_dump() for i in result]
+
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 @router.get("/utilization/app-trends", response_model=AppTrendsOut)
@@ -713,95 +811,107 @@ async def app_trends(
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     compare_days: int = Query(default=30, ge=1, le=365),
     limit:        int = Query(default=10, ge=1, le=50),
+    group_id:     Optional[str] = Query(default=None),
+    employee_id:  Optional[str] = Query(default=None),
+    device_id:    Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     prev_since_dt, prev_until_dt = _prev_dates(since_dt, until_dt)
     await _ensure_default_categories(admin.company_id, db)
-    clause, sparams = await _scope_clause(admin, db)
+    sc, sp = await _scope_clause(admin, db)
+    gc, gp = await _group_clause(group_id, admin.company_id, db)
+    ec, ep = _employee_clause(employee_id)
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
-    _scope_fp = "all" if not clause else str(admin.id)
+    _scope_fp = ("all" if not clause
+                 else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}")
+    # Hoisted to plain values BEFORE _compute closes over them: the background
+    # refresh runs on a different session, and touching an ORM-bound `admin`
+    # there raises MissingGreenlet once the request session has gone.
+    cid, company_uuid = str(admin.company_id), admin.company_id
     _ckey = ("tech:apptrends", str(admin.company_id), _scope_fp, str(since_dt), str(until_dt), compare_days, limit)
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    base_params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
-                   "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams}
+    async def _compute(db):
+        base_params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt,
+                       "prev_since_dt": prev_since_dt, "prev_until_dt": prev_until_dt, **sparams}
 
-    current_res = await db.execute(text(f"""
-        WITH app_data AS (
-            SELECT
-                normalize_app_name(ae.app_name) AS app_name,
-                COALESCE(c.id::text, NULL) AS category_id,
-                COALESCE(c.name, 'Uncategorized') AS category_name,
-                COALESCE(c.color, '#94a3b8') AS color,
-                SUM(ae.duration) AS seconds,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            LEFT JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
-            LEFT JOIN app_categories c ON c.id = r.category_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {clause}
-            GROUP BY normalize_app_name(ae.app_name), c.id, c.name, c.color
-        ),
-        total AS (SELECT SUM(seconds) AS t FROM app_data)
-        SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
-        FROM app_data a, total t
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, **sparams})
-    cur_rows = {r.app_name: r for r in current_res.fetchall()}
+        current_res = await db.execute(text(f"""
+            WITH app_data AS (
+                SELECT
+                    normalize_app_name(ae.app_name) AS app_name,
+                    COALESCE(c.id::text, NULL) AS category_id,
+                    COALESCE(c.name, 'Uncategorized') AS category_name,
+                    COALESCE(c.color, '#94a3b8') AS color,
+                    SUM(ae.duration) AS seconds,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                LEFT JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
+                LEFT JOIN app_categories c ON c.id = r.category_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {clause}
+                GROUP BY normalize_app_name(ae.app_name), c.id, c.name, c.color
+            ),
+            total AS (SELECT SUM(seconds) AS t FROM app_data)
+            SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
+            FROM app_data a, total t
+        """), {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, **sparams})
+        cur_rows = {r.app_name: r for r in current_res.fetchall()}
 
-    prev_res = await db.execute(text(f"""
-        WITH app_data AS (
-            SELECT
-                normalize_app_name(ae.app_name) AS app_name,
-                SUM(ae.duration) AS seconds,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
-              {clause}
-            GROUP BY normalize_app_name(ae.app_name)
-        ),
-        total AS (SELECT SUM(seconds) AS t FROM app_data)
-        SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
-        FROM app_data a, total t
-    """), base_params)
-    prev_rows = {r.app_name: r for r in prev_res.fetchall()}
+        prev_res = await db.execute(text(f"""
+            WITH app_data AS (
+                SELECT
+                    normalize_app_name(ae.app_name) AS app_name,
+                    SUM(ae.duration) AS seconds,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:prev_since_dt AS date) AND ae.timestamp < (CAST(:prev_until_dt AS date) + INTERVAL '1 day')
+                  {clause}
+                GROUP BY normalize_app_name(ae.app_name)
+            ),
+            total AS (SELECT SUM(seconds) AS t FROM app_data)
+            SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
+            FROM app_data a, total t
+        """), base_params)
+        prev_rows = {r.app_name: r for r in prev_res.fetchall()}
 
-    items = []
-    for app_name, cur in cur_rows.items():
-        prev = prev_rows.get(app_name)
-        cur_pct  = float(cur.pct or 0)
-        prev_pct = float(prev.pct if prev else 0)
-        items.append(AppTrendItem(
-            app_name=app_name,
-            category_name=cur.category_name,
-            color=cur.color,
-            seconds=int(cur.seconds or 0),
-            prev_seconds=int(prev.seconds if prev else 0),
-            pct=cur_pct,
-            prev_pct=prev_pct,
-            pct_change=round(cur_pct - prev_pct, 2),
-            hours=round((cur.seconds or 0) / 3600, 1),
-            user_change=int(cur.users or 0) - int(prev.users if prev else 0),
-        ))
+        items = []
+        for app_name, cur in cur_rows.items():
+            prev = prev_rows.get(app_name)
+            cur_pct  = float(cur.pct or 0)
+            prev_pct = float(prev.pct if prev else 0)
+            items.append(AppTrendItem(
+                app_name=app_name,
+                category_name=cur.category_name,
+                color=cur.color,
+                seconds=int(cur.seconds or 0),
+                prev_seconds=int(prev.seconds if prev else 0),
+                pct=cur_pct,
+                prev_pct=prev_pct,
+                pct_change=round(cur_pct - prev_pct, 2),
+                hours=round((cur.seconds or 0) / 3600, 1),
+                user_change=int(cur.users or 0) - int(prev.users if prev else 0),
+            ))
 
-    items.sort(key=lambda x: x.pct_change, reverse=True)
-    trending_up   = [i for i in items if i.pct_change > 0][:limit]
-    trending_down = sorted([i for i in items if i.pct_change < 0], key=lambda x: x.pct_change)[:limit]
+        items.sort(key=lambda x: x.pct_change, reverse=True)
+        trending_up   = [i for i in items if i.pct_change > 0][:limit]
+        trending_down = sorted([i for i in items if i.pct_change < 0], key=lambda x: x.pct_change)[:limit]
 
-    _result = AppTrendsOut(trending_up=trending_up, trending_down=trending_down)
-    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-    return _result
+        _result = AppTrendsOut(trending_up=trending_up, trending_down=trending_down)
+        return _result.model_dump()
+
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 @router.get("/utilization/apps", response_model=List[AppDetailItem])
@@ -812,6 +922,7 @@ async def app_list(
     category_id: Optional[str] = Query(default=None),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     limit:       int           = Query(default=50, ge=1, le=200),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
@@ -821,7 +932,8 @@ async def app_list(
     sc, sp = await _scope_clause(admin, db)
     gc, gp = await _group_clause(group_id, admin.company_id, db)
     ec, ep = _employee_clause(employee_id)
-    clause, sparams = sc + gc + ec, {**sp, **gp, **ep}
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
 
     cat_filter = ""
     if category_id:
@@ -832,79 +944,82 @@ async def app_list(
         except ValueError:
             pass
 
-    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
+    # Hoisted to plain values BEFORE _compute closes over them: the background
+    # refresh runs on a different session, and touching an ORM-bound `admin`
+    # there raises MissingGreenlet once the request session has gone.
+    cid, company_uuid = str(admin.company_id), admin.company_id
     _ckey = ("tech:applist", str(admin.company_id), _scope_fp, category_id or "", str(since_dt), str(until_dt), limit)
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    # Fast path: full-scope admin with no group/employee/category filter reads from pg cache.
-    if not clause and not category_id:
-        from app.core import tech_cache
-        cached_rows = await tech_cache.app_list_from_cache(
-            db, admin.company_id, since_dt, until_dt, limit
-        )
-        if cached_rows is not None:
-            _items = [
-                AppDetailItem(
-                    app_name=r.app_name,
-                    category_id=r.category_id,
-                    category_name=r.category_name,
-                    color=r.color,
-                    seconds=int(r.seconds or 0),
-                    hours=round((r.seconds or 0) / 3600, 1),
-                    pct=float(r.pct or 0),
-                    user_count=int(r.user_count or 0),
-                )
-                for r in cached_rows
-            ]
-            await cache_set(_ckey, [i.model_dump() for i in _items], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-            return _items
+    async def _compute(db):
+        # Fast path: full-scope admin with no group/employee/category filter reads from pg cache.
+        if not clause and not category_id:
+            from app.core import tech_cache
+            cached_rows = await tech_cache.app_list_from_cache(
+                db, company_uuid, since_dt, until_dt, limit
+            )
+            if cached_rows is not None:
+                _items = [
+                    AppDetailItem(
+                        app_name=r.app_name,
+                        category_id=r.category_id,
+                        category_name=r.category_name,
+                        color=r.color,
+                        seconds=int(r.seconds or 0),
+                        hours=round((r.seconds or 0) / 3600, 1),
+                        pct=float(r.pct or 0),
+                        user_count=int(r.user_count or 0),
+                    )
+                    for r in cached_rows
+                ]
+                return [i.model_dump() for i in _items]
 
-    # Fallback: live aggregation (filtered requests or cache miss/stale).
-    result = await db.execute(text(f"""
-        WITH app_data AS (
-            SELECT
-                normalize_app_name(ae.app_name) AS app_name,
-                COALESCE(c.id::text, NULL) AS category_id,
-                COALESCE(c.name, 'Uncategorized') AS category_name,
-                COALESCE(c.color, '#94a3b8') AS color,
-                SUM(ae.duration) AS seconds,
-                COUNT(DISTINCT d.employee_id) AS user_count
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            LEFT JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
-            LEFT JOIN app_categories c ON c.id = r.category_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {cat_filter}
-              {clause}
-            GROUP BY normalize_app_name(ae.app_name), c.id, c.name, c.color
-        ),
-        total AS (SELECT SUM(seconds) AS t FROM app_data)
-        SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
-        FROM app_data a, total t
-        ORDER BY a.seconds DESC
-        LIMIT :limit
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, "limit": limit, **sparams})
+        # Fallback: live aggregation (filtered requests or cache miss/stale).
+        result = await db.execute(text(f"""
+            WITH app_data AS (
+                SELECT
+                    normalize_app_name(ae.app_name) AS app_name,
+                    COALESCE(c.id::text, NULL) AS category_id,
+                    COALESCE(c.name, 'Uncategorized') AS category_name,
+                    COALESCE(c.color, '#94a3b8') AS color,
+                    SUM(ae.duration) AS seconds,
+                    COUNT(DISTINCT d.employee_id) AS user_count
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                LEFT JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name) AND r.company_id = d.company_id
+                LEFT JOIN app_categories c ON c.id = r.category_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {cat_filter}
+                  {clause}
+                GROUP BY normalize_app_name(ae.app_name), c.id, c.name, c.color
+            ),
+            total AS (SELECT SUM(seconds) AS t FROM app_data)
+            SELECT a.*, ROUND(100.0 * a.seconds / NULLIF(t.t, 0), 2) AS pct
+            FROM app_data a, total t
+            ORDER BY a.seconds DESC
+            LIMIT :limit
+        """), {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, "limit": limit, **sparams})
 
-    _items = [
-        AppDetailItem(
-            app_name=r.app_name,
-            category_id=r.category_id,
-            category_name=r.category_name,
-            color=r.color,
-            seconds=int(r.seconds or 0),
-            hours=round((r.seconds or 0) / 3600, 1),
-            pct=float(r.pct or 0),
-            user_count=int(r.user_count or 0),
-        )
-        for r in result.fetchall()
-    ]
-    await cache_set(_ckey, [i.model_dump() for i in _items], fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-    return _items
+        _items = [
+            AppDetailItem(
+                app_name=r.app_name,
+                category_id=r.category_id,
+                category_name=r.category_name,
+                color=r.color,
+                seconds=int(r.seconds or 0),
+                hours=round((r.seconds or 0) / 3600, 1),
+                pct=float(r.pct or 0),
+                user_count=int(r.user_count or 0),
+            )
+            for r in result.fetchall()
+        ]
+        return [i.model_dump() for i in _items]
+
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 @router.get("/utilization/adoption", response_model=AdoptionOut)
@@ -913,54 +1028,73 @@ async def app_adoption(
     since_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     top_n: int = Query(default=5, ge=1, le=20),
+    group_id:    Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
-    clause, sparams = await _scope_clause(admin, db)
+    sc, sp = await _scope_clause(admin, db)
+    gc, gp = await _group_clause(group_id, admin.company_id, db)
+    ec, ep = _employee_clause(employee_id)
+    dc, dp = _device_clause(device_id)
+    clause, sparams = sc + gc + ec + dc, {**sp, **gp, **ep, **dp}
+    # Hoisted to plain values BEFORE _compute closes over them (see tech_summary).
+    cid, company_uuid = str(admin.company_id), admin.company_id
 
-    top_apps_res = await db.execute(text(f"""
-        SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS seconds
-        FROM activity_events ae
-        JOIN devices d ON d.id = ae.device_id
-        WHERE d.company_id = :company_id
-          AND ae.event_type = 'window_change'
-          AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-          {clause}
-        GROUP BY normalize_app_name(ae.app_name)
-        ORDER BY seconds DESC
-        LIMIT :top_n
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, "top_n": top_n, **sparams})
-    top_apps = [r.app_name for r in top_apps_res.fetchall()]
-    if not top_apps:
-        return AdoptionOut(apps=[], series=[])
+    # This endpoint had NO response cache at all, so every Adoption tab view ran
+    # two live aggregations. It is keyed and cached like its siblings now.
+    _scope_fp = ("all" if not clause
+                 else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}")
+    _ckey = ("tech:adoption", cid, _scope_fp, str(since_dt), str(until_dt), top_n)
 
-    series_res = await db.execute(text(f"""
-        SELECT
-            DATE(ae.timestamp)  AS day,
-            ae.app_name,
-            COUNT(DISTINCT d.employee_id) AS user_count
-        FROM activity_events ae
-        JOIN devices d ON d.id = ae.device_id
-        WHERE d.company_id = :company_id
-          AND ae.event_type = 'window_change'
-          AND ae.app_name = ANY(:apps)
-          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-          {clause}
-        GROUP BY day, ae.app_name
-        ORDER BY day ASC
-    """), {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt, "apps": top_apps, **sparams})
+    async def _compute(db):
+        top_apps_res = await db.execute(text(f"""
+            SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS seconds
+            FROM activity_events ae
+            JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'window_change'
+              AND ae.app_name IS NOT NULL
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+              {clause}
+            GROUP BY normalize_app_name(ae.app_name)
+            ORDER BY seconds DESC
+            LIMIT :top_n
+        """), {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, "top_n": top_n, **sparams})
+        top_apps = [r.app_name for r in top_apps_res.fetchall()]
+        if not top_apps:
+            return AdoptionOut(apps=[], series=[]).model_dump()
 
-    by_date: dict[str, dict[str, int]] = {}
-    for r in series_res.fetchall():
-        d = str(r.day)
-        if d not in by_date:
-            by_date[d] = {a: 0 for a in top_apps}
-        by_date[d][r.app_name] = r.user_count
+        series_res = await db.execute(text(f"""
+            SELECT
+                DATE(ae.timestamp)  AS day,
+                ae.app_name,
+                COUNT(DISTINCT d.employee_id) AS user_count
+            FROM activity_events ae
+            JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'window_change'
+              AND ae.app_name = ANY(:apps)
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+              {clause}
+            GROUP BY day, ae.app_name
+            ORDER BY day ASC
+        """), {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, "apps": top_apps, **sparams})
 
-    series = [{"date": d, **counts} for d, counts in sorted(by_date.items())]
-    return AdoptionOut(apps=top_apps, series=series)
+        by_date: dict[str, dict[str, int]] = {}
+        for r in series_res.fetchall():
+            d = str(r.day)
+            if d not in by_date:
+                by_date[d] = {a: 0 for a in top_apps}
+            by_date[d][r.app_name] = r.user_count
+
+        series = [{"date": d, **counts} for d, counts in sorted(by_date.items())]
+        return AdoptionOut(apps=top_apps, series=series).model_dump()
+
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 # ── Uncategorized apps + URL hosts from devices ───────────────────────────────
@@ -981,116 +1115,116 @@ async def get_uncategorized(
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     await _ensure_default_categories(admin.company_id, db)
     clause, sparams = await _scope_clause(admin, db)
-    cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
+    # Hoisted to plain values BEFORE _compute closes over them (see tech_summary).
+    cid, company_uuid = str(admin.company_id), admin.company_id
     params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, "limit": limit, **sparams}
 
     _scope_fp = "all" if not clause else str(admin.id)
     _ckey = ("tech:uncategorized", cid, _scope_fp, str(since_dt), str(until_dt), limit)
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    # Fast path: full-scope admins read from the daily aggregate caches — the
-    # live version below is a 30-day two-scan aggregation measured at ~67 s on
-    # a 42M-row events table.
-    if not clause:
-        from app.core import tech_cache
-        cached = await tech_cache.uncategorized_from_cache(db, cid, since_dt, until_dt, limit)
-        if cached is not None:
-            capps, curls = cached
-            _result = UncategorizedOut(
-                apps=[
-                    UncategorizedItem(pattern=r.pattern, kind="app",
-                                      seconds=int(r.seconds or 0),
-                                      user_count=int(r.user_count or 0),
-                                      last_seen=str(r.last_seen) if r.last_seen else None)
-                    for r in capps if r.pattern
-                ],
-                urls=[
-                    UncategorizedItem(pattern=r.pattern, kind="url",
-                                      seconds=int(r.seconds or 0),
-                                      user_count=int(r.user_count or 0),
-                                      last_seen=str(r.last_seen) if r.last_seen else None)
-                    for r in curls if r.pattern
-                ],
+    async def _compute(db):
+        # Fast path: full-scope admins read from the daily aggregate caches — the
+        # live version below is a 30-day two-scan aggregation measured at ~67 s on
+        # a 42M-row events table.
+        if not clause:
+            from app.core import tech_cache
+            cached = await tech_cache.uncategorized_from_cache(db, cid, since_dt, until_dt, limit)
+            if cached is not None:
+                capps, curls = cached
+                _result = UncategorizedOut(
+                    apps=[
+                        UncategorizedItem(pattern=r.pattern, kind="app",
+                                          seconds=int(r.seconds or 0),
+                                          user_count=int(r.user_count or 0),
+                                          last_seen=str(r.last_seen) if r.last_seen else None)
+                        for r in capps if r.pattern
+                    ],
+                    urls=[
+                        UncategorizedItem(pattern=r.pattern, kind="url",
+                                          seconds=int(r.seconds or 0),
+                                          user_count=int(r.user_count or 0),
+                                          last_seen=str(r.last_seen) if r.last_seen else None)
+                        for r in curls if r.pattern
+                    ],
+                )
+                return _result.model_dump()
+
+        apps_res = await db.execute(text(f"""
+            SELECT
+                normalize_app_name(ae.app_name)       AS pattern,
+                'app'                                 AS kind,
+                SUM(ae.duration)                      AS seconds,
+                COUNT(DISTINCT d.employee_id)         AS user_count,
+                MAX(ae.timestamp)                     AS last_seen
+            FROM activity_events ae
+            JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'window_change'
+              AND ae.app_name IS NOT NULL
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+              AND NOT EXISTS (
+                  SELECT 1 FROM app_category_rules r
+                  WHERE r.company_id = d.company_id
+                    AND r.app_pattern = normalize_app_name(ae.app_name)
+              )
+              {clause}
+            GROUP BY normalize_app_name(ae.app_name)
+            ORDER BY seconds DESC
+            LIMIT :limit
+        """), params)
+
+        urls_res = await db.execute(text(f"""
+            SELECT
+                substring(ae.url FROM '^https?://([^/?#]+)') AS pattern,
+                'url'                                         AS kind,
+                COUNT(*)                                      AS seconds,
+                COUNT(DISTINCT d.employee_id)                AS user_count,
+                MAX(ae.timestamp)                            AS last_seen
+            FROM activity_events ae
+            JOIN devices d ON d.id = ae.device_id
+            WHERE d.company_id = :company_id
+              AND ae.event_type = 'url_visit'
+              AND ae.url IS NOT NULL
+              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+              AND NOT EXISTS (
+                  SELECT 1 FROM app_category_rules r
+                  WHERE r.company_id = d.company_id
+                    AND r.app_pattern = substring(ae.url FROM '^https?://([^/?#]+)')
+              )
+              {clause}
+            GROUP BY substring(ae.url FROM '^https?://([^/?#]+)')
+            HAVING substring(ae.url FROM '^https?://([^/?#]+)') IS NOT NULL
+            ORDER BY seconds DESC
+            LIMIT :limit
+        """), params)
+
+        apps = [
+            UncategorizedItem(
+                pattern=r.pattern,
+                kind="app",
+                seconds=int(r.seconds or 0),
+                user_count=int(r.user_count or 0),
+                last_seen=str(r.last_seen) if r.last_seen else None,
             )
-            await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-            return _result
+            for r in apps_res.fetchall()
+            if r.pattern
+        ]
+        urls = [
+            UncategorizedItem(
+                pattern=r.pattern,
+                kind="url",
+                seconds=int(r.seconds or 0),
+                user_count=int(r.user_count or 0),
+                last_seen=str(r.last_seen) if r.last_seen else None,
+            )
+            for r in urls_res.fetchall()
+            if r.pattern
+        ]
+        _result = UncategorizedOut(apps=apps, urls=urls)
+        return _result.model_dump()
 
-    apps_res = await db.execute(text(f"""
-        SELECT
-            normalize_app_name(ae.app_name)       AS pattern,
-            'app'                                 AS kind,
-            SUM(ae.duration)                      AS seconds,
-            COUNT(DISTINCT d.employee_id)         AS user_count,
-            MAX(ae.timestamp)                     AS last_seen
-        FROM activity_events ae
-        JOIN devices d ON d.id = ae.device_id
-        WHERE d.company_id = :company_id
-          AND ae.event_type = 'window_change'
-          AND ae.app_name IS NOT NULL
-          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-          AND NOT EXISTS (
-              SELECT 1 FROM app_category_rules r
-              WHERE r.company_id = d.company_id
-                AND r.app_pattern = normalize_app_name(ae.app_name)
-          )
-          {clause}
-        GROUP BY normalize_app_name(ae.app_name)
-        ORDER BY seconds DESC
-        LIMIT :limit
-    """), params)
-
-    urls_res = await db.execute(text(f"""
-        SELECT
-            substring(ae.url FROM '^https?://([^/?#]+)') AS pattern,
-            'url'                                         AS kind,
-            COUNT(*)                                      AS seconds,
-            COUNT(DISTINCT d.employee_id)                AS user_count,
-            MAX(ae.timestamp)                            AS last_seen
-        FROM activity_events ae
-        JOIN devices d ON d.id = ae.device_id
-        WHERE d.company_id = :company_id
-          AND ae.event_type = 'url_visit'
-          AND ae.url IS NOT NULL
-          AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-          AND NOT EXISTS (
-              SELECT 1 FROM app_category_rules r
-              WHERE r.company_id = d.company_id
-                AND r.app_pattern = substring(ae.url FROM '^https?://([^/?#]+)')
-          )
-          {clause}
-        GROUP BY substring(ae.url FROM '^https?://([^/?#]+)')
-        HAVING substring(ae.url FROM '^https?://([^/?#]+)') IS NOT NULL
-        ORDER BY seconds DESC
-        LIMIT :limit
-    """), params)
-
-    apps = [
-        UncategorizedItem(
-            pattern=r.pattern,
-            kind="app",
-            seconds=int(r.seconds or 0),
-            user_count=int(r.user_count or 0),
-            last_seen=str(r.last_seen) if r.last_seen else None,
-        )
-        for r in apps_res.fetchall()
-        if r.pattern
-    ]
-    urls = [
-        UncategorizedItem(
-            pattern=r.pattern,
-            kind="url",
-            seconds=int(r.seconds or 0),
-            user_count=int(r.user_count or 0),
-            last_seen=str(r.last_seen) if r.last_seen else None,
-        )
-        for r in urls_res.fetchall()
-        if r.pattern
-    ]
-    _result = UncategorizedOut(apps=apps, urls=urls)
-    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-    return _result
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -1098,8 +1232,24 @@ async def get_uncategorized(
 PRODUCTIVE_CATS   = {"productivity", "development", "communication", "meetings"}
 UNPRODUCTIVE_CATS = {"media"}
 
+def _prod_map_key(company_id) -> tuple:
+    return ("tech:prodmap", str(company_id))
+
+
 async def _productivity_map(company_id: uuid.UUID, db: AsyncSession) -> dict[str, tuple[str, str, str]]:
-    """Returns {app_pattern: (productivity, category_name, color)}."""
+    """Returns {app_pattern: (productivity, category_name, color)}.
+
+    Redis-cached per company: this ran on EVERY websites/apps request purely to
+    label rows, and category rules change only when someone edits them on the
+    Categories page — so the mutation endpoints evict the key (see
+    `_evict_prod_map`) rather than us paying a join per request. JSON has no
+    tuples, so the cached form is a list and is rebuilt on read.
+    """
+    key = _prod_map_key(company_id)
+    cached, _ = await cache_get(key)
+    if cached is not None:
+        return {k: (v[0], v[1], v[2]) for k, v in cached.items()}
+
     res = await db.execute(text("""
         SELECT r.app_pattern, c.name, c.color
         FROM app_category_rules r
@@ -1116,7 +1266,14 @@ async def _productivity_map(company_id: uuid.UUID, db: AsyncSession) -> dict[str
         else:
             prod = "neutral"
         out[row.app_pattern] = (prod, row.name, row.color)
+    await cache_set(key, {k: list(v) for k, v in out.items()},
+                    fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
     return out
+
+
+async def _evict_prod_map(company_id) -> None:
+    """Called by every category/rule mutation so the label map can't go stale."""
+    await cache_delete(_prod_map_key(company_id))
 
 
 def _employee_clause(employee_id: Optional[str]) -> tuple[str, dict]:
@@ -1124,6 +1281,25 @@ def _employee_clause(employee_id: Optional[str]) -> tuple[str, dict]:
     if not employee_id:
         return "", {}
     return " AND d.employee_id = :emp_id", {"emp_id": employee_id}
+
+
+def _device_clause(device_id: Optional[str]) -> tuple[str, dict]:
+    """Restrict to a single device.
+
+    No tenant lookup is needed the way `_group_clause` needs one: every query
+    this composes into already carries `d.company_id = :company_id`, and
+    `_scope_clause` already narrows to the caller's visible device set, so a
+    foreign or invisible id intersects to zero rows rather than leaking. A
+    malformed id IS handled here, because asyncpg raises on a non-UUID bound to
+    a uuid column instead of simply matching nothing.
+    """
+    if not device_id:
+        return "", {}
+    try:
+        uuid.UUID(device_id)
+    except ValueError:
+        return " AND 1=0", {}
+    return " AND ae.device_id = :dev_id", {"dev_id": device_id}
 
 
 async def _group_clause(group_id: Optional[str], company_id, db: AsyncSession) -> tuple[str, dict]:
@@ -1162,6 +1338,7 @@ async def website_list(
     productivity: Optional[str] = Query(default=None),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     limit:       int           = Query(default=100, ge=1, le=500),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
@@ -1171,93 +1348,95 @@ async def website_list(
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
-    combined_clause = scope_clause + grp_clause + emp_clause
-    cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined_clause = scope_clause + grp_clause + emp_clause + dev_clause
+    # Hoisted to plain values BEFORE _compute closes over them (see tech_summary).
+    cid, company_uuid = str(admin.company_id), admin.company_id
     params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt, "limit": limit,
-              **scope_params, **grp_params, **emp_params}
+              **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined_clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not combined_clause else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:websites", cid, _scope_fp, productivity or "", str(since_dt), str(until_dt), limit)
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    # Fast path: full-scope admin with no filters reads per-host daily
-    # aggregates instead of window-functioning every url_visit row in range.
-    rows = None
-    if not combined_clause:
-        from app.core import tech_cache
-        rows = await tech_cache.website_list_from_cache(db, cid, since_dt, until_dt, limit)
+    async def _compute(db):
+        # Fast path: full-scope admin with no filters reads per-host daily
+        # aggregates instead of window-functioning every url_visit row in range.
+        rows = None
+        if not combined_clause:
+            from app.core import tech_cache
+            rows = await tech_cache.website_list_from_cache(db, cid, since_dt, until_dt, limit)
 
-    if rows is None:
-        res = await db.execute(text(f"""
-        WITH url_data AS (
-            SELECT
-                REGEXP_REPLACE(LOWER(
-                    COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), '')
-                ), '^www\\.', '') AS host,
-                ae.device_id, ae.timestamp, d.employee_id,
-                LEAD(ae.timestamp) OVER (PARTITION BY ae.device_id ORDER BY ae.timestamp) AS next_ts
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'url_visit'
-              AND ae.url IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined_clause}
-        ),
-        dur AS (
-            SELECT host, employee_id,
-                GREATEST(LEAST(
-                    EXTRACT(EPOCH FROM (
-                        COALESCE(next_ts, timestamp + interval '3 minutes') - timestamp
-                    ))::int, 600
-                ), 30) AS secs
-            FROM url_data WHERE host IS NOT NULL AND host <> ''
-        ),
-        agg AS (
-            SELECT host, SUM(secs) AS total_secs,
-                   COUNT(*) AS visits, COUNT(DISTINCT employee_id) AS users
-            FROM dur GROUP BY host
-        ),
-        tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM agg)
-        SELECT a.host, a.total_secs, a.visits, a.users,
-               ROUND(100.0 * a.total_secs / t.t, 1) AS pct
-        FROM agg a, tot t
-        ORDER BY a.total_secs DESC
-        LIMIT :limit
-        """), params)
-        rows = res.fetchall()
+        if rows is None:
+            res = await db.execute(text(f"""
+            WITH url_data AS (
+                SELECT
+                    REGEXP_REPLACE(LOWER(
+                        COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), '')
+                    ), '^www\\.', '') AS host,
+                    ae.device_id, ae.timestamp, d.employee_id,
+                    LEAD(ae.timestamp) OVER (PARTITION BY ae.device_id ORDER BY ae.timestamp) AS next_ts
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'url_visit'
+                  AND ae.url IS NOT NULL
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {combined_clause}
+            ),
+            dur AS (
+                SELECT host, employee_id,
+                    GREATEST(LEAST(
+                        EXTRACT(EPOCH FROM (
+                            COALESCE(next_ts, timestamp + interval '3 minutes') - timestamp
+                        ))::int, 600
+                    ), 30) AS secs
+                FROM url_data WHERE host IS NOT NULL AND host <> ''
+            ),
+            agg AS (
+                SELECT host, SUM(secs) AS total_secs,
+                       COUNT(*) AS visits, COUNT(DISTINCT employee_id) AS users
+                FROM dur GROUP BY host
+            ),
+            tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM agg)
+            SELECT a.host, a.total_secs, a.visits, a.users,
+                   ROUND(100.0 * a.total_secs / t.t, 1) AS pct
+            FROM agg a, tot t
+            ORDER BY a.total_secs DESC
+            LIMIT :limit
+            """), params)
+            rows = res.fetchall()
 
-    prod_map = await _productivity_map(admin.company_id, db)
+        prod_map = await _productivity_map(company_uuid, db)
 
-    items: list[WebsiteItem] = []
-    for r in rows:
-        host = r.host
-        # Match host against category rules (exact or suffix)
-        match = prod_map.get(host)
-        if not match:
-            for pat, val in prod_map.items():
-                if host.endswith(pat) or pat.endswith(host):
-                    match = val
-                    break
-        prod, cat_name, color = match if match else ("neutral", None, "#94a3b8")
-        if productivity and prod != productivity:
-            continue
-        items.append(WebsiteItem(
-            host=host, duration_secs=int(r.total_secs or 0),
-            visits=int(r.visits or 0), user_count=int(r.users or 0),
-            pct=float(r.pct or 0), productivity=prod,
-            category_name=cat_name, color=color,
-        ))
+        items: list[WebsiteItem] = []
+        for r in rows:
+            host = r.host
+            # Match host against category rules (exact or suffix)
+            match = prod_map.get(host)
+            if not match:
+                for pat, val in prod_map.items():
+                    if host.endswith(pat) or pat.endswith(host):
+                        match = val
+                        break
+            prod, cat_name, color = match if match else ("neutral", None, "#94a3b8")
+            if productivity and prod != productivity:
+                continue
+            items.append(WebsiteItem(
+                host=host, duration_secs=int(r.total_secs or 0),
+                visits=int(r.visits or 0), user_count=int(r.users or 0),
+                pct=float(r.pct or 0), productivity=prod,
+                category_name=cat_name, color=color,
+            ))
 
-    total_secs  = sum(i.duration_secs for i in items)
-    total_visits = sum(i.visits for i in items)
-    user_set = set()
-    _result = WebsiteListOut(items=items, total_secs=total_secs,
-                             total_visits=total_visits, total_users=len(user_set))
-    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-    return _result
+        total_secs  = sum(i.duration_secs for i in items)
+        total_visits = sum(i.visits for i in items)
+        user_set = set()
+        _result = WebsiteListOut(items=items, total_secs=total_secs,
+                                 total_visits=total_visits, total_users=len(user_set))
+        return _result.model_dump()
+
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 @router.get("/websites/detail", response_model=WebsiteDetailOut)
@@ -1269,6 +1448,7 @@ async def website_detail(
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1276,70 +1456,26 @@ async def website_detail(
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
-    combined = scope_clause + grp_clause + emp_clause
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
-              "host": host, **scope_params, **grp_params, **emp_params}
+              "host": host, **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
+    # Hoisted to plain values BEFORE _compute closes over them: the background
+    # refresh runs on a different session, and touching an ORM-bound `admin`
+    # there raises MissingGreenlet once the request session has gone.
+    cid, company_uuid = str(admin.company_id), admin.company_id
     _ckey = ("tech:web_detail", str(admin.company_id), _scope_fp, host, tab, str(since_dt), str(until_dt))
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    out = WebsiteDetailOut(host=host)
+    async def _compute(db):
+        out = WebsiteDetailOut(host=host)
 
-    if tab == "titles":
-        res = await db.execute(text(f"""
-            SELECT
-                COALESCE(NULLIF(substring(ae.url FROM '^https?://[^/?#]+([^?#]*)'), ''), '/') AS path,
-                COUNT(*) AS visits
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'url_visit'
-              AND LOWER(REGEXP_REPLACE(
-                    COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
-                    '^www\\.', '')) = LOWER(:host)
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-            GROUP BY path ORDER BY visits DESC LIMIT 50
-        """), params)
-        rows = res.fetchall()
-        total = sum(r.visits for r in rows) or 1
-        out.titles = [
-            WebsiteDetailTitle(title=r.path, visits=int(r.visits),
-                               pct=round(100.0 * r.visits / total, 1))
-            for r in rows
-        ]
-
-    elif tab == "subpages":
-        res = await db.execute(text(f"""
-            SELECT ae.url AS full_url, COUNT(*) AS visits
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'url_visit'
-              AND LOWER(REGEXP_REPLACE(
-                    COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
-                    '^www\\.', '')) = LOWER(:host)
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-            GROUP BY ae.url ORDER BY visits DESC LIMIT 100
-        """), params)
-        rows = res.fetchall()
-        total = sum(r.visits for r in rows) or 1
-        out.subpages = [
-            WebsiteDetailSubpage(path=r.full_url, visits=int(r.visits),
-                                 pct=round(100.0 * r.visits / total, 1))
-            for r in rows
-        ]
-
-    elif tab == "users":
-        res = await db.execute(text(f"""
-            WITH url_data AS (
-                SELECT d.employee_id,
-                    LEAD(ae.timestamp) OVER (PARTITION BY ae.device_id ORDER BY ae.timestamp) AS next_ts,
-                    ae.timestamp
+        if tab == "titles":
+            res = await db.execute(text(f"""
+                SELECT
+                    COALESCE(NULLIF(substring(ae.url FROM '^https?://[^/?#]+([^?#]*)'), ''), '/') AS path,
+                    COUNT(*) AS visits
                 FROM activity_events ae
                 JOIN devices d ON d.id = ae.device_id
                 WHERE d.company_id = :company_id
@@ -1349,50 +1485,99 @@ async def website_detail(
                         '^www\\.', '')) = LOWER(:host)
                   AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   {combined}
-            ),
-            dur AS (
-                SELECT employee_id,
-                    GREATEST(LEAST(EXTRACT(EPOCH FROM (
-                        COALESCE(next_ts, timestamp + interval '3 minutes') - timestamp
-                    ))::int, 600), 30) AS secs
-                FROM url_data
-            )
-            SELECT e.name, e.email, SUM(d.secs) AS total_secs
-            FROM dur d
-            JOIN employees e ON e.id = d.employee_id
-            GROUP BY e.name, e.email
-            ORDER BY total_secs DESC LIMIT 50
-        """), params)
-        rows = res.fetchall()
-        total = sum(r.total_secs for r in rows) or 1
-        out.users = [
-            WebsiteDetailUser(name=r.name, visits=0,
-                              duration_secs=int(r.total_secs or 0),
-                              pct=round(100.0 * (r.total_secs or 0) / total, 1))
-            for r in rows
-        ]
+                GROUP BY path ORDER BY visits DESC LIMIT 50
+            """), params)
+            rows = res.fetchall()
+            total = sum(r.visits for r in rows) or 1
+            out.titles = [
+                WebsiteDetailTitle(title=r.path, visits=int(r.visits),
+                                   pct=round(100.0 * r.visits / total, 1))
+                for r in rows
+            ]
 
-    elif tab == "usage":
-        res = await db.execute(text(f"""
-            SELECT DATE(ae.timestamp) AS day, COUNT(*) AS visits
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'url_visit'
-              AND LOWER(REGEXP_REPLACE(
-                    COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
-                    '^www\\.', '')) = LOWER(:host)
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-            GROUP BY day ORDER BY day ASC
-        """), params)
-        out.usage = [
-            WebsiteDetailUsagePoint(date=str(r.day), visits=int(r.visits))
-            for r in res.fetchall()
-        ]
+        elif tab == "subpages":
+            res = await db.execute(text(f"""
+                SELECT ae.url AS full_url, COUNT(*) AS visits
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'url_visit'
+                  AND LOWER(REGEXP_REPLACE(
+                        COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
+                        '^www\\.', '')) = LOWER(:host)
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {combined}
+                GROUP BY ae.url ORDER BY visits DESC LIMIT 100
+            """), params)
+            rows = res.fetchall()
+            total = sum(r.visits for r in rows) or 1
+            out.subpages = [
+                WebsiteDetailSubpage(path=r.full_url, visits=int(r.visits),
+                                     pct=round(100.0 * r.visits / total, 1))
+                for r in rows
+            ]
 
-    await cache_set(_ckey, out.model_dump(), fresh_secs=FRESH_DETAIL, stale_secs=STALE_DETAIL)
-    return out
+        elif tab == "users":
+            res = await db.execute(text(f"""
+                WITH url_data AS (
+                    SELECT d.employee_id,
+                        LEAD(ae.timestamp) OVER (PARTITION BY ae.device_id ORDER BY ae.timestamp) AS next_ts,
+                        ae.timestamp
+                    FROM activity_events ae
+                    JOIN devices d ON d.id = ae.device_id
+                    WHERE d.company_id = :company_id
+                      AND ae.event_type = 'url_visit'
+                      AND LOWER(REGEXP_REPLACE(
+                            COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
+                            '^www\\.', '')) = LOWER(:host)
+                      AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                      {combined}
+                ),
+                dur AS (
+                    SELECT employee_id,
+                        GREATEST(LEAST(EXTRACT(EPOCH FROM (
+                            COALESCE(next_ts, timestamp + interval '3 minutes') - timestamp
+                        ))::int, 600), 30) AS secs
+                    FROM url_data
+                )
+                SELECT e.name, e.email, SUM(d.secs) AS total_secs
+                FROM dur d
+                JOIN employees e ON e.id = d.employee_id
+                GROUP BY e.name, e.email
+                ORDER BY total_secs DESC LIMIT 50
+            """), params)
+            rows = res.fetchall()
+            total = sum(r.total_secs for r in rows) or 1
+            out.users = [
+                WebsiteDetailUser(name=r.name, visits=0,
+                                  duration_secs=int(r.total_secs or 0),
+                                  pct=round(100.0 * (r.total_secs or 0) / total, 1))
+                for r in rows
+            ]
+
+        elif tab == "usage":
+            res = await db.execute(text(f"""
+                SELECT DATE(ae.timestamp) AS day, COUNT(*) AS visits
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'url_visit'
+                  AND LOWER(REGEXP_REPLACE(
+                        COALESCE(substring(ae.url FROM '^https?://(?\\:www\\.)?([^/?#]+)'), ''),
+                        '^www\\.', '')) = LOWER(:host)
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {combined}
+                GROUP BY day ORDER BY day ASC
+            """), params)
+            out.usage = [
+                WebsiteDetailUsagePoint(date=str(r.day), visits=int(r.visits))
+                for r in res.fetchall()
+            ]
+
+        return out.model_dump()
+
+    return await cached_or_compute(_ckey, _compute, db,
+                                   fresh=FRESH_DETAIL, stale=STALE_DETAIL)
 
 
 # ── Application Usage ─────────────────────────────────────────────────────────
@@ -1405,6 +1590,7 @@ async def app_usage_list(
     productivity: Optional[str] = Query(default=None),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     limit:       int           = Query(default=100, ge=1, le=500),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
@@ -1414,69 +1600,71 @@ async def app_usage_list(
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
-    combined = scope_clause + grp_clause + emp_clause
-    cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
+    # Hoisted to plain values BEFORE _compute closes over them (see tech_summary).
+    cid, company_uuid = str(admin.company_id), admin.company_id
     params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt,
-              "limit": limit, **scope_params, **grp_params, **emp_params}
+              "limit": limit, **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
     _ckey = ("tech:apps", cid, _scope_fp, productivity or "", str(since_dt), str(until_dt), limit)
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    # Fast path: full-scope admin with no filters reads the per-app daily cache.
-    rows = None
-    if not combined:
-        from app.core import tech_cache
-        rows = await tech_cache.app_usage_from_cache(db, cid, since_dt, until_dt, limit)
+    async def _compute(db):
+        # Fast path: full-scope admin with no filters reads the per-app daily cache.
+        rows = None
+        if not combined:
+            from app.core import tech_cache
+            rows = await tech_cache.app_usage_from_cache(db, cid, since_dt, until_dt, limit)
 
-    if rows is None:
-        res = await db.execute(text(f"""
-            WITH agg AS (
-                SELECT normalize_app_name(ae.app_name) AS app_name,
-                    SUM(ae.duration) AS total_secs,
-                    COUNT(DISTINCT d.employee_id) AS users
-                FROM activity_events ae
-                JOIN devices d ON d.id = ae.device_id
-                WHERE d.company_id = :company_id
-                  AND ae.event_type = 'window_change'
-                  AND ae.app_name IS NOT NULL
-                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-                  {combined}
-                GROUP BY normalize_app_name(ae.app_name)
-            ),
-            tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM agg)
-            SELECT a.app_name, a.total_secs, a.users,
-                   ROUND(100.0 * a.total_secs / t.t, 1) AS pct
-            FROM agg a, tot t
-            ORDER BY a.total_secs DESC
-            LIMIT :limit
-        """), params)
-        rows = res.fetchall()
+        if rows is None:
+            res = await db.execute(text(f"""
+                WITH agg AS (
+                    SELECT normalize_app_name(ae.app_name) AS app_name,
+                        SUM(ae.duration) AS total_secs,
+                        COUNT(DISTINCT d.employee_id) AS users
+                    FROM activity_events ae
+                    JOIN devices d ON d.id = ae.device_id
+                    WHERE d.company_id = :company_id
+                      AND ae.event_type = 'window_change'
+                      AND ae.app_name IS NOT NULL
+                      AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                      {combined}
+                    GROUP BY normalize_app_name(ae.app_name)
+                ),
+                tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM agg)
+                SELECT a.app_name, a.total_secs, a.users,
+                       ROUND(100.0 * a.total_secs / t.t, 1) AS pct
+                FROM agg a, tot t
+                ORDER BY a.total_secs DESC
+                LIMIT :limit
+            """), params)
+            rows = res.fetchall()
 
-    prod_map = await _productivity_map(admin.company_id, db)
+        prod_map = await _productivity_map(company_uuid, db)
 
-    items: list[AppUsageItem] = []
-    for r in rows:
-        match = prod_map.get(r.app_name)
-        prod, cat_name, color = match if match else ("neutral", None, "#94a3b8")
-        if productivity and prod != productivity:
-            continue
-        items.append(AppUsageItem(
-            app_name=r.app_name, duration_secs=int(r.total_secs or 0),
-            user_count=int(r.users or 0), pct=float(r.pct or 0),
-            productivity=prod, category_name=cat_name, color=color,
-        ))
+        items: list[AppUsageItem] = []
+        for r in rows:
+            match = prod_map.get(r.app_name)
+            prod, cat_name, color = match if match else ("neutral", None, "#94a3b8")
+            if productivity and prod != productivity:
+                continue
+            items.append(AppUsageItem(
+                app_name=r.app_name, duration_secs=int(r.total_secs or 0),
+                user_count=int(r.users or 0), pct=float(r.pct or 0),
+                productivity=prod, category_name=cat_name, color=color,
+            ))
 
-    _result = AppUsageListOut(
-        items=items,
-        total_secs=sum(i.duration_secs for i in items),
-        total_apps=len(items),
-        total_users=0,
-    )
-    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-    return _result
+        _result = AppUsageListOut(
+            items=items,
+            total_secs=sum(i.duration_secs for i in items),
+            total_apps=len(items),
+            total_users=0,
+        )
+        return _result.model_dump()
+
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 @router.get("/apps/detail", response_model=AppUsageDetailOut)
@@ -1488,6 +1676,7 @@ async def app_usage_detail(
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     group_id:    Optional[str] = Query(default=None),
     employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1495,81 +1684,86 @@ async def app_usage_detail(
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
     emp_clause,   emp_params   = _employee_clause(employee_id)
-    combined = scope_clause + grp_clause + emp_clause
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
-              "app_name": app_name, **scope_params, **grp_params, **emp_params}
+              "app_name": app_name, **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}"
+    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}"
+    # Hoisted to plain values BEFORE _compute closes over them: the background
+    # refresh runs on a different session, and touching an ORM-bound `admin`
+    # there raises MissingGreenlet once the request session has gone.
+    cid, company_uuid = str(admin.company_id), admin.company_id
     _ckey = ("tech:app_detail", str(admin.company_id), _scope_fp, app_name, tab, str(since_dt), str(until_dt))
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    out = AppUsageDetailOut(app_name=app_name)
+    async def _compute(db):
+        out = AppUsageDetailOut(app_name=app_name)
 
-    if tab == "titles":
-        res = await db.execute(text(f"""
-            SELECT ae.window_title AS title, SUM(ae.duration) AS total_secs
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND normalize_app_name(ae.app_name) = :app_name
-              AND ae.window_title IS NOT NULL AND ae.window_title <> ''
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-            GROUP BY ae.window_title
-            ORDER BY total_secs DESC LIMIT 50
-        """), params)
-        rows = res.fetchall()
-        total = sum(r.total_secs for r in rows) or 1
-        out.titles = [
-            AppUsageDetailTitle(title=r.title, duration_secs=int(r.total_secs or 0),
-                                pct=round(100.0 * (r.total_secs or 0) / total, 1))
-            for r in rows
-        ]
+        if tab == "titles":
+            res = await db.execute(text(f"""
+                SELECT ae.window_title AS title, SUM(ae.duration) AS total_secs
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND normalize_app_name(ae.app_name) = :app_name
+                  AND ae.window_title IS NOT NULL AND ae.window_title <> ''
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {combined}
+                GROUP BY ae.window_title
+                ORDER BY total_secs DESC LIMIT 50
+            """), params)
+            rows = res.fetchall()
+            total = sum(r.total_secs for r in rows) or 1
+            out.titles = [
+                AppUsageDetailTitle(title=r.title, duration_secs=int(r.total_secs or 0),
+                                    pct=round(100.0 * (r.total_secs or 0) / total, 1))
+                for r in rows
+            ]
 
-    elif tab == "users":
-        res = await db.execute(text(f"""
-            SELECT e.name, e.email, SUM(ae.duration) AS total_secs
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            JOIN employees e ON e.id = d.employee_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND normalize_app_name(ae.app_name) = :app_name
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-            GROUP BY e.name, e.email
-            ORDER BY total_secs DESC LIMIT 50
-        """), params)
-        rows = res.fetchall()
-        total = sum(r.total_secs for r in rows) or 1
-        out.users = [
-            AppUsageDetailUser(name=r.name, duration_secs=int(r.total_secs or 0),
-                               pct=round(100.0 * (r.total_secs or 0) / total, 1))
-            for r in rows
-        ]
+        elif tab == "users":
+            res = await db.execute(text(f"""
+                SELECT e.name, e.email, SUM(ae.duration) AS total_secs
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                JOIN employees e ON e.id = d.employee_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND normalize_app_name(ae.app_name) = :app_name
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {combined}
+                GROUP BY e.name, e.email
+                ORDER BY total_secs DESC LIMIT 50
+            """), params)
+            rows = res.fetchall()
+            total = sum(r.total_secs for r in rows) or 1
+            out.users = [
+                AppUsageDetailUser(name=r.name, duration_secs=int(r.total_secs or 0),
+                                   pct=round(100.0 * (r.total_secs or 0) / total, 1))
+                for r in rows
+            ]
 
-    elif tab == "usage":
-        res = await db.execute(text(f"""
-            SELECT DATE(ae.timestamp) AS day, SUM(ae.duration) AS total_secs
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND normalize_app_name(ae.app_name) = :app_name
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-            GROUP BY day ORDER BY day ASC
-        """), params)
-        out.usage = [
-            AppUsageDetailPoint(date=str(r.day), duration_secs=int(r.total_secs or 0))
-            for r in res.fetchall()
-        ]
+        elif tab == "usage":
+            res = await db.execute(text(f"""
+                SELECT DATE(ae.timestamp) AS day, SUM(ae.duration) AS total_secs
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND normalize_app_name(ae.app_name) = :app_name
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {combined}
+                GROUP BY day ORDER BY day ASC
+            """), params)
+            out.usage = [
+                AppUsageDetailPoint(date=str(r.day), duration_secs=int(r.total_secs or 0))
+                for r in res.fetchall()
+            ]
 
-    await cache_set(_ckey, out.model_dump(), fresh_secs=FRESH_DETAIL, stale_secs=STALE_DETAIL)
-    return out
+        return out.model_dump()
+
+    return await cached_or_compute(_ckey, _compute, db,
+                                   fresh=FRESH_DETAIL, stale=STALE_DETAIL)
 
 
 # ── Category Usage ────────────────────────────────────────────────────────────
@@ -1579,7 +1773,9 @@ async def category_usage_list(
     days:     int           = Query(default=30, ge=1, le=365),
     since_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
-    group_id: Optional[str] = Query(default=None),
+    group_id:    Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1587,100 +1783,103 @@ async def category_usage_list(
     await _ensure_default_categories(admin.company_id, db)
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
-    combined = scope_clause + grp_clause
-    cid = str(admin.company_id)  # hoisted before cache helpers (rollback safety)
+    emp_clause,   emp_params   = _employee_clause(employee_id)
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
+    # Hoisted to plain values BEFORE _compute closes over them (see tech_summary).
+    cid, company_uuid = str(admin.company_id), admin.company_id
     params = {"company_id": cid, "since_dt": since_dt, "until_dt": until_dt,
-              **scope_params, **grp_params}
+              **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}"
+    _scope_fp = ("all" if not combined
+                 else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}")
     _ckey = ("tech:cat_usage", cid, _scope_fp, str(since_dt), str(until_dt))
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    # Fast path: full-scope admin with no group filter reads the per-category
-    # daily cache instead of two aggregation scans over the range.
-    if not combined:
-        from app.core import tech_cache
-        cached_rows = await tech_cache.category_usage_from_cache(db, cid, since_dt, until_dt)
-        if cached_rows is not None:
-            items = [
-                CategoryUsageItem(
-                    cat_id=r.cat_id, name=r.name, color=r.color,
-                    duration_secs=int(r.total_secs or 0),
-                    user_count=int(r.users or 0),
-                    pct=float(r.pct or 0),
+    async def _compute(db):
+        # Fast path: full-scope admin with no group filter reads the per-category
+        # daily cache instead of two aggregation scans over the range.
+        if not combined:
+            from app.core import tech_cache
+            cached_rows = await tech_cache.category_usage_from_cache(db, cid, since_dt, until_dt)
+            if cached_rows is not None:
+                items = [
+                    CategoryUsageItem(
+                        cat_id=r.cat_id, name=r.name, color=r.color,
+                        duration_secs=int(r.total_secs or 0),
+                        user_count=int(r.users or 0),
+                        pct=float(r.pct or 0),
+                    )
+                    for r in cached_rows
+                ]
+                _result = CategoryUsageListOut(
+                    items=items,
+                    total_secs=sum(i.duration_secs for i in items),
+                    total_users=max((i.user_count for i in items), default=0),
                 )
-                for r in cached_rows
-            ]
-            _result = CategoryUsageListOut(
-                items=items,
-                total_secs=sum(i.duration_secs for i in items),
-                total_users=max((i.user_count for i in items), default=0),
+                return _result.model_dump()
+
+        res = await db.execute(text(f"""
+            WITH categorized AS (
+                SELECT c.id::text AS cat_id, c.name, c.color,
+                    SUM(ae.duration) AS total_secs,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
+                    AND r.company_id = d.company_id
+                JOIN app_categories c ON c.id = r.category_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  {combined}
+                GROUP BY c.id, c.name, c.color
+            ),
+            uncategorized AS (
+                SELECT NULL::text AS cat_id, 'Uncategorized' AS name,
+                       '#94a3b8' AS color,
+                    SUM(ae.duration) AS total_secs,
+                    COUNT(DISTINCT d.employee_id) AS users
+                FROM activity_events ae
+                JOIN devices d ON d.id = ae.device_id
+                WHERE d.company_id = :company_id
+                  AND ae.event_type = 'window_change'
+                  AND ae.app_name IS NOT NULL
+                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM app_category_rules r2
+                      WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
+                  )
+                  {combined}
+                GROUP BY name, color
+                HAVING SUM(ae.duration) > 0
+            ),
+            combined AS (SELECT * FROM categorized UNION ALL SELECT * FROM uncategorized),
+            tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM combined)
+            SELECT c.cat_id, c.name, c.color, c.total_secs, c.users,
+                   ROUND(100.0 * c.total_secs / t.t, 1) AS pct
+            FROM combined c, tot t
+            ORDER BY c.total_secs DESC
+        """), params)
+
+        items = [
+            CategoryUsageItem(
+                cat_id=r.cat_id, name=r.name, color=r.color,
+                duration_secs=int(r.total_secs or 0),
+                user_count=int(r.users or 0),
+                pct=float(r.pct or 0),
             )
-            await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-            return _result
-
-    res = await db.execute(text(f"""
-        WITH categorized AS (
-            SELECT c.id::text AS cat_id, c.name, c.color,
-                SUM(ae.duration) AS total_secs,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
-                AND r.company_id = d.company_id
-            JOIN app_categories c ON c.id = r.category_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-            GROUP BY c.id, c.name, c.color
-        ),
-        uncategorized AS (
-            SELECT NULL::text AS cat_id, 'Uncategorized' AS name,
-                   '#94a3b8' AS color,
-                SUM(ae.duration) AS total_secs,
-                COUNT(DISTINCT d.employee_id) AS users
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              AND NOT EXISTS (
-                  SELECT 1 FROM app_category_rules r2
-                  WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
-              )
-              {combined}
-            GROUP BY name, color
-            HAVING SUM(ae.duration) > 0
-        ),
-        combined AS (SELECT * FROM categorized UNION ALL SELECT * FROM uncategorized),
-        tot AS (SELECT NULLIF(SUM(total_secs), 0) AS t FROM combined)
-        SELECT c.cat_id, c.name, c.color, c.total_secs, c.users,
-               ROUND(100.0 * c.total_secs / t.t, 1) AS pct
-        FROM combined c, tot t
-        ORDER BY c.total_secs DESC
-    """), params)
-
-    items = [
-        CategoryUsageItem(
-            cat_id=r.cat_id, name=r.name, color=r.color,
-            duration_secs=int(r.total_secs or 0),
-            user_count=int(r.users or 0),
-            pct=float(r.pct or 0),
+            for r in res.fetchall()
+        ]
+        _result = CategoryUsageListOut(
+            items=items,
+            total_secs=sum(i.duration_secs for i in items),
+            total_users=max((i.user_count for i in items), default=0),
         )
-        for r in res.fetchall()
-    ]
-    _result = CategoryUsageListOut(
-        items=items,
-        total_secs=sum(i.duration_secs for i in items),
-        total_users=max((i.user_count for i in items), default=0),
-    )
-    await cache_set(_ckey, _result.model_dump(), fresh_secs=FRESH_ANALYTICS, stale_secs=STALE_ANALYTICS)
-    return _result
+        return _result.model_dump()
+
+    fresh, stale = ttl_for_range(until_dt)
+    return await cached_or_compute(_ckey, _compute, db, fresh=fresh, stale=stale)
 
 
 @router.get("/category-usage/detail", response_model=CategoryUsageDetailOut)
@@ -1690,72 +1889,48 @@ async def category_usage_detail(
     days:     int            = Query(default=30, ge=1, le=365),
     since_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
     until_date:  Optional[str] = Query(default=None, description="YYYY-MM-DD"),
-    group_id: Optional[str] = Query(default=None),
+    group_id:    Optional[str] = Query(default=None),
+    employee_id: Optional[str] = Query(default=None),
+    device_id:   Optional[str] = Query(default=None),
     admin: Employee = Depends(require("tech", "view")),
     db: AsyncSession = Depends(get_db),
 ):
     since_dt, until_dt = _resolve_dates(days, since_date, until_date)
     scope_clause, scope_params = await _scope_clause(admin, db)
     grp_clause,   grp_params   = await _group_clause(group_id, admin.company_id, db)
-    combined = scope_clause + grp_clause
+    emp_clause,   emp_params   = _employee_clause(employee_id)
+    dev_clause,   dev_params   = _device_clause(device_id)
+    combined = scope_clause + grp_clause + emp_clause + dev_clause
     params = {"company_id": str(admin.company_id), "since_dt": since_dt, "until_dt": until_dt,
-              **scope_params, **grp_params}
+              **scope_params, **grp_params, **emp_params, **dev_params}
 
-    _scope_fp = "all" if not combined else f"{admin.id}:{group_id or ''}"
+    _scope_fp = ("all" if not combined
+                 else f"{admin.id}:{group_id or ''}:{employee_id or ''}:{device_id or ''}")
+    # Hoisted to plain values BEFORE _compute closes over them: the background
+    # refresh runs on a different session, and touching an ORM-bound `admin`
+    # there raises MissingGreenlet once the request session has gone.
+    cid, company_uuid = str(admin.company_id), admin.company_id
     _ckey = ("tech:cat_detail", str(admin.company_id), _scope_fp, cat_id or "", tab, str(since_dt), str(until_dt))
-    _cached, _ = await cache_get(_ckey)
-    if _cached is not None:
-        return _cached
 
-    # Resolve category name + color
-    if cat_id:
-        cat_res = await db.execute(text(
-            "SELECT name, color FROM app_categories WHERE id = :cid AND company_id = :company_id"
-        ), {"cid": cat_id, "company_id": str(admin.company_id)})
-        cat_row = cat_res.fetchone()
-        if not cat_row:
-            raise HTTPException(status_code=404, detail="Category not found")
-        cat_name, cat_color = cat_row.name, cat_row.color
-    else:
-        cat_name, cat_color = "Uncategorized", "#94a3b8"
-
-    out = CategoryUsageDetailOut(cat_id=cat_id, name=cat_name, color=cat_color, total_secs=0)
-
-    # Total secs for this category
-    if cat_id:
-        tot_res = await db.execute(text(f"""
-            SELECT COALESCE(SUM(ae.duration), 0) AS total_secs
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
-                AND r.company_id = d.company_id
-            WHERE d.company_id = :company_id
-              AND r.category_id = :cat_id
-              AND ae.event_type = 'window_change'
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              {combined}
-        """), {**params, "cat_id": cat_id})
-    else:
-        tot_res = await db.execute(text(f"""
-            SELECT COALESCE(SUM(ae.duration), 0) AS total_secs
-            FROM activity_events ae
-            JOIN devices d ON d.id = ae.device_id
-            WHERE d.company_id = :company_id
-              AND ae.event_type = 'window_change'
-              AND ae.app_name IS NOT NULL
-              AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-              AND NOT EXISTS (
-                  SELECT 1 FROM app_category_rules r2
-                  WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
-              )
-              {combined}
-        """), params)
-    out.total_secs = int(tot_res.fetchone().total_secs or 0)
-
-    if tab == "activities":
+    async def _compute(db):
+        # Resolve category name + color
         if cat_id:
-            res = await db.execute(text(f"""
-                SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS total_secs
+            cat_res = await db.execute(text(
+                "SELECT name, color FROM app_categories WHERE id = :cid AND company_id = :company_id"
+            ), {"cid": cat_id, "company_id": cid})
+            cat_row = cat_res.fetchone()
+            if not cat_row:
+                raise HTTPException(status_code=404, detail="Category not found")
+            cat_name, cat_color = cat_row.name, cat_row.color
+        else:
+            cat_name, cat_color = "Uncategorized", "#94a3b8"
+
+        out = CategoryUsageDetailOut(cat_id=cat_id, name=cat_name, color=cat_color, total_secs=0)
+
+        # Total secs for this category
+        if cat_id:
+            tot_res = await db.execute(text(f"""
+                SELECT COALESCE(SUM(ae.duration), 0) AS total_secs
                 FROM activity_events ae
                 JOIN devices d ON d.id = ae.device_id
                 JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
@@ -1765,11 +1940,10 @@ async def category_usage_detail(
                   AND ae.event_type = 'window_change'
                   AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
                   {combined}
-                GROUP BY normalize_app_name(ae.app_name) ORDER BY total_secs DESC LIMIT 50
             """), {**params, "cat_id": cat_id})
         else:
-            res = await db.execute(text(f"""
-                SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS total_secs
+            tot_res = await db.execute(text(f"""
+                SELECT COALESCE(SUM(ae.duration), 0) AS total_secs
                 FROM activity_events ae
                 JOIN devices d ON d.id = ae.device_id
                 WHERE d.company_id = :company_id
@@ -1781,56 +1955,90 @@ async def category_usage_detail(
                       WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
                   )
                   {combined}
-                GROUP BY normalize_app_name(ae.app_name) ORDER BY total_secs DESC LIMIT 50
             """), params)
-        rows = res.fetchall()
-        total = out.total_secs or 1
-        out.activities = [
-            CategoryDetailActivity(app_name=r.app_name, duration_secs=int(r.total_secs or 0),
+        out.total_secs = int(tot_res.fetchone().total_secs or 0)
+
+        if tab == "activities":
+            if cat_id:
+                res = await db.execute(text(f"""
+                    SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS total_secs
+                    FROM activity_events ae
+                    JOIN devices d ON d.id = ae.device_id
+                    JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
+                        AND r.company_id = d.company_id
+                    WHERE d.company_id = :company_id
+                      AND r.category_id = :cat_id
+                      AND ae.event_type = 'window_change'
+                      AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                      {combined}
+                    GROUP BY normalize_app_name(ae.app_name) ORDER BY total_secs DESC LIMIT 50
+                """), {**params, "cat_id": cat_id})
+            else:
+                res = await db.execute(text(f"""
+                    SELECT normalize_app_name(ae.app_name) AS app_name, SUM(ae.duration) AS total_secs
+                    FROM activity_events ae
+                    JOIN devices d ON d.id = ae.device_id
+                    WHERE d.company_id = :company_id
+                      AND ae.event_type = 'window_change'
+                      AND ae.app_name IS NOT NULL
+                      AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM app_category_rules r2
+                          WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
+                      )
+                      {combined}
+                    GROUP BY normalize_app_name(ae.app_name) ORDER BY total_secs DESC LIMIT 50
+                """), params)
+            rows = res.fetchall()
+            total = out.total_secs or 1
+            out.activities = [
+                CategoryDetailActivity(app_name=r.app_name, duration_secs=int(r.total_secs or 0),
+                                       pct=round(100.0 * (r.total_secs or 0) / total, 1))
+                for r in rows
+            ]
+
+        elif tab == "users":
+            if cat_id:
+                res = await db.execute(text(f"""
+                    SELECT e.name, e.email, SUM(ae.duration) AS total_secs
+                    FROM activity_events ae
+                    JOIN devices d ON d.id = ae.device_id
+                    JOIN employees e ON e.id = d.employee_id
+                    JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
+                        AND r.company_id = d.company_id
+                    WHERE d.company_id = :company_id
+                      AND r.category_id = :cat_id
+                      AND ae.event_type = 'window_change'
+                      AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                      {combined}
+                    GROUP BY e.name, e.email ORDER BY total_secs DESC LIMIT 100
+                """), {**params, "cat_id": cat_id})
+            else:
+                res = await db.execute(text(f"""
+                    SELECT e.name, e.email, SUM(ae.duration) AS total_secs
+                    FROM activity_events ae
+                    JOIN devices d ON d.id = ae.device_id
+                    JOIN employees e ON e.id = d.employee_id
+                    WHERE d.company_id = :company_id
+                      AND ae.event_type = 'window_change'
+                      AND ae.app_name IS NOT NULL
+                      AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM app_category_rules r2
+                          WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
+                      )
+                      {combined}
+                    GROUP BY e.name, e.email ORDER BY total_secs DESC LIMIT 100
+                """), params)
+            rows = res.fetchall()
+            total = out.total_secs or 1
+            out.users = [
+                CategoryDetailUser(name=r.name, email=r.email, duration_secs=int(r.total_secs or 0),
                                    pct=round(100.0 * (r.total_secs or 0) / total, 1))
-            for r in rows
-        ]
+                for r in rows
+            ]
 
-    elif tab == "users":
-        if cat_id:
-            res = await db.execute(text(f"""
-                SELECT e.name, e.email, SUM(ae.duration) AS total_secs
-                FROM activity_events ae
-                JOIN devices d ON d.id = ae.device_id
-                JOIN employees e ON e.id = d.employee_id
-                JOIN app_category_rules r ON r.app_pattern = normalize_app_name(ae.app_name)
-                    AND r.company_id = d.company_id
-                WHERE d.company_id = :company_id
-                  AND r.category_id = :cat_id
-                  AND ae.event_type = 'window_change'
-                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-                  {combined}
-                GROUP BY e.name, e.email ORDER BY total_secs DESC LIMIT 100
-            """), {**params, "cat_id": cat_id})
-        else:
-            res = await db.execute(text(f"""
-                SELECT e.name, e.email, SUM(ae.duration) AS total_secs
-                FROM activity_events ae
-                JOIN devices d ON d.id = ae.device_id
-                JOIN employees e ON e.id = d.employee_id
-                WHERE d.company_id = :company_id
-                  AND ae.event_type = 'window_change'
-                  AND ae.app_name IS NOT NULL
-                  AND ae.timestamp >= CAST(:since_dt AS date) AND ae.timestamp < (CAST(:until_dt AS date) + INTERVAL '1 day')
-                  AND NOT EXISTS (
-                      SELECT 1 FROM app_category_rules r2
-                      WHERE r2.company_id = d.company_id AND r2.app_pattern = normalize_app_name(ae.app_name)
-                  )
-                  {combined}
-                GROUP BY e.name, e.email ORDER BY total_secs DESC LIMIT 100
-            """), params)
-        rows = res.fetchall()
-        total = out.total_secs or 1
-        out.users = [
-            CategoryDetailUser(name=r.name, email=r.email, duration_secs=int(r.total_secs or 0),
-                               pct=round(100.0 * (r.total_secs or 0) / total, 1))
-            for r in rows
-        ]
+        return out.model_dump()
 
-    await cache_set(_ckey, out.model_dump(), fresh_secs=FRESH_DETAIL, stale_secs=STALE_DETAIL)
-    return out
+    return await cached_or_compute(_ckey, _compute, db,
+                                   fresh=FRESH_DETAIL, stale=STALE_DETAIL)

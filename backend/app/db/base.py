@@ -18,13 +18,18 @@ def _make_engine(pool_size: int, max_overflow: int, statement_timeout_ms: int | 
     connect_args: dict = {
         "timeout": 10,  # seconds before giving up on establishing a new connection
     }
+    # Pin the session timezone to UTC on EVERY engine: report day-bucketing
+    # (date_trunc / ::date / CURRENT_DATE) assumes UTC, and a server/role default
+    # of another zone would silently shift those buckets.
+    server_settings: dict[str, str] = {"timezone": "UTC"}
     if statement_timeout_ms:
         # Session-level ceiling on every statement from this pool. A runaway
         # analytics query can otherwise pin a pooled connection for minutes and
         # convoy every other request. Workers that legitimately need longer set
         # their own `SET LOCAL statement_timeout` inside their transaction, and
         # the migration runner resets it to 0 on its raw connections.
-        connect_args["server_settings"] = {"statement_timeout": str(statement_timeout_ms)}
+        server_settings["statement_timeout"] = str(statement_timeout_ms)
+    connect_args["server_settings"] = server_settings
     return create_async_engine(
         settings.DATABASE_URL,
         echo=False,
@@ -43,14 +48,18 @@ def _make_engine(pool_size: int, max_overflow: int, statement_timeout_ms: int | 
     )
 
 
-# Two ISOLATED pools so background ingest writes can never starve the
-# connection an HTTP request needs for its auth lookup (and vice versa).
-# Per-task connection budget = (DB_POOL_SIZE + DB_MAX_OVERFLOW)
-#                            + (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW);
+# Three ISOLATED pools so neither background ingest writes nor the singleton
+# cache workers / report jobs can starve the connection an HTTP request needs
+# for its auth lookup (and vice versa).
+# Per-worker connection budget = (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+#                              + (INGEST_DB_POOL_SIZE + INGEST_DB_MAX_OVERFLOW)
+#                              + (BACKGROUND_DB_POOL_SIZE + BACKGROUND_DB_MAX_OVERFLOW);
 # keep 2x that under the DB max_connections to survive rolling deploys.
 engine = _make_engine(settings.DB_POOL_SIZE, settings.DB_MAX_OVERFLOW,
                       statement_timeout_ms=settings.DB_STATEMENT_TIMEOUT_MS)
 ingest_engine = _make_engine(settings.INGEST_DB_POOL_SIZE, settings.INGEST_DB_MAX_OVERFLOW)
+background_engine = _make_engine(settings.BACKGROUND_DB_POOL_SIZE, settings.BACKGROUND_DB_MAX_OVERFLOW,
+                                 statement_timeout_ms=settings.DB_STATEMENT_TIMEOUT_MS)
 
 AsyncSessionLocal = async_sessionmaker(
     engine,
@@ -61,6 +70,13 @@ AsyncSessionLocal = async_sessionmaker(
 # Sessions for the ingest worker pool — bound to the dedicated writer engine.
 IngestSessionLocal = async_sessionmaker(
     ingest_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+# Sessions for singleton background loops and report-job workers.
+BackgroundSessionLocal = async_sessionmaker(
+    background_engine,
     class_=AsyncSession,
     expire_on_commit=False,
 )
@@ -127,7 +143,58 @@ async def init_db() -> None:
     _startup_task = asyncio.create_task(_migrate_and_seed())
 
 
+# Arbitrary constant key for the cross-process migration/seed advisory lock.
+_MIGRATION_LOCK_KEY = 0x7474_6D69_6772   # "ttmigr"
+_MIGRATION_LOCK_POLL_SECS = 2.0
+
+
 async def _migrate_and_seed() -> None:
+    """Serialize migrations + seeds across workers/replicas, then run them.
+
+    Every uvicorn worker (and every replica) runs this at boot. Without mutual
+    exclusion two processes would apply the same pending file concurrently (DDL
+    races, duplicate seeds). A Postgres SESSION advisory lock on a dedicated
+    connection makes the first process do the work while the others poll
+    `pg_try_advisory_lock` (NOT a blocking `pg_advisory_lock`: the pool's
+    statement_timeout would cancel a long wait) and then find everything
+    already applied — a no-op. The lock is always explicitly released and, if
+    that fails, the connection is invalidated so a pooled connection can never
+    carry the lock back into the pool. The lock connection is the only extra
+    one held (pool = 3 + 2), the work itself uses the others.
+    """
+    waited = False
+    async with engine.connect() as lock_conn:
+        try:
+            while True:
+                got = (await lock_conn.execute(
+                    text("SELECT pg_try_advisory_lock(:k)"), {"k": _MIGRATION_LOCK_KEY}
+                )).scalar()
+                if got:
+                    break
+                if not waited:
+                    log.info("Migrations: another process holds the migration lock — waiting")
+                    waited = True
+                await lock_conn.rollback()      # don't sit idle-in-transaction while polling
+                await asyncio.sleep(_MIGRATION_LOCK_POLL_SECS)
+            await lock_conn.rollback()
+            await _migrate_and_seed_locked()
+        finally:
+            try:
+                await lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(:k)"), {"k": _MIGRATION_LOCK_KEY})
+                await lock_conn.rollback()
+            except BaseException as exc:  # noqa: BLE001 — incl. cancellation at shutdown
+                log.warning("Migrations: advisory unlock failed (%s) — invalidating connection",
+                            type(exc).__name__)
+                try:
+                    await lock_conn.invalidate()   # server drops the session lock with the connection
+                except Exception:  # noqa: BLE001
+                    pass
+                if not isinstance(exc, Exception):
+                    raise
+
+
+async def _migrate_and_seed_locked() -> None:
     """Apply pending *.sql migrations, then run idempotent startup seeds.
 
     Applied files are recorded in schema_migrations so a restart executes ZERO

@@ -25,6 +25,16 @@ feature lives on one page but calls another module's API, gate it on the module
 that owns the API (report buttons on the Devices page check `reports:view`).
 See "RBAC" in `docs/CODEBASE_GUIDE.md` for the full rule.
 
+**The one deliberate exception: Super-Admin impersonation.** It has NO
+`(module, action)` pair, on purpose. A grantable permission is a permission
+someone can hand out, and "act as any employee" must not be delegable — so it is
+gated structurally instead (`role_obj.scope_type == "all" and role_obj.is_system`,
+via `require_super_admin` in `app/api/deps.py`). Because there is no pair, nothing
+about the feature appears in the Roles UI, and `/v1/auth/me` exposes a
+`can_impersonate` boolean so the dashboard can hide the entry entirely rather
+than render something that 403s. Do not "fix" this by adding a permission pair —
+see `app/core/impersonation.py` for the reasoning.
+
 ## Git versioning — Conventional Commits + Semantic Versioning (REQUIRED)
 
 Every commit in this repo MUST be a Conventional Commit, enforced by a `commit-msg` Husky hook
@@ -69,3 +79,24 @@ fix the message instead.
 - A commit that includes a breaking change MUST carry `!` after the type/scope or a `BREAKING CHANGE:` footer — don't skip this even if the user didn't mention "breaking".
 - Body/footer (e.g. `Co-Authored-By:`) still applies per the harness's own commit instructions — Conventional Commits only constrains the header line and optional footers, it doesn't replace the rest of the commit message conventions already in force.
 - If the `commit-msg` hook rejects the message, treat that as a real validation failure to fix (reword and recommit), not an obstacle to bypass.
+
+### Bitbucket PR check — branch must not lag `master` (STANDING RULE)
+
+Bitbucket runs a **"No commits behind the destination branch"** check on PRs into `master`,
+and it fails when the source branch is more than a trivial number of commits behind. Every
+push to a dev/feature branch must therefore leave the branch **rebased onto the tip of
+`origin/master` and exactly 1 commit ahead of it** (squash the branch's work into a single
+Conventional Commit if there are several — the user has explicitly asked for one commit
+ahead, repeatedly). The full sequence after committing:
+
+1. `git fetch origin`
+2. `git rebase origin/master` — resolve conflicts carefully if any appear; never abort and
+   never paper over a bad rebase with `--force`.
+3. Verify with `git rev-list --count origin/master..<branch>` → must be `1`
+   (and `git rev-list --count <branch>..origin/master` → must be `0`).
+4. `git push --force-with-lease origin <branch>` — the rebase rewrites history, so a
+   force-push is required and expected here; `--force-with-lease` guards against
+   clobbering anyone else's concurrent push.
+
+This applies to **every** commit/push on a PR branch, not just the first one — if
+`origin/master` has moved again since the last push, rebase and force-push once more.
